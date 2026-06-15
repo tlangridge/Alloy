@@ -183,6 +183,25 @@ class AlloyTests(unittest.TestCase):
                 with open(path) as f:
                     self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ", f.read())
 
+    def test_duplicate_panelists_deduped(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "codex,codex"])
+        names = [p["name"] for p in m["panelists"]]
+        self.assertEqual(names, ["codex"])
+
+    def test_prompt_too_large_rejected(self):
+        big = os.path.join(self.tmp, "big.txt")
+        with open(big, "w") as f:
+            f.write("x" * 50)
+        proc = run_alloy(["panel", "--prompt-file", big],
+                         env_extra={"ALLOY_MAX_PROMPT_BYTES": "10"})
+        self.assertEqual(proc.returncode, 2)
+
+    def test_run_artifacts_have_restrictive_perms(self):
+        _proc, m = panel(self.tmp)
+        self.assertEqual(os.stat(m["run_dir"]).st_mode & 0o777, 0o700)
+        result = by_name(m, "codex")["result_path"]
+        self.assertEqual(os.stat(result).st_mode & 0o777, 0o600)
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the
@@ -237,6 +256,17 @@ class RedactionUnitTests(unittest.TestCase):
         self.assertNotIn("\x1b]", cleaned)
         self.assertIn("hello", cleaned)
         self.assertIn("link", cleaned)
+
+    def test_assignment_preserves_quotes(self):
+        out, n = self.f.redact_secrets('API_KEY="sk-proj-ABCDEFGHIJKLMNOP"')
+        self.assertEqual(n, 1)
+        self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOP", out)
+        self.assertIn('API_KEY="[REDACTED]"', out)  # operator + both quotes kept
+
+    def test_strip_osc_across_newline(self):
+        cleaned = self.f.strip_ansi("\x1b]8;;http://x\nmore\x1b\\end")
+        self.assertNotIn("\x1b]", cleaned)
+        self.assertIn("end", cleaned)
 
 
 if __name__ == "__main__":

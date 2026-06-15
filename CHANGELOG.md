@@ -48,6 +48,18 @@ Fixes that landed from it:
 - `strip_ansi` also strips OSC sequences (clipboard / hyperlink escapes).
 - Timeout / max-chars are validated; relative run roots are made absolute.
 
+A second pass (alloy reviewing its own source) added:
+- Refuse a panelist binary that PATH resolved from inside the current working
+  directory (PATH-shadowing guard) unless an explicit absolute `ALLOY_BIN_<NAME>`.
+- Bounded prompt ingestion (`ALLOY_MAX_PROMPT_BYTES`, default 4 MB) for both
+  `--prompt-file` and stdin; clear error if a prompt file is missing.
+- Fail fast (not hang) when `alloy panel` is run in a TTY with no prompt.
+- Run dirs are `0700` and all run artifacts `0600`.
+- Redaction preserves the assignment operator and quotes (valid syntax for the
+  host), and `secrets_redacted` now counts sidecar redactions too.
+- `--approval-mode plan` group kill always escalates to `SIGKILL` (reaps forked
+  daemons); duplicate panelist names are de-duped; OSC stripping is newline-safe.
+
 ### Deliberately out of scope (roadmap)
 - Panelists writing code (opt-in, isolated git worktree).
 - Auto-running builds in the TEST stage beyond the project's own command.

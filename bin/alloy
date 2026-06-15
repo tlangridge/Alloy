@@ -55,6 +55,7 @@ MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 240
 DEFAULT_MAX_CHARS = 200_000
+DEFAULT_MAX_PROMPT_BYTES = 4_000_000  # cap prompt ingestion so a huge file/stdin can't OOM
 TRUNCATION_MARKER = "\n\n[... alloy: output truncated at {n} characters ...]\n"
 
 # Track spawned process groups so we can clean them up on SIGINT/SIGTERM.
@@ -82,11 +83,28 @@ def log(msg: str) -> None:
         sys.stderr.flush()
 
 
+def _chmod(path: str, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def write_atomic(path: str, data: str) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(data)
+    _chmod(tmp, 0o600)  # run artifacts may hold prompt/diff text; replace preserves mode
     os.replace(tmp, path)
+
+
+def _is_within(path: str, base: str) -> bool:
+    """True if `path` is inside directory `base` (used to refuse a panelist
+    binary that PATH resolved from inside the current working directory)."""
+    try:
+        return os.path.commonpath([os.path.abspath(path), base]) == base
+    except ValueError:
+        return False  # different drives / not comparable
 
 
 def read_text(path: str, max_bytes: "int | None" = None) -> str:
@@ -104,7 +122,8 @@ def read_text(path: str, max_bytes: "int | None" = None) -> str:
 # hyperlinks) so a panelist cannot smuggle a terminal-control payload into the
 # saved result that fires when a user `cat`s it.
 ANSI_RE = re.compile(
-    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][0-9;]*;?.*?(?:\x07|\x1b\\))"
+    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][0-9;]*;?.*?(?:\x07|\x1b\\))",
+    re.DOTALL,  # so an OSC payload containing a newline can't slip past the stripper
 )
 
 
@@ -141,9 +160,12 @@ SECRET_PATTERNS = [
 # Name=value backstop. The name may have a suffix past the keyword
 # (AWS_SECRET_ACCESS_KEY, SECRET_KEY_BASE, DB_PASSWORD_HASH), so allow trailing
 # word chars and anchor on the assignment rather than a word boundary.
+# Captures: (1) name + operator, (2) opening quote (maybe empty), (3) value,
+# (4) matching closing quote -- so the replacement preserves the operator and
+# quotes and the redacted line stays valid syntax for the host to read.
 ASSIGNED_SECRET_RE = re.compile(
-    r"(?i)\b([A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*)"
-    r"\s*[:=]\s*['\"]?([^\s'\"]{6,})"
+    r"(?i)(\b[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*"
+    r"\s*[:=]\s*)(['\"]?)([^\s'\"]{6,})(\2)"
 )
 
 
@@ -154,10 +176,10 @@ def redact_secrets(text: str) -> "tuple[str, int]":
     # the [REDACTED:...] placeholders the value patterns below insert.
     def _sub_assigned(m: "re.Match[str]") -> str:
         nonlocal count
-        if "[REDACTED" in m.group(2):
+        if "[REDACTED" in m.group(3):
             return m.group(0)
         count += 1
-        return f"{m.group(1)}=[REDACTED]"
+        return f"{m.group(1)}{m.group(2)}[REDACTED]{m.group(4)}"
 
     text = ASSIGNED_SECRET_RE.sub(_sub_assigned, text)
 
@@ -455,7 +477,10 @@ def allow_unsandboxed() -> bool:
 # --------------------------------------------------------------------------- #
 # process-group aware execution with a portable timeout
 # --------------------------------------------------------------------------- #
-def _kill_group(pgid: int, proc: "subprocess.Popen | None" = None) -> None:
+def _kill_group(pgid: int) -> None:
+    # Always escalate SIGTERM -> SIGKILL, even if the lead process already
+    # exited: a CLI can fork a daemon into the group that ignores SIGTERM, and
+    # SIGKILL on an already-dead group is a harmless no-op (ProcessLookupError).
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
@@ -464,8 +489,6 @@ def _kill_group(pgid: int, proc: "subprocess.Popen | None" = None) -> None:
         except (PermissionError, OSError):
             pass    # transient; still try SIGKILL on the next iteration
         time.sleep(0.3)
-        if proc is not None and proc.poll() is not None:
-            return
 
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
@@ -473,6 +496,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     os.makedirs(pdir, exist_ok=True)
     cwd = os.path.join(pdir, "cwd")           # throwaway dir; never the user repo
     os.makedirs(cwd, exist_ok=True)
+    _chmod(pdir, 0o700)
+    _chmod(cwd, 0o700)
     out_path = os.path.join(pdir, "stdout.txt")
     err_path = os.path.join(pdir, "stderr.txt")
     last_path = os.path.join(pdir, "last_message.txt")
@@ -530,7 +555,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 status["timed_out"] = True
-                _kill_group(pgid, proc)
+                _kill_group(pgid)
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -562,19 +587,23 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     # Redact the raw sidecar files in place so nothing unredacted is left on
     # disk for the host (or the user) to read later. This also shrinks them.
-    write_atomic(out_path, redact_secrets(stdout_text)[0])
-    write_atomic(err_path, redact_secrets(stderr_text)[0])
+    red_out, c_out = redact_secrets(stdout_text)
+    red_err, c_err = redact_secrets(stderr_text)
+    red_last, c_last = redact_secrets(last_text)
+    write_atomic(out_path, red_out)
+    write_atomic(err_path, red_err)
     if os.path.exists(last_path):
-        write_atomic(last_path, redact_secrets(last_text)[0])
+        write_atomic(last_path, red_last)
 
     result = adapter.parse(stdout_text, stderr_text, last_text)
-    result, redactions = redact_secrets(result)   # redact BEFORE capping
+    result, c_res = redact_secrets(result)        # redact BEFORE capping
     result, truncated = cap_chars(result, max_chars)
     write_atomic(result_path, result)
 
     status["result_chars"] = len(result)
     status["truncated"] = truncated
-    status["secrets_redacted"] = redactions
+    # count redactions across everything persisted, not just result.md
+    status["secrets_redacted"] = c_res + c_out + c_err + c_last
 
     if status["timed_out"]:
         status["status"] = "timeout"
@@ -595,10 +624,24 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 # commands
 # --------------------------------------------------------------------------- #
 def cmd_panel(args: argparse.Namespace) -> int:
+    max_prompt = setting_int("ALLOY_MAX_PROMPT_BYTES", DEFAULT_MAX_PROMPT_BYTES)
     if args.prompt_file:
-        prompt = read_text(args.prompt_file)
+        if not os.path.isfile(args.prompt_file):
+            log(f"prompt file not found: {args.prompt_file}")
+            return 2
+        if os.path.getsize(args.prompt_file) > max_prompt:
+            log(f"prompt file exceeds ALLOY_MAX_PROMPT_BYTES ({max_prompt}); refusing")
+            return 2
+        prompt = read_text(args.prompt_file, max_prompt)
     else:
-        prompt = sys.stdin.read()
+        if sys.stdin.isatty():
+            log("no prompt: pass --prompt-file or pipe the prompt on stdin")
+            return 2
+        raw = sys.stdin.buffer.read(max_prompt + 1)
+        if len(raw) > max_prompt:
+            log(f"stdin prompt exceeds ALLOY_MAX_PROMPT_BYTES ({max_prompt}); refusing")
+            return 2
+        prompt = raw.decode("utf-8", errors="replace")
     if not prompt.strip():
         log("refusing to dispatch an empty prompt")
         return 2
@@ -620,7 +663,9 @@ def cmd_panel(args: argparse.Namespace) -> int:
         names = [n.strip() for n in args.panelists.split(",") if n.strip()]
     else:
         names = selected_panelists()
+    names = list(dict.fromkeys(names))   # dedupe, preserve order (avoid same-dir races)
 
+    cwd_now = os.path.abspath(os.getcwd())
     chosen: "list[Adapter]" = []
     skipped: "list[dict]" = []
     for n in names:
@@ -631,6 +676,13 @@ def cmd_panel(args: argparse.Namespace) -> int:
         if not ad.detect():
             skipped.append({"name": n, "reason": "not_installed"})
             continue
+        rb = ad.resolved_bin()
+        env_key = "ALLOY_BIN_" + n.upper().replace("-", "_")
+        if rb and not setting(env_key) and _is_within(rb, cwd_now):
+            skipped.append({"name": n, "reason": "binary resolved inside the working "
+                            f"directory (possible PATH shadowing); set {env_key} to an "
+                            "absolute path to allow"})
+            continue
         if not ad.read_only and not allow_unsandboxed():
             skipped.append({"name": n, "reason": "no read-only mode (set ALLOY_ALLOW_UNSANDBOXED=1 to permit)"})
             continue
@@ -639,6 +691,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
     run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
     run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
     os.makedirs(run_root, exist_ok=True)
+    _chmod(run_root, 0o700)
     # Belt-and-suspenders: even if a user points the run root inside a repo, keep
     # the artifacts (prompt/diff + redacted CLI output) out of version control.
     gi = os.path.join(run_root, ".gitignore")
@@ -649,6 +702,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
             pass
     run_dir = os.path.join(run_root, run_stamp() + "-" + os.urandom(3).hex())
     os.makedirs(run_dir, exist_ok=True)
+    _chmod(run_dir, 0o700)
     prompt_path = os.path.join(run_dir, "prompt.txt")
     write_atomic(prompt_path, prompt)
 

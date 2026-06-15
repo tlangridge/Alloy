@@ -166,6 +166,9 @@ so your reasoning is auditable, using this shape:
 }
 ```
 
+Write `judge.json` as **raw JSON only** — no markdown code fences, no prose
+around it — so the file parses.
+
 Anti-sycophancy rule: **agreement is not proof of correctness.** Panelists share
 training data and can be confidently wrong together. When all panelists agree but
 the reasoning is thin or you have contrary evidence, say so explicitly and lower
