@@ -36,5 +36,6 @@ echo
 echo "Panel status:"
 "$REPO_DIR/bin/alloy" doctor || true
 echo
-echo "Done. In Claude Code, try:  /alloy ask <your hard question>"
+echo "Done. RESTART Claude Code (or open a new session) so it picks up the skill,"
+echo "then try:  /alloy doctor   and   /alloy ask <your hard question>"
 echo "Optional config:  cp '$REPO_DIR/alloy.config.example' ~/.config/alloy/config"

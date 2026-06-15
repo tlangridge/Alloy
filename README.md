@@ -53,15 +53,40 @@ you only half the picture, confidently.
 
 ---
 
-## Quickstart
+## Install
+
+alloy is a Claude Code skill that lives in `~/.claude/skills/alloy/` and runs on
+Python 3 (standard library only — no `pip install`). macOS / Linux (Windows via WSL).
+
+**1. Install at least one panelist CLI** — alloy orchestrates CLIs you already
+have; it ships none of its own. Two or more is where it earns its keep:
 
 ```bash
-git clone https://github.com/tlangridge/alloy ~/.claude/skills/alloy   # or use install.sh
+npm install -g @openai/codex        # then authenticate: codex login
+npm install -g @google/gemini-cli   # then authenticate: run `gemini` once
+```
+
+**2. Install the skill — pick _one_ method:**
+
+_Recommended (clone anywhere, then symlink — keeps `git pull` updates clean):_
+
+```bash
+git clone https://github.com/tlangridge/alloy.git ~/Developer/alloy
+cd ~/Developer/alloy && ./install.sh   # symlinks into ~/.claude/skills/alloy and runs doctor
+```
+
+_Or (clone straight into the skills directory, no symlink):_
+
+```bash
+git clone https://github.com/tlangridge/alloy.git ~/.claude/skills/alloy
 ~/.claude/skills/alloy/bin/alloy doctor
 ```
 
-`doctor` is always the first command. It tells you which panelists are installed,
-which are authenticated, and exactly how to add the ones that are missing:
+Do one or the other, not both.
+
+**3. Restart Claude Code** (or open a new session) so it discovers the skill.
+Then run `doctor` first — it tells you which panelists are installed, which are
+authenticated, and exactly how to add the missing ones:
 
 ```
   [ready]  codex   codex-cli 0.139.0
@@ -69,14 +94,19 @@ which are authenticated, and exactly how to add the ones that are missing:
   [ --- ]  antigravity  (experimental, no read-only mode)
 ```
 
-Then, inside Claude Code:
+Now, inside Claude Code:
 
 ```
+/alloy doctor
 /alloy ask Should we migrate this service to event sourcing or keep CRUD? Trade-offs.
 /alloy review            # panel reviews your current git diff
 /alloy plan add rate limiting to the public API
 /alloy <a full build task>   # research -> plan -> implement -> test
 ```
+
+> **Tip:** the CLI lives at `~/.claude/skills/alloy/bin/alloy`. To call it as just
+> `alloy` (as the examples in this README do), symlink it onto your `PATH`:
+> `ln -s ~/.claude/skills/alloy/bin/alloy /usr/local/bin/alloy`.
 
 > **The prerequisite cliff, stated honestly:** alloy is only useful if you have
 > **2+** of {`codex`, `gemini`, …} installed *and authenticated*. With only Claude
