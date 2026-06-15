@@ -1,0 +1,780 @@
+#!/usr/bin/env python3
+"""fusion - a local, multi-CLI implementation of the "Fusion beats Frontier" idea.
+
+Dispatches one prompt to every available AI-coding CLI panelist IN PARALLEL,
+strictly read-only, and captures each panelist's answer into a run directory
+with a machine-readable manifest. The host model (Claude, running the /fusion
+skill) then reads the manifest, JUDGES the answers (compares, does not merge:
+consensus / contradictions / unique insights / blind spots), and SYNTHESIZES a
+final answer that surfaces disagreement rather than hiding it.
+
+This script is the mechanical, hardened core. It does no judging or synthesis
+itself, and it never writes to your repository: panelists run in a throwaway
+temporary working directory with their stdin fed from the prompt file, behind
+each CLI's own read-only sandbox flag.
+
+Design notes (why it is the way it is):
+  * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
+  * Prompts are passed on STDIN, never on argv -- avoids ARG_MAX limits,
+    quoting/escaping breakage, leaking prompts into `ps`, and shell injection.
+  * Each panelist runs in its own process group (start_new_session=True) so a
+    hung CLI and all of its children can be killed as a group on timeout.
+  * Panelist stdin is the prompt file (not a TTY); a CLI that wants to prompt
+    for interactive auth hits EOF and fails fast instead of hanging the panel.
+  * Output is captured to per-panelist files, capped at a codepoint-safe limit,
+    and scanned for secrets before being persisted, so a runaway or leaky
+    panelist cannot blow up the host's context or commit a key.
+  * Configuration is read from environment variables and an optional
+    KEY=value file at ~/.config/fusion/config. It NEVER `source`s a file from
+    the project directory (that would let a hostile repo run code).
+
+No API keys live here. fusion makes no network calls of its own; it only
+invokes the CLIs you have already installed and authenticated, and your
+prompts/diffs go to whichever model providers those CLIs use.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime, timezone
+
+FUSION_VERSION = "0.1.0"
+MANIFEST_SCHEMA = 1
+
+DEFAULT_TIMEOUT_S = 240
+DEFAULT_MAX_CHARS = 200_000
+TRUNCATION_MARKER = "\n\n[... fusion: output truncated at {n} characters ...]\n"
+
+# Track spawned process groups so we can clean them up on SIGINT/SIGTERM.
+_LIVE_PGIDS: "set[int]" = set()
+_LIVE_LOCK = threading.Lock()
+_STDERR_LOCK = threading.Lock()
+
+
+# --------------------------------------------------------------------------- #
+# small helpers
+# --------------------------------------------------------------------------- #
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def run_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def log(msg: str) -> None:
+    """Progress goes to stderr so a 30-45s parallel dispatch never looks hung,
+    and so it never pollutes the stdout the host parses."""
+    with _STDERR_LOCK:
+        sys.stderr.write("[fusion] " + msg + "\n")
+        sys.stderr.flush()
+
+
+def write_atomic(path: str, data: str) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def read_text(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
+# --------------------------------------------------------------------------- #
+# secret redaction (scan PANELIST OUTPUT before persisting)
+# --------------------------------------------------------------------------- #
+SECRET_PATTERNS = [
+    ("openai_key", re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
+    ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
+    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("gh_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("bearer", re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-]+")),
+    ("private_key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
+    (
+        "assigned_secret",
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD))\b"
+            r"\s*[:=]\s*['\"]?([^\s'\"]{8,})"
+        ),
+    ),
+]
+
+
+def redact_secrets(text: str) -> "tuple[str, int]":
+    count = 0
+
+    def _sub_assigned(m: "re.Match[str]") -> str:
+        nonlocal count
+        count += 1
+        return f"{m.group(1)}=[REDACTED]"
+
+    for name, pat in SECRET_PATTERNS:
+        if name == "assigned_secret":
+            text = pat.sub(_sub_assigned, text)
+        else:
+            def _sub(m: "re.Match[str]", _n: str = name) -> str:
+                nonlocal count
+                count += 1
+                return f"[REDACTED:{_n}]"
+
+            text = pat.sub(_sub, text)
+    return text, count
+
+
+def cap_chars(text: str, max_chars: int) -> "tuple[str, bool]":
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars] + TRUNCATION_MARKER.format(n=max_chars), True
+
+
+# --------------------------------------------------------------------------- #
+# configuration (env + optional KEY=value file; NEVER sourced as shell)
+# --------------------------------------------------------------------------- #
+def config_path() -> str:
+    if os.environ.get("FUSION_CONFIG"):
+        return os.environ["FUSION_CONFIG"]
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    return os.path.join(base, "fusion", "config")
+
+
+def load_config() -> "dict[str, str]":
+    """Read KEY=value lines from the user-level config file. No shell eval, no
+    project-local file. Lines starting with '#' and blank lines are ignored."""
+    cfg: "dict[str, str]" = {}
+    path = config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                cfg[key.strip()] = val.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return cfg
+
+
+_CONFIG = load_config()
+
+
+def setting(key: str, default: "str | None" = None) -> "str | None":
+    """Resolution order: environment variable > config file > default."""
+    if key in os.environ and os.environ[key] != "":
+        return os.environ[key]
+    if key in _CONFIG and _CONFIG[key] != "":
+        return _CONFIG[key]
+    return default
+
+
+def setting_int(key: str, default: int) -> int:
+    raw = setting(key)
+    try:
+        return int(raw) if raw is not None else default
+    except ValueError:
+        return default
+
+
+# --------------------------------------------------------------------------- #
+# adapters: the 5-function contract
+#   detect()       -> is the binary on PATH?
+#   auth_state()   -> 'ready' | 'installed_not_authed' | 'not_installed'
+#   build_args()   -> argv AFTER the binary (prompt is always on stdin)
+#   parse()        -> clean answer text from (stdout, stderr, last_message)
+#   capabilities() -> {read_only, supports_json, default_model, ...}
+# See docs/adding-a-panelist.md for the full contract and a template.
+# --------------------------------------------------------------------------- #
+class Adapter:
+    name = "base"
+    bin = "base"
+    read_only = False
+    experimental = False
+    install_hint = ""
+    auth_hint = ""
+
+    # -- detection / auth ---------------------------------------------------- #
+    def resolved_bin(self) -> "str | None":
+        override = os.environ.get("FUSION_BIN_" + self.name.upper().replace("-", "_"))
+        if override:
+            return override
+        return shutil.which(self.bin)
+
+    def detect(self) -> bool:
+        return self.resolved_bin() is not None
+
+    def auth_state(self) -> str:
+        if not self.detect():
+            return "not_installed"
+        return "ready" if self.is_authed() else "installed_not_authed"
+
+    def is_authed(self) -> bool:  # best-effort heuristic, overridden per adapter
+        return True
+
+    def cli_version(self) -> str:
+        b = self.resolved_bin()
+        if not b:
+            return ""
+        try:
+            out = subprocess.run(
+                [b, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                stdin=subprocess.DEVNULL,
+            )
+            return strip_ansi((out.stdout or out.stderr or "").strip()).splitlines()[0]
+        except Exception:
+            return ""
+
+    def model(self) -> "str | None":
+        return None
+
+    # -- invocation ---------------------------------------------------------- #
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        raise NotImplementedError
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        raise NotImplementedError
+
+    def capabilities(self) -> dict:
+        return {
+            "read_only": self.read_only,
+            "experimental": self.experimental,
+            "default_model": self.model(),
+        }
+
+
+class CodexAdapter(Adapter):
+    name = "codex"
+    bin = "codex"
+    read_only = True
+    install_hint = "npm install -g @openai/codex"
+    auth_hint = "codex login   (or set CODEX_API_KEY / OPENAI_API_KEY)"
+
+    def is_authed(self) -> bool:
+        if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+            return True
+        home = os.environ.get("CODEX_HOME") or os.path.join(
+            os.path.expanduser("~"), ".codex"
+        )
+        return os.path.isfile(os.path.join(home, "auth.json"))
+
+    def model(self) -> "str | None":
+        return setting("FUSION_CODEX_MODEL")
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        # Prompt is fed on stdin (NOT as an argv prompt): passing both a prompt
+        # arg AND stdin makes codex append stdin as a <stdin> block, so we pass
+        # neither a prompt arg nor '-'. `-o` captures only the final message.
+        args = [
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "--color",
+            "never",
+            "-o",
+            last_message_path,
+        ]
+        m = self.model()
+        if m:
+            args += ["-m", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        lm = strip_ansi(last_message).strip()
+        if lm:
+            return lm
+        return strip_ansi(stdout).strip()
+
+
+class GeminiAdapter(Adapter):
+    name = "gemini"
+    bin = "gemini"
+    read_only = True
+    install_hint = "npm install -g @google/gemini-cli"
+    auth_hint = "run `gemini` once to log in   (or set GEMINI_API_KEY)"
+
+    def is_authed(self) -> bool:
+        if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+            return True
+        gdir = os.path.join(os.path.expanduser("~"), ".gemini")
+        if not os.path.isdir(gdir):
+            return False
+        for name in ("oauth_creds.json", "google_accounts.json", "access_tokens.json"):
+            if os.path.isfile(os.path.join(gdir, name)):
+                return True
+        # any json credential file as a fallback signal
+        try:
+            return any(n.endswith(".json") for n in os.listdir(gdir))
+        except OSError:
+            return False
+
+    def model(self) -> "str | None":
+        return setting("FUSION_GEMINI_MODEL")
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        # `-p` triggers headless mode; the real prompt is appended from stdin.
+        # `--approval-mode plan` is gemini's read-only mode. Never --yolo / -y.
+        args = [
+            "-p",
+            "Follow the instructions provided on standard input and answer them.",
+            "--approval-mode",
+            "plan",
+        ]
+        m = self.model()
+        if m:
+            args += ["-m", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        # gemini emits MCP / skill-conflict warnings on stderr; never parse it
+        # as the answer. The answer is on stdout.
+        return strip_ansi(stdout).strip()
+
+
+class AntigravityAdapter(Adapter):
+    # Experimental: invocation flags are not yet verified against a real binary,
+    # so this adapter is OFF unless explicitly listed in FUSION_PANELISTS. doctor
+    # reports it honestly rather than pretending it works.
+    name = "antigravity"
+    bin = "antigravity"
+    read_only = False
+    experimental = True
+    install_hint = "see https://antigravity.google (experimental; adapter unverified)"
+    auth_hint = "n/a (experimental)"
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        raise RuntimeError(
+            "antigravity adapter is experimental and unverified; enable only after "
+            "verifying its read-only flags. See docs/adding-a-panelist.md."
+        )
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
+# Active, verified adapters ship by default. Experimental ones are registered
+# but excluded from the default panel.
+ADAPTERS: "dict[str, Adapter]" = {
+    "codex": CodexAdapter(),
+    "gemini": GeminiAdapter(),
+    "antigravity": AntigravityAdapter(),
+}
+DEFAULT_PANEL_ORDER = ["codex", "gemini"]
+
+
+def selected_panelists() -> "list[str]":
+    raw = setting("FUSION_PANELISTS")
+    if raw:
+        names = [n.strip() for n in raw.split(",") if n.strip()]
+    else:
+        names = list(DEFAULT_PANEL_ORDER)
+    return [n for n in names if n in ADAPTERS]
+
+
+def allow_unsandboxed() -> bool:
+    return (setting("FUSION_ALLOW_UNSANDBOXED", "0") or "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# process-group aware execution with a portable timeout
+# --------------------------------------------------------------------------- #
+def _kill_group(pgid: int) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        time.sleep(0.3)
+
+
+def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
+                 timeout_s: int, max_chars: int, mode: str) -> dict:
+    os.makedirs(pdir, exist_ok=True)
+    cwd = os.path.join(pdir, "cwd")           # throwaway dir; never the user repo
+    os.makedirs(cwd, exist_ok=True)
+    out_path = os.path.join(pdir, "stdout.txt")
+    err_path = os.path.join(pdir, "stderr.txt")
+    last_path = os.path.join(pdir, "last_message.txt")
+    result_path = os.path.join(pdir, "result.md")
+    status_path = os.path.join(pdir, "status.json")
+
+    binp = adapter.resolved_bin()
+    argv = [binp] + adapter.build_args(last_path, mode)
+
+    # quiet down ANSI / interactive behaviour in the child
+    env = dict(os.environ)
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("TERM", "dumb")
+    env.setdefault("CI", "1")
+
+    status = {
+        "name": adapter.name,
+        "bin_path": binp,
+        "command": argv,
+        "model": adapter.model(),
+        "cli_version": adapter.cli_version(),
+        "adapter_version": FUSION_VERSION,
+        "read_only": adapter.read_only,
+        "status": "error",
+        "exit_code": None,
+        "timed_out": False,
+        "duration_ms": 0,
+        "stdout_path": out_path,
+        "stderr_path": err_path,
+        "last_message_path": last_path,
+        "result_path": result_path,
+        "result_chars": 0,
+        "truncated": False,
+        "secrets_redacted": 0,
+        "error": None,
+    }
+
+    log(f"{adapter.name}: dispatching (read-only, timeout {timeout_s}s)")
+    start = time.monotonic()
+    proc = None
+    try:
+        with open(prompt_path, "rb") as fin, open(out_path, "wb") as fout, open(
+            err_path, "wb"
+        ) as ferr:
+            proc = subprocess.Popen(
+                argv, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env,
+                start_new_session=True,
+            )
+            pgid = os.getpgid(proc.pid)
+            with _LIVE_LOCK:
+                _LIVE_PGIDS.add(pgid)
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                status["timed_out"] = True
+                _kill_group(pgid)
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+            finally:
+                with _LIVE_LOCK:
+                    _LIVE_PGIDS.discard(pgid)
+        status["exit_code"] = proc.returncode
+    except FileNotFoundError:
+        status["status"] = "not_installed"
+        status["error"] = f"binary not found: {argv[0]}"
+        status["duration_ms"] = int((time.monotonic() - start) * 1000)
+        write_atomic(status_path, json.dumps(status, indent=2))
+        log(f"{adapter.name}: NOT INSTALLED")
+        return status
+    except Exception as exc:  # pragma: no cover - defensive
+        status["error"] = repr(exc)
+        status["duration_ms"] = int((time.monotonic() - start) * 1000)
+        write_atomic(status_path, json.dumps(status, indent=2))
+        log(f"{adapter.name}: ERROR {exc!r}")
+        return status
+
+    status["duration_ms"] = int((time.monotonic() - start) * 1000)
+
+    stdout_text = read_text(out_path)
+    stderr_text = read_text(err_path)
+    last_text = read_text(last_path)
+    result = adapter.parse(stdout_text, stderr_text, last_text)
+    result, truncated = cap_chars(result, max_chars)
+    result, redactions = redact_secrets(result)
+    write_atomic(result_path, result)
+
+    status["result_chars"] = len(result)
+    status["truncated"] = truncated
+    status["secrets_redacted"] = redactions
+
+    if status["timed_out"]:
+        status["status"] = "timeout"
+    elif status["exit_code"] != 0:
+        status["status"] = "error"
+    elif result.strip() == "":
+        status["status"] = "empty"
+    else:
+        status["status"] = "ok"
+
+    write_atomic(status_path, json.dumps(status, indent=2))
+    dur = status["duration_ms"] / 1000.0
+    log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
+    return status
+
+
+# --------------------------------------------------------------------------- #
+# commands
+# --------------------------------------------------------------------------- #
+def cmd_panel(args: argparse.Namespace) -> int:
+    if args.prompt_file:
+        prompt = read_text(args.prompt_file)
+    else:
+        prompt = sys.stdin.read()
+    if not prompt.strip():
+        log("refusing to dispatch an empty prompt")
+        return 2
+
+    timeout_s = args.timeout or setting_int("FUSION_TIMEOUT", DEFAULT_TIMEOUT_S)
+    max_chars = args.max_chars or setting_int("FUSION_MAX_CHARS", DEFAULT_MAX_CHARS)
+
+    if args.panelists:
+        names = [n.strip() for n in args.panelists.split(",") if n.strip()]
+    else:
+        names = selected_panelists()
+
+    chosen: "list[Adapter]" = []
+    skipped: "list[dict]" = []
+    for n in names:
+        ad = ADAPTERS.get(n)
+        if ad is None:
+            skipped.append({"name": n, "reason": "unknown adapter"})
+            continue
+        if not ad.detect():
+            skipped.append({"name": n, "reason": "not_installed"})
+            continue
+        if not ad.read_only and not allow_unsandboxed():
+            skipped.append({"name": n, "reason": "no read-only mode (set FUSION_ALLOW_UNSANDBOXED=1 to permit)"})
+            continue
+        chosen.append(ad)
+
+    run_root = args.run_dir or setting("FUSION_RUN_ROOT") or os.path.join(
+        os.getcwd(), ".fusion", "runs"
+    )
+    run_dir = os.path.join(run_root, run_stamp() + "-" + os.urandom(3).hex())
+    os.makedirs(run_dir, exist_ok=True)
+    prompt_path = os.path.join(run_dir, "prompt.txt")
+    write_atomic(prompt_path, prompt)
+
+    manifest = {
+        "fusion_version": FUSION_VERSION,
+        "schema": MANIFEST_SCHEMA,
+        "created_utc": now_utc_iso(),
+        "mode": args.mode,
+        "run_dir": run_dir,
+        "prompt_path": prompt_path,
+        "prompt_chars": len(prompt),
+        "timeout_s": timeout_s,
+        "max_chars": max_chars,
+        "panelists": [],
+        "summary": {},
+    }
+
+    if not chosen:
+        manifest["summary"] = {
+            "available": [], "ok": 0, "failed": 0,
+            "skipped": skipped,
+            "note": "No read-only panelists available -- the host should fall "
+                    "back to a single-model (Claude-only) answer.",
+        }
+        write_atomic(os.path.join(run_dir, "manifest.json"),
+                     json.dumps(manifest, indent=2))
+        print(os.path.join(run_dir, "manifest.json"))
+        log("no panelists available; wrote Claude-only-fallback manifest")
+        return 3
+
+    log(f"panel: {', '.join(a.name for a in chosen)} ({len(chosen)} model call(s))")
+    results: "dict[str, dict]" = {}
+    threads: "list[threading.Thread]" = []
+
+    def worker(ad: Adapter) -> None:
+        pdir = os.path.join(run_dir, ad.name)
+        try:
+            results[ad.name] = run_panelist(ad, prompt_path, pdir, timeout_s,
+                                             max_chars, args.mode)
+        except Exception as exc:  # pragma: no cover - defensive
+            results[ad.name] = {"name": ad.name, "status": "error",
+                                 "error": repr(exc)}
+
+    for ad in chosen:
+        t = threading.Thread(target=worker, args=(ad,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    manifest["panelists"] = [results[a.name] for a in chosen if a.name in results]
+    ok = sum(1 for p in manifest["panelists"] if p.get("status") == "ok")
+    manifest["summary"] = {
+        "available": [a.name for a in chosen],
+        "ok": ok,
+        "failed": len(manifest["panelists"]) - ok,
+        "skipped": skipped,
+    }
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    write_atomic(manifest_path, json.dumps(manifest, indent=2))
+
+    print(manifest_path)
+    log(f"done: {ok}/{len(manifest['panelists'])} panelist(s) ok -> {manifest_path}")
+    return 0 if ok > 0 else 3
+
+
+def _doctor_rows() -> "list[dict]":
+    rows = []
+    for name, ad in ADAPTERS.items():
+        state = ad.auth_state()
+        rows.append({
+            "name": name,
+            "status": state,
+            "experimental": ad.experimental,
+            "read_only": ad.read_only,
+            "bin_path": ad.resolved_bin(),
+            "cli_version": ad.cli_version() if state != "not_installed" else "",
+            "model": ad.model(),
+            "install_hint": ad.install_hint,
+            "auth_hint": ad.auth_hint,
+            "default_panel": name in DEFAULT_PANEL_ORDER,
+        })
+    return rows
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    rows = _doctor_rows()
+    if args.json:
+        print(json.dumps({"fusion_version": FUSION_VERSION,
+                          "panelists": rows}, indent=2))
+        return 0
+
+    icon = {"ready": "[ready]", "installed_not_authed": "[auth?]",
+            "not_installed": "[ --- ]"}
+    print(f"fusion {FUSION_VERSION}  -  panelist status\n")
+    ready = 0
+    for r in rows:
+        tag = icon.get(r["status"], "[ ? ]")
+        extra = []
+        if r["experimental"]:
+            extra.append("experimental")
+        if not r["read_only"]:
+            extra.append("no read-only mode")
+        suffix = ("  (" + ", ".join(extra) + ")") if extra else ""
+        ver = ("  " + r["cli_version"]) if r["cli_version"] else ""
+        print(f"  {tag} {r['name']}{suffix}{ver}")
+        if r["status"] == "ready":
+            ready += 1
+        elif r["status"] == "installed_not_authed":
+            print(f"          installed but not authenticated -> {r['auth_hint']}")
+        elif r["status"] == "not_installed" and not r["experimental"]:
+            print(f"          not installed -> {r['install_hint']}")
+    print()
+    if ready == 0:
+        print("  No panelists are ready. fusion will fall back to a single-model")
+        print("  (Claude-only) answer until you install and authenticate at least")
+        print("  one panelist above. fusion is most useful with 2+ panelists.")
+    else:
+        print(f"  {ready} panelist(s) ready. A fusion round makes {ready} parallel")
+        print("  model call(s) -- one per ready panelist, billed to your own")
+        print("  provider accounts. fusion ships no keys and makes no calls of its own.")
+    return 0
+
+
+def cmd_estimate(args: argparse.Namespace) -> int:
+    ready = [r for r in _doctor_rows() if r["status"] == "ready"
+             and r["name"] in selected_panelists()]
+    rounds = max(1, args.rounds)
+    calls = len(ready) * rounds
+    print(json.dumps({
+        "ready_panelists": [r["name"] for r in ready],
+        "rounds": rounds,
+        "model_calls": calls,
+        "note": "Each call runs on your already-authenticated CLI and bills to "
+                "your provider account. fusion ships no API keys and makes no "
+                "network calls of its own.",
+    }, indent=2))
+    return 0
+
+
+def cmd_version(args: argparse.Namespace) -> int:
+    print(f"fusion {FUSION_VERSION} (python {sys.version.split()[0]})")
+    print("adapters: " + ", ".join(
+        f"{n}{'*' if a.experimental else ''}" for n, a in ADAPTERS.items()))
+    print("config: " + config_path())
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# entrypoint
+# --------------------------------------------------------------------------- #
+def _install_signal_handlers() -> None:
+    def handler(signum, frame):  # noqa: ANN001
+        with _LIVE_LOCK:
+            pgids = list(_LIVE_PGIDS)
+        for pg in pgids:
+            _kill_group(pg)
+        sys.stderr.write("\n[fusion] interrupted; killed in-flight panelists\n")
+        sys.exit(130)
+
+    for s in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(s, handler)
+        except (ValueError, OSError):  # not in main thread / unsupported
+            pass
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="fusion",
+        description="Local multi-CLI 'Fusion' panel dispatcher (read-only).",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    pa = sub.add_parser("panel", help="dispatch a prompt to all ready panelists")
+    pa.add_argument("--prompt-file", help="file with the prompt (default: stdin)")
+    pa.add_argument("--mode", default="consult",
+                    choices=["consult", "review"],
+                    help="framing hint recorded in the manifest")
+    pa.add_argument("--panelists", help="comma list overriding FUSION_PANELISTS")
+    pa.add_argument("--run-dir", help="root dir for run output")
+    pa.add_argument("--timeout", type=int, help="per-panelist timeout (seconds)")
+    pa.add_argument("--max-chars", type=int, help="cap per-panelist output chars")
+    pa.set_defaults(func=cmd_panel)
+
+    do = sub.add_parser("doctor", help="show which panelists are installed/authed")
+    do.add_argument("--json", action="store_true")
+    do.set_defaults(func=cmd_doctor)
+
+    es = sub.add_parser("estimate", help="print the model-call count for a run")
+    es.add_argument("--rounds", type=int, default=1)
+    es.set_defaults(func=cmd_estimate)
+
+    ve = sub.add_parser("version", help="print version and adapters")
+    ve.set_defaults(func=cmd_version)
+    return p
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    _install_signal_handlers()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

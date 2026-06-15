@@ -1,0 +1,117 @@
+# Adding a panelist
+
+A panelist is one CLI fusion can dispatch to. Adding one is a small, well-defined
+adapter in `bin/fusion`. The goal is that supporting a new CLI is a ~30-line pull
+request, not a reverse-engineering project.
+
+## The 5-function adapter contract
+
+Every adapter answers five questions. They map to methods on the `Adapter` base
+class in `bin/fusion`:
+
+1. **detect** — *is this CLI installed?* (`detect()` / `resolved_bin()`): is the
+   binary on `PATH` (or overridden via `FUSION_BIN_<NAME>`)?
+2. **auth** — *is it actually logged in?* (`is_authed()` → `auth_state()`):
+   presence on `PATH` says nothing about login state. Use a **cheap, no-token**
+   heuristic — an env var or a credentials file — so `doctor` does not spend
+   money. Return `ready` / `installed_not_authed` / `not_installed`.
+3. **invoke-read-only** — *how do I run it read-only, with the prompt on stdin?*
+   (`build_args(last_message_path, mode)`): return the argv **after** the binary.
+   The prompt is always fed on stdin by the engine — your args must **not**
+   include the prompt. Include the CLI's read-only flag here.
+4. **parse** — *where is the clean answer?* (`parse(stdout, stderr, last_message)`):
+   return the answer text. Never return stderr as the answer (CLIs put banners,
+   telemetry, and warnings there). Strip ANSI if needed (`strip_ansi` helper).
+5. **capabilities** — *what can it do?* (`read_only`, `experimental`,
+   `model()`): set the class attributes. If the CLI has **no real read-only
+   mode**, set `read_only = False`; the engine will refuse to dispatch to it
+   unless the user sets `FUSION_ALLOW_UNSANDBOXED=1`.
+
+## Template
+
+```python
+class MyToolAdapter(Adapter):
+    name = "mytool"                 # what users put in FUSION_PANELISTS
+    bin = "mytool"                  # the executable on PATH
+    read_only = True                # does it have a verified read-only mode?
+    experimental = False            # ship only verified adapters as non-experimental
+    install_hint = "npm install -g mytool"
+    auth_hint = "mytool login   (or set MYTOOL_API_KEY)"
+
+    def is_authed(self) -> bool:
+        # cheap, no-token check: env var or a credentials file
+        if os.environ.get("MYTOOL_API_KEY"):
+            return True
+        return os.path.isfile(os.path.expanduser("~/.mytool/auth.json"))
+
+    def model(self):
+        return setting("FUSION_MYTOOL_MODEL")   # optional per-adapter override
+
+    def build_args(self, last_message_path, mode):
+        # prompt arrives on STDIN; return only the flags. Use the read-only flag.
+        # never include --yolo / auto-approve / bypass flags.
+        args = ["--print", "--read-only", "--no-color"]
+        if self.model():
+            args += ["--model", self.model()]
+        return args
+
+    def parse(self, stdout, stderr, last_message):
+        return strip_ansi(stdout).strip()
+```
+
+Then register it:
+
+```python
+ADAPTERS = {
+    "codex": CodexAdapter(),
+    "gemini": GeminiAdapter(),
+    "mytool": MyToolAdapter(),     # <-- add here
+    "antigravity": AntigravityAdapter(),
+}
+DEFAULT_PANEL_ORDER = ["codex", "gemini", "mytool"]   # if it should run by default
+```
+
+## Verify it
+
+```bash
+bin/fusion doctor                 # your adapter should show up with the right status
+echo "Say READY." | bin/fusion panel --panelists mytool --timeout 60
+```
+
+Add a mock in `tests/mocks/` and a case in `tests/test_fusion.py` so CI exercises
+your adapter's failure modes (timeout, nonzero exit, empty output) without
+spending tokens. See the existing `mock_codex` / `mock_gemini` mocks.
+
+## Worked example: `cursor-agent` (an adapter with no read-only mode)
+
+`cursor-agent --print` runs non-interactively but, per its own help, *"has access
+to all tools, including write and bash"* — it has **no** read-only sandbox flag.
+That is exactly the case the `read_only` capability exists for:
+
+```python
+class CursorAgentAdapter(Adapter):
+    name = "cursor-agent"
+    bin = "cursor-agent"
+    read_only = False               # <-- no read-only mode; engine will refuse by default
+    experimental = True
+    install_hint = "see https://cursor.com/cli"
+    auth_hint = "cursor-agent login"
+
+    def is_authed(self) -> bool:
+        return bool(os.environ.get("CURSOR_API_KEY"))  # + creds-file check
+
+    def build_args(self, last_message_path, mode):
+        # NB: even in --print mode this can write files and run bash. It is only
+        # contained by fusion's throwaway cwd. Never pass -f/--force.
+        return ["--print", "--output-format", "text"]
+
+    def parse(self, stdout, stderr, last_message):
+        return strip_ansi(stdout).strip()
+```
+
+Because `read_only = False`, `bin/fusion panel` skips it (recording the reason in
+the manifest) unless the user explicitly sets `FUSION_ALLOW_UNSANDBOXED=1`. This
+keeps "I added an adapter" from silently weakening fusion's safety promise.
+
+> Lesson: an adapter is more than an invocation string. The `read_only` and
+> `auth` answers are what keep fusion safe and honest.

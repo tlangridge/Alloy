@@ -1,0 +1,19 @@
+fusion
+Copyright (c) 2026 Tom Ridge
+Licensed under the MIT License (see LICENSE).
+
+This project is an independent, unofficial implementation of the multi-model
+"panel + judge + synthesis" methodology that OpenRouter describes and markets
+under the name "Fusion". This project is NOT affiliated with, endorsed by, or
+sponsored by OpenRouter. "Fusion" is used here only to credit and describe the
+methodology; all trademarks belong to their respective owners.
+
+fusion ships no API keys and makes no network calls of its own. It orchestrates
+third-party command-line tools (for example OpenAI's `codex` and Google's
+`gemini`) that you install and authenticate yourself. When fusion invokes those
+tools, your prompts and any code you ask it to review are sent to those tools'
+model providers under their terms. You are responsible for complying with each
+tool's terms of service, including any restrictions on automated invocation.
+
+Those CLIs and their trademarks belong to their respective owners and are not
+distributed with this project.

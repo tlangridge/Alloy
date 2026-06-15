@@ -1,0 +1,15 @@
+# fusion runtime artifacts
+.fusion/
+*.log
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# local config lives at ~/.config/fusion/config; ignore any local copy here too
+fusion.config
+__pycache__/
+*.pyc

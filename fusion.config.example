@@ -1,0 +1,34 @@
+# fusion configuration  (copy to ~/.config/fusion/config and edit)
+#
+# This file is parsed as simple KEY=value lines. It is NEVER executed as a
+# shell script, so it is safe even if a copy ends up in a project directory.
+# Lines starting with '#' and blank lines are ignored. Environment variables
+# of the same name override values here.
+
+# Which adapters form the panel (comma-separated, in order).
+# Shipped + verified: codex, gemini. Experimental/off by default: antigravity.
+FUSION_PANELISTS=codex,gemini
+
+# Per-panelist timeout in seconds. A hung CLI is killed (process group) at this.
+FUSION_TIMEOUT=240
+
+# Cap on each panelist's captured output (characters). Protects the host's
+# context window from a runaway panelist. Truncation is recorded in the manifest.
+FUSION_MAX_CHARS=200000
+
+# Optional model overrides (leave unset to use each CLI's default model).
+# FUSION_CODEX_MODEL=gpt-5.2-codex
+# FUSION_GEMINI_MODEL=gemini-2.5-pro
+
+# Who judges the panel. Default is the host (Claude). Judge rotation to a CLI is
+# on the roadmap; today this is informational.
+# FUSION_JUDGE=claude
+
+# Where run output (prompts, per-panelist answers, manifest.json) is written.
+# Default: ./.fusion/runs under the current directory.
+# FUSION_RUN_ROOT=~/.cache/fusion/runs
+
+# DANGER: allow adapters that have no real read-only mode (e.g. cursor-agent).
+# Off by default. Only enable if you understand that such a panelist can write
+# files and run shell, contained only by fusion's throwaway working directory.
+# FUSION_ALLOW_UNSANDBOXED=0
