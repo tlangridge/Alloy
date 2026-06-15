@@ -131,10 +131,22 @@ panel for the *thinking* and leaves the *writing* to Claude.
   quoting bugs, no shell injection, no leaking prompts into `ps`).
 - **No auto-approve.** fusion never passes `--yolo` / `-y` /
   `--dangerously-bypass-approvals-and-sandbox`.
-- **Secret scanning.** Panelist output is scanned and redacted for common secret
-  shapes before it is saved.
+- **Secret scanning.** Panelist output (both the saved answer and the raw
+  stdout/stderr files) is scanned and redacted for common secret shapes before it
+  is saved. This is a best-effort heuristic, not a guarantee.
+- **Run artifacts live outside your repo.** Prompts, redacted output, and the
+  manifest are written under `$XDG_STATE_HOME/fusion/runs` by default (override
+  with `FUSION_RUN_ROOT`), and the run root gets a `.gitignore` so artifacts are
+  never committed even if you point it inside a repo.
 - **No project-level config execution.** Config is read from `~/.config/fusion/`
   as `KEY=value` (never `source`d), so a hostile repo cannot run code.
+- **Override binaries inherit your environment.** `FUSION_BIN_<NAME>` runs
+  whatever you point it at (with your env, as the CLIs need for auth); the
+  read-only guarantee is then that tool's responsibility.
+
+> "Read-only" means the panel does not write to your files. It is **not** an OS
+> data-exfiltration sandbox: your prompt and any diff you review are sent to each
+> CLI's model provider, as with using those CLIs directly.
 
 ## Privacy & cost
 
@@ -158,7 +170,7 @@ variables (env wins over the file):
 | `FUSION_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `FUSION_CODEX_MODEL` / `FUSION_GEMINI_MODEL` | CLI default | model override per adapter |
 | `FUSION_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
-| `FUSION_RUN_ROOT` | `./.fusion/runs` | where run output is written |
+| `FUSION_RUN_ROOT` | `$XDG_STATE_HOME/fusion/runs` | where run output is written (outside your repo) |
 
 ## Requirements
 

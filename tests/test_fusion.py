@@ -157,6 +157,87 @@ class FusionTests(unittest.TestCase):
         proc = run_fusion(["panel", "--prompt-file", empty])
         self.assertEqual(proc.returncode, 2)
 
+    def test_invalid_timeout_rejected(self):
+        prompt = os.path.join(self.tmp, "p.txt")
+        with open(prompt, "w") as f:
+            f.write("hi")
+        proc = run_fusion(["panel", "--prompt-file", prompt, "--timeout", "0"])
+        self.assertEqual(proc.returncode, 2)
+
+    def test_run_root_has_gitignore(self):
+        _proc, _m = panel(self.tmp)
+        gi = os.path.join(self.tmp, "runs", ".gitignore")
+        self.assertTrue(os.path.isfile(gi))
+        with open(gi) as f:
+            self.assertEqual(f.read().strip(), "*")
+
+    def test_sidecar_files_are_redacted(self):
+        _proc, m = panel(self.tmp, env_extra={"MOCK_BEHAVIOR": "secret"})
+        p = by_name(m, "codex")
+        with open(p["stdout_path"]) as f:
+            raw = f.read()
+        # the mock writes the secret to the -o file (codex last_message), so the
+        # canonical result is what matters; ensure no raw key leaks anywhere.
+        for path in (p["result_path"], p["stdout_path"], p["last_message_path"]):
+            if os.path.isfile(path):
+                with open(path) as f:
+                    self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ", f.read())
+
+
+class RedactionUnitTests(unittest.TestCase):
+    """Drive redact_secrets / cap_chars / strip_ansi directly by importing the
+    dispatcher as a module."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import importlib.machinery
+        # bin/fusion has no .py extension, so give importlib an explicit loader.
+        loader = importlib.machinery.SourceFileLoader("fusion_mod", FUSION)
+        spec = importlib.util.spec_from_loader("fusion_mod", loader)
+        cls.f = importlib.util.module_from_spec(spec)
+        loader.exec_module(cls.f)
+
+    def test_named_secret_with_suffix(self):
+        # the bug the review found: names whose suffix runs past the keyword
+        for name in ("AWS_SECRET_ACCESS_KEY", "DB_PASSWORD_HASH", "SECRET_KEY_BASE"):
+            out, n = self.f.redact_secrets(f"{name}=AbCdEf0123456789ghij")
+            self.assertIn("REDACTED", out, name)
+            self.assertNotIn("AbCdEf0123456789ghij", out, name)
+            self.assertEqual(n, 1, name)
+
+    def test_bare_password_assignment(self):
+        out, n = self.f.redact_secrets('password = "hunter2-very-secret"')
+        self.assertNotIn("hunter2-very-secret", out)
+        self.assertGreaterEqual(n, 1)
+
+    def test_no_double_count_of_placeholder(self):
+        out, n = self.f.redact_secrets(
+            "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX")
+        self.assertEqual(n, 1)
+        self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX", out)
+
+    def test_pem_block_fully_redacted(self):
+        pem = ("-----BEGIN RSA PRIVATE KEY-----\n"
+               "MIIEowIBAAKCAQEA_secretbody_MoreSecretMaterial\n"
+               "-----END RSA PRIVATE KEY-----")
+        out, n = self.f.redact_secrets(pem)
+        self.assertNotIn("secretbody", out)
+        self.assertGreaterEqual(n, 1)
+
+    def test_redact_runs_before_cap(self):
+        text = ("x" * 90) + "OPENAI_API_KEY=sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX"
+        red, _ = self.f.redact_secrets(text)
+        capped, _ = self.f.cap_chars(red, 100)
+        self.assertNotIn("sk-proj-ABCDEFGH", capped)
+
+    def test_strip_osc_sequences(self):
+        s = "\x1b]52;c;ZXZpbA==\x07hello\x1b]8;;http://evil\x1b\\link"
+        cleaned = self.f.strip_ansi(s)
+        self.assertNotIn("\x1b]", cleaned)
+        self.assertIn("hello", cleaned)
+        self.assertIn("link", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

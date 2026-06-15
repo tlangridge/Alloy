@@ -130,8 +130,9 @@ then dispatch. Use `--mode review` when the prompt contains a diff to review,
 else `--mode consult`.
 
 ```bash
-# prompt.txt already written with the Write tool
-~/.claude/skills/fusion/bin/fusion panel --prompt-file /tmp/fusion_prompt.txt --mode consult
+# write the prompt to a UNIQUE temp file (e.g. PF=$(mktemp -t fusion.XXXXXX);
+# write your prompt into "$PF" with the Write tool) -- never a fixed /tmp name.
+~/.claude/skills/fusion/bin/fusion panel --prompt-file "$PF" --mode consult
 ```
 
 The command streams progress to stderr and prints the path to `manifest.json` on
@@ -258,7 +259,9 @@ fixes from panelists; propose them.
 - **Timeout / hang** → already handled by the dispatcher (it kills the process
   group). Just report it.
 - **Truncated output** (`truncated: true` in the manifest) → note that the
-  panelist's answer was capped; pull more from its `stdout.txt` only if needed.
+  panelist's answer was capped at `max_chars`. The run dir's `stdout.txt` is also
+  redacted and may itself be capped, so do not treat it as the complete raw
+  answer; if you genuinely need more, re-run with a higher `--max-chars`.
 - **Secrets** (`secrets_redacted > 0`) → tell the user a panelist emitted
   something that looked like a secret and it was redacted in the saved output.
 

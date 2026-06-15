@@ -9,9 +9,11 @@ consensus / contradictions / unique insights / blind spots), and SYNTHESIZES a
 final answer that surfaces disagreement rather than hiding it.
 
 This script is the mechanical, hardened core. It does no judging or synthesis
-itself, and it never writes to your repository: panelists run in a throwaway
-temporary working directory with their stdin fed from the prompt file, behind
-each CLI's own read-only sandbox flag.
+itself. The PANELISTS never touch your repository: they run read-only, in a
+throwaway temporary working directory, with stdin fed from the prompt file. The
+dispatcher writes run artifacts (the prompt, redacted CLI output, a manifest) to
+a run directory OUTSIDE your repo by default (under XDG_STATE_HOME; override with
+FUSION_RUN_ROOT).
 
 Design notes (why it is the way it is):
   * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
@@ -87,15 +89,23 @@ def write_atomic(path: str, data: str) -> None:
     os.replace(tmp, path)
 
 
-def read_text(path: str) -> str:
+def read_text(path: str, max_bytes: "int | None" = None) -> str:
+    # max_bytes bounds memory: a runaway panelist can write a multi-GB file, so
+    # never f.read() it whole.
     try:
         with open(path, "rb") as f:
-            return f.read().decode("utf-8", errors="replace")
+            data = f.read(max_bytes) if max_bytes is not None else f.read()
+        return data.decode("utf-8", errors="replace")
     except FileNotFoundError:
         return ""
 
 
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Strip CSI colour codes AND OSC sequences (e.g. OSC 52 clipboard-write, OSC 8
+# hyperlinks) so a panelist cannot smuggle a terminal-control payload into the
+# saved result that fires when a user `cat`s it.
+ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][0-9;]*;?.*?(?:\x07|\x1b\\))"
+)
 
 
 def strip_ansi(text: str) -> str:
@@ -105,43 +115,59 @@ def strip_ansi(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # secret redaction (scan PANELIST OUTPUT before persisting)
 # --------------------------------------------------------------------------- #
+# Best-effort secret scrubbing of panelist OUTPUT before it is persisted or read
+# by the host. Value-shaped patterns catch high-entropy keys regardless of the
+# variable name; the assignment pattern is a name-based backstop. This is a
+# heuristic, not a guarantee.
 SECRET_PATTERNS = [
     ("openai_key", re.compile(r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}")),
     ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")),
-    ("aws_access_key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("stripe_key", re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b")),
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
     ("gh_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
+    ("gh_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")),
+    ("gitlab_pat", re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b")),
+    ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b")),
     ("bearer", re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-]+")),
-    ("private_key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
-    (
-        "assigned_secret",
-        re.compile(
-            r"(?i)\b([A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD))\b"
-            r"\s*[:=]\s*['\"]?([^\s'\"]{8,})"
-        ),
-    ),
+    # Whole PEM block (BEGIN..END), or BEGIN..end-of-text if truncated.
+    ("private_key", re.compile(
+        r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"
+        r"[\s\S]*?(?:-----END (?:[A-Z ]+ )?PRIVATE KEY-----|\Z)")),
 ]
+
+# Name=value backstop. The name may have a suffix past the keyword
+# (AWS_SECRET_ACCESS_KEY, SECRET_KEY_BASE, DB_PASSWORD_HASH), so allow trailing
+# word chars and anchor on the assignment rather than a word boundary.
+ASSIGNED_SECRET_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*)"
+    r"\s*[:=]\s*['\"]?([^\s'\"]{6,})"
+)
 
 
 def redact_secrets(text: str) -> "tuple[str, int]":
     count = 0
 
+    # Run the assignment backstop FIRST so it cannot re-match (and double-count)
+    # the [REDACTED:...] placeholders the value patterns below insert.
     def _sub_assigned(m: "re.Match[str]") -> str:
         nonlocal count
+        if "[REDACTED" in m.group(2):
+            return m.group(0)
         count += 1
         return f"{m.group(1)}=[REDACTED]"
 
-    for name, pat in SECRET_PATTERNS:
-        if name == "assigned_secret":
-            text = pat.sub(_sub_assigned, text)
-        else:
-            def _sub(m: "re.Match[str]", _n: str = name) -> str:
-                nonlocal count
-                count += 1
-                return f"[REDACTED:{_n}]"
+    text = ASSIGNED_SECRET_RE.sub(_sub_assigned, text)
 
-            text = pat.sub(_sub, text)
+    for name, pat in SECRET_PATTERNS:
+        def _sub(m: "re.Match[str]", _n: str = name) -> str:
+            nonlocal count
+            count += 1
+            return f"[REDACTED:{_n}]"
+
+        text = pat.sub(_sub, text)
     return text, count
 
 
@@ -220,9 +246,12 @@ class Adapter:
 
     # -- detection / auth ---------------------------------------------------- #
     def resolved_bin(self) -> "str | None":
-        override = os.environ.get("FUSION_BIN_" + self.name.upper().replace("-", "_"))
+        override = setting("FUSION_BIN_" + self.name.upper().replace("-", "_"))
         if override:
-            return override
+            override = os.path.expanduser(override)
+            if os.sep in override:        # a path: make absolute (child runs in a different cwd)
+                return os.path.abspath(override)
+            return shutil.which(override) or override   # a bare name: resolve on PATH
         return shutil.which(self.bin)
 
     def detect(self) -> bool:
@@ -248,7 +277,8 @@ class Adapter:
                 timeout=15,
                 stdin=subprocess.DEVNULL,
             )
-            return strip_ansi((out.stdout or out.stderr or "").strip()).splitlines()[0]
+            lines = strip_ansi((out.stdout or out.stderr or "").strip()).splitlines()
+            return lines[0] if lines else ""
         except Exception:
             return ""
 
@@ -278,9 +308,9 @@ class CodexAdapter(Adapter):
     auth_hint = "codex login   (or set CODEX_API_KEY / OPENAI_API_KEY)"
 
     def is_authed(self) -> bool:
-        if os.environ.get("CODEX_API_KEY") or os.environ.get("OPENAI_API_KEY"):
+        if setting("CODEX_API_KEY") or setting("OPENAI_API_KEY"):
             return True
-        home = os.environ.get("CODEX_HOME") or os.path.join(
+        home = setting("CODEX_HOME") or os.path.join(
             os.path.expanduser("~"), ".codex"
         )
         return os.path.isfile(os.path.join(home, "auth.json"))
@@ -322,7 +352,7 @@ class GeminiAdapter(Adapter):
     auth_hint = "run `gemini` once to log in   (or set GEMINI_API_KEY)"
 
     def is_authed(self) -> bool:
-        if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        if setting("GEMINI_API_KEY") or setting("GOOGLE_API_KEY"):
             return True
         gdir = os.path.join(os.path.expanduser("~"), ".gemini")
         if not os.path.isdir(gdir):
@@ -342,11 +372,17 @@ class GeminiAdapter(Adapter):
     def build_args(self, last_message_path: str, mode: str) -> "list[str]":
         # `-p` triggers headless mode; the real prompt is appended from stdin.
         # `--approval-mode plan` is gemini's read-only mode. Never --yolo / -y.
+        # `--skip-trust` is required: panelists run in an empty throwaway cwd,
+        # which gemini treats as untrusted and then SILENTLY downgrades
+        # `--approval-mode plan` back to "default" and fails headless (exit 55).
+        # Trusting an empty temp dir is safe; it is the only way plan mode is
+        # actually honored without a TTY.
         args = [
             "-p",
             "Follow the instructions provided on standard input and answer them.",
             "--approval-mode",
             "plan",
+            "--skip-trust",
         ]
         m = self.model()
         if m:
@@ -391,12 +427,21 @@ DEFAULT_PANEL_ORDER = ["codex", "gemini"]
 
 
 def selected_panelists() -> "list[str]":
+    # Return names verbatim (including typos) so cmd_panel can report an unknown
+    # adapter as skipped rather than silently dropping it.
     raw = setting("FUSION_PANELISTS")
     if raw:
-        names = [n.strip() for n in raw.split(",") if n.strip()]
-    else:
-        names = list(DEFAULT_PANEL_ORDER)
-    return [n for n in names if n in ADAPTERS]
+        return [n.strip() for n in raw.split(",") if n.strip()]
+    return list(DEFAULT_PANEL_ORDER)
+
+
+def default_run_root() -> str:
+    """Run artifacts live OUTSIDE the user's repo by default (they include the
+    prompt/diff and redacted CLI output). Honors XDG_STATE_HOME."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "fusion", "runs")
 
 
 def allow_unsandboxed() -> bool:
@@ -410,13 +455,17 @@ def allow_unsandboxed() -> bool:
 # --------------------------------------------------------------------------- #
 # process-group aware execution with a portable timeout
 # --------------------------------------------------------------------------- #
-def _kill_group(pgid: int) -> None:
+def _kill_group(pgid: int, proc: "subprocess.Popen | None" = None) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError, OSError):
-            return
+        except ProcessLookupError:
+            return  # group already gone
+        except (PermissionError, OSError):
+            pass    # transient; still try SIGKILL on the next iteration
         time.sleep(0.3)
+        if proc is not None and proc.poll() is not None:
+            return
 
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
@@ -435,6 +484,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     # quiet down ANSI / interactive behaviour in the child
     env = dict(os.environ)
+    for _k, _v in _CONFIG.items():   # config-file values (e.g. provider keys) reach the child
+        env.setdefault(_k, _v)
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("CI", "1")
@@ -479,7 +530,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
                 status["timed_out"] = True
-                _kill_group(pgid)
+                _kill_group(pgid, proc)
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -504,12 +555,21 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     status["duration_ms"] = int((time.monotonic() - start) * 1000)
 
-    stdout_text = read_text(out_path)
-    stderr_text = read_text(err_path)
-    last_text = read_text(last_path)
+    read_cap = max_chars * 4  # bytes; UTF-8 is <=4 bytes/char, bounds memory
+    stdout_text = read_text(out_path, read_cap)
+    stderr_text = read_text(err_path, read_cap)
+    last_text = read_text(last_path, read_cap)
+
+    # Redact the raw sidecar files in place so nothing unredacted is left on
+    # disk for the host (or the user) to read later. This also shrinks them.
+    write_atomic(out_path, redact_secrets(stdout_text)[0])
+    write_atomic(err_path, redact_secrets(stderr_text)[0])
+    if os.path.exists(last_path):
+        write_atomic(last_path, redact_secrets(last_text)[0])
+
     result = adapter.parse(stdout_text, stderr_text, last_text)
+    result, redactions = redact_secrets(result)   # redact BEFORE capping
     result, truncated = cap_chars(result, max_chars)
-    result, redactions = redact_secrets(result)
     write_atomic(result_path, result)
 
     status["result_chars"] = len(result)
@@ -543,8 +603,18 @@ def cmd_panel(args: argparse.Namespace) -> int:
         log("refusing to dispatch an empty prompt")
         return 2
 
-    timeout_s = args.timeout or setting_int("FUSION_TIMEOUT", DEFAULT_TIMEOUT_S)
-    max_chars = args.max_chars or setting_int("FUSION_MAX_CHARS", DEFAULT_MAX_CHARS)
+    # `is not None` so an explicit --timeout 0 is caught by validation below,
+    # not silently swallowed by `or` and replaced with the default.
+    timeout_s = (args.timeout if args.timeout is not None
+                 else setting_int("FUSION_TIMEOUT", DEFAULT_TIMEOUT_S))
+    max_chars = (args.max_chars if args.max_chars is not None
+                 else setting_int("FUSION_MAX_CHARS", DEFAULT_MAX_CHARS))
+    if timeout_s < 1:
+        log(f"invalid timeout {timeout_s}: must be a positive integer")
+        return 2
+    if max_chars < 1:
+        log(f"invalid max-chars {max_chars}: must be a positive integer")
+        return 2
 
     if args.panelists:
         names = [n.strip() for n in args.panelists.split(",") if n.strip()]
@@ -566,9 +636,17 @@ def cmd_panel(args: argparse.Namespace) -> int:
             continue
         chosen.append(ad)
 
-    run_root = args.run_dir or setting("FUSION_RUN_ROOT") or os.path.join(
-        os.getcwd(), ".fusion", "runs"
-    )
+    run_root = args.run_dir or setting("FUSION_RUN_ROOT") or default_run_root()
+    run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
+    os.makedirs(run_root, exist_ok=True)
+    # Belt-and-suspenders: even if a user points the run root inside a repo, keep
+    # the artifacts (prompt/diff + redacted CLI output) out of version control.
+    gi = os.path.join(run_root, ".gitignore")
+    if not os.path.exists(gi):
+        try:
+            write_atomic(gi, "*\n")
+        except OSError:
+            pass
     run_dir = os.path.join(run_root, run_stamp() + "-" + os.urandom(3).hex())
     os.makedirs(run_dir, exist_ok=True)
     prompt_path = os.path.join(run_dir, "prompt.txt")

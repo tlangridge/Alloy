@@ -25,7 +25,8 @@ FUSION_MAX_CHARS=200000
 # FUSION_JUDGE=claude
 
 # Where run output (prompts, per-panelist answers, manifest.json) is written.
-# Default: ./.fusion/runs under the current directory.
+# Default: $XDG_STATE_HOME/fusion/runs (i.e. ~/.local/state/fusion/runs) -- kept
+# OUTSIDE your repo so prompts/diffs and CLI output are never committed.
 # FUSION_RUN_ROOT=~/.cache/fusion/runs
 
 # DANGER: allow adapters that have no real read-only mode (e.g. cursor-agent).

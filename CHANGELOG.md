@@ -29,6 +29,25 @@ Initial release.
 - Docs: `README.md`, `docs/methodology.md`, `docs/adding-a-panelist.md`, `NOTICE`.
 - Tests: mock-panelist harness + `tests/test_fusion.py`; CI workflow.
 
+### Hardened after a multi-model review of the implementation
+The shipped code was itself reviewed by a live Codex + Gemini + Claude panel.
+Fixes that landed from it:
+- Run artifacts now default to `$XDG_STATE_HOME/fusion/runs` (outside your repo),
+  and the run root gets a `*` `.gitignore` so prompts/diffs/output are never
+  committed even if pointed inside a repo.
+- Secrets are redacted BEFORE capping; the raw `stdout`/`stderr`/`last_message`
+  sidecar files are redacted in place; patterns expanded (GitHub/GitLab/npm/JWT/
+  Stripe/ASIA), full PEM blocks redacted, name-with-suffix keys
+  (`AWS_SECRET_ACCESS_KEY`) caught, and placeholder double-counting fixed.
+- Output reads are byte-bounded to prevent a runaway panelist from OOMing.
+- `gemini` runs with `--skip-trust` (its throwaway cwd is untrusted, which
+  otherwise silently downgrades `--approval-mode plan` and fails headless).
+- Config-file keys/overrides now actually reach the child and `doctor`'s auth
+  check (`setting()` everywhere, `env.update(_CONFIG)`).
+- `_kill_group` no longer skips `SIGKILL` on a transient `PermissionError`.
+- `strip_ansi` also strips OSC sequences (clipboard / hyperlink escapes).
+- Timeout / max-chars are validated; relative run roots are made absolute.
+
 ### Deliberately out of scope (roadmap)
 - Panelists writing code (opt-in, isolated git worktree).
 - Auto-running builds in the TEST stage beyond the project's own command.
