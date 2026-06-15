@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A fake panelist CLI for fusion's tests.
+"""A fake panelist CLI for alloy's tests.
 
 It impersonates both codex and gemini closely enough to exercise the dispatcher
 without spending tokens, and can be told to misbehave via env vars so we can test

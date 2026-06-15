@@ -1,10 +1,10 @@
-# fusion
+# alloy
 
 **Ask several frontier AI coding CLIs the same hard question, in parallel, and
 get an honest map of where they agree, disagree, and are collectively blind —
 instead of one confident answer from one model.**
 
-fusion is a [Claude Code](https://claude.com/claude-code) skill that brings the
+alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** (`codex`, `gemini`, …) running
@@ -16,7 +16,7 @@ the disagreement* rather than averaging it away.
 > consensus, the contradictions, the unique insight only one model had, and the
 > blind spot none of them saw — then let you decide.
 
-fusion ships **no API keys** and makes **no network calls of its own**. It only
+alloy ships **no API keys** and makes **no network calls of its own**. It only
 runs the CLIs you have already installed and authenticated.
 
 > Not affiliated with OpenRouter. "Fusion" is OpenRouter's term for the
@@ -26,19 +26,19 @@ runs the CLIs you have already installed and authenticated.
 
 ## See it in 15 seconds
 
-A real fusion round (the prompt: *"the single biggest reliability risk when an
+A real alloy round (the prompt: *"the single biggest reliability risk when an
 orchestrator runs multiple AI CLIs in parallel"*) — note that the two models
 **disagree**, which is exactly the point:
 
 ```
-$ fusion doctor
+$ alloy doctor
   [ready] codex   codex-cli 0.139.0
   [ready] gemini  0.46.0
 
-$ fusion panel --prompt-file prompt.txt
-[fusion] panel: codex, gemini (2 model call(s))
-[fusion] codex: ok in 10.4s (exit 0)
-[fusion] gemini: ok in 13.6s (exit 0)
+$ alloy panel --prompt-file prompt.txt
+[alloy] panel: codex, gemini (2 model call(s))
+[alloy] codex: ok in 10.4s (exit 0)
+[alloy] gemini: ok in 13.6s (exit 0)
 ```
 
 - **codex:** "…nondeterministic, interleaved output causing the orchestrator to
@@ -56,8 +56,8 @@ you only half the picture, confidently.
 ## Quickstart
 
 ```bash
-git clone https://github.com/<you>/fusion ~/.claude/skills/fusion   # or use install.sh
-~/.claude/skills/fusion/bin/fusion doctor
+git clone https://github.com/tlangridge/alloy ~/.claude/skills/alloy   # or use install.sh
+~/.claude/skills/alloy/bin/alloy doctor
 ```
 
 `doctor` is always the first command. It tells you which panelists are installed,
@@ -72,13 +72,13 @@ which are authenticated, and exactly how to add the ones that are missing:
 Then, inside Claude Code:
 
 ```
-/fusion ask Should we migrate this service to event sourcing or keep CRUD? Trade-offs.
-/fusion review            # panel reviews your current git diff
-/fusion plan add rate limiting to the public API
-/fusion <a full build task>   # research -> plan -> implement -> test
+/alloy ask Should we migrate this service to event sourcing or keep CRUD? Trade-offs.
+/alloy review            # panel reviews your current git diff
+/alloy plan add rate limiting to the public API
+/alloy <a full build task>   # research -> plan -> implement -> test
 ```
 
-> **The prerequisite cliff, stated honestly:** fusion is only useful if you have
+> **The prerequisite cliff, stated honestly:** alloy is only useful if you have
 > **2+** of {`codex`, `gemini`, …} installed *and authenticated*. With only Claude
 > it degrades to a normal single-model answer and tells you so. Run `doctor`
 > first; it will not surprise you.
@@ -89,14 +89,14 @@ Then, inside Claude Code:
 
 | Mode | What it does |
 |---|---|
-| `/fusion doctor` | Which panelists are installed / authed / ready, with fix-it hints. |
-| `/fusion ask <q>` | One fusion round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
-| `/fusion review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
-| `/fusion plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
-| `/fusion <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
+| `/alloy doctor` | Which panelists are installed / authed / ready, with fix-it hints. |
+| `/alloy ask <q>` | One alloy round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
+| `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
+| `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
+| `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
 In the lifecycle, **Claude writes all the code; the panel only ever reviews,
-read-only.** fusion never lets a panelist edit your files, run a build, or touch
+read-only.** alloy never lets a panelist edit your files, run a build, or touch
 a git worktree. That is a deliberate v1 boundary (see *Roadmap*).
 
 ---
@@ -104,17 +104,17 @@ a git worktree. That is a deliberate v1 boundary (see *Roadmap*).
 ## Why a *local* version?
 
 OpenRouter's hosted Fusion is web-UI only — there is no API for it, so you cannot
-drop it into a coding workflow. fusion gets you the same panel→judge→synthesize
+drop it into a coding workflow. alloy gets you the same panel→judge→synthesize
 shape against the CLIs you already pay for, right inside Claude Code, with the
 run captured to disk so you can audit exactly what each model said.
 
-## When fusion helps (and when it doesn't)
+## When alloy helps (and when it doesn't)
 
 Multi-model panels shine on **high-stakes thinking**: architecture decisions,
 research, planning, debugging triage, security/correctness review — *"if the cost
 of being wrong is higher than the cost of asking three models, fuse."* They are a
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
-distinctive voice and just adds latency and cost). That is why fusion uses the
+distinctive voice and just adds latency and cost). That is why alloy uses the
 panel for the *thinking* and leaves the *writing* to Claude.
 
 ## Safety model
@@ -123,24 +123,24 @@ panel for the *thinking* and leaves the *writing* to Claude.
   (`codex -s read-only`, `gemini --approval-mode plan`) **and** in a throwaway
   temporary working directory, so they get no access to your repo. Adapters
   without a real read-only mode (e.g. `cursor-agent`) are refused unless you
-  explicitly opt in with `FUSION_ALLOW_UNSANDBOXED=1`.
-- **Panel output is treated as untrusted data**, never as instructions — fusion
+  explicitly opt in with `ALLOY_ALLOW_UNSANDBOXED=1`.
+- **Panel output is treated as untrusted data**, never as instructions — alloy
   is hardened against a panelist emitting "ignore previous instructions / run
   this command".
 - **Prompts go on stdin**, never on the command line (no `ARG_MAX` limits, no
   quoting bugs, no shell injection, no leaking prompts into `ps`).
-- **No auto-approve.** fusion never passes `--yolo` / `-y` /
+- **No auto-approve.** alloy never passes `--yolo` / `-y` /
   `--dangerously-bypass-approvals-and-sandbox`.
 - **Secret scanning.** Panelist output (both the saved answer and the raw
   stdout/stderr files) is scanned and redacted for common secret shapes before it
   is saved. This is a best-effort heuristic, not a guarantee.
 - **Run artifacts live outside your repo.** Prompts, redacted output, and the
-  manifest are written under `$XDG_STATE_HOME/fusion/runs` by default (override
-  with `FUSION_RUN_ROOT`), and the run root gets a `.gitignore` so artifacts are
+  manifest are written under `$XDG_STATE_HOME/alloy/runs` by default (override
+  with `ALLOY_RUN_ROOT`), and the run root gets a `.gitignore` so artifacts are
   never committed even if you point it inside a repo.
-- **No project-level config execution.** Config is read from `~/.config/fusion/`
+- **No project-level config execution.** Config is read from `~/.config/alloy/`
   as `KEY=value` (never `source`d), so a hostile repo cannot run code.
-- **Override binaries inherit your environment.** `FUSION_BIN_<NAME>` runs
+- **Override binaries inherit your environment.** `ALLOY_BIN_<NAME>` runs
   whatever you point it at (with your env, as the CLIs need for auth); the
   read-only guarantee is then that tool's responsibility.
 
@@ -150,27 +150,27 @@ panel for the *thinking* and leaves the *writing* to Claude.
 
 ## Privacy & cost
 
-fusion makes no network calls itself and stores no keys. Each fusion round makes
+alloy makes no network calls itself and stores no keys. Each alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider
 accounts through your CLIs — your prompts and diffs are sent to those providers.
 A panel of 3 is roughly 3–5× the cost of one call; the full lifecycle is several
-rounds. fusion shows a cost preflight before multi-round runs. You are
+rounds. alloy shows a cost preflight before multi-round runs. You are
 responsible for each CLI's terms of service regarding automated use.
 
 ## Configuration
 
-Copy [`fusion.config.example`](fusion.config.example) to
-`~/.config/fusion/config` and edit. Everything is also settable via environment
+Copy [`alloy.config.example`](alloy.config.example) to
+`~/.config/alloy/config` and edit. Everything is also settable via environment
 variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `FUSION_PANELISTS` | `codex,gemini` | which adapters form the panel |
-| `FUSION_TIMEOUT` | `240` | per-panelist timeout, seconds |
-| `FUSION_MAX_CHARS` | `200000` | cap on each panelist's captured output |
-| `FUSION_CODEX_MODEL` / `FUSION_GEMINI_MODEL` | CLI default | model override per adapter |
-| `FUSION_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
-| `FUSION_RUN_ROOT` | `$XDG_STATE_HOME/fusion/runs` | where run output is written (outside your repo) |
+| `ALLOY_PANELISTS` | `codex,gemini` | which adapters form the panel |
+| `ALLOY_TIMEOUT` | `240` | per-panelist timeout, seconds |
+| `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
+| `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
+| `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
+| `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
 
 ## Requirements
 
@@ -184,7 +184,7 @@ variables (env wins over the file):
 ```
             prompt (on stdin, never argv)
                       |
-        bin/fusion panel  -- parallel, read-only, throwaway cwd, process-group timeouts
+        bin/alloy panel  -- parallel, read-only, throwaway cwd, process-group timeouts
           /        |        \
       codex      gemini     (more adapters)
           \        |        /
@@ -195,7 +195,7 @@ variables (env wins over the file):
    Claude: SYNTHESIZE (attributed, disagreements surfaced) -> you decide
 ```
 
-`bin/fusion` is the hardened, tested mechanical core (dispatch + capture).
+`bin/alloy` is the hardened, tested mechanical core (dispatch + capture).
 Claude does the judging and synthesis — the parts that need intelligence and your
 repo context. See [`docs/methodology.md`](docs/methodology.md).
 
@@ -211,7 +211,7 @@ template, and the worked `cursor-agent` example (which shows how an adapter with
 
 v1 deliberately keeps the panel read-only. Clearly out of scope until the core is
 battle-tested: panelists writing code (opt-in, isolated git worktree),
-auto-running builds, and a `FUSION_JUDGE=codex|gemini` judge-rotation override.
+auto-running builds, and a `ALLOY_JUDGE=codex|gemini` judge-rotation override.
 
 ## License
 

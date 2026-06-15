@@ -1,4 +1,4 @@
-# Example: `/fusion ask` for a high-stakes architecture decision
+# Example: `/alloy ask` for a high-stakes architecture decision
 
 `ask` is the cheapest, safest mode and the best place to start. Use it when the
 cost of being wrong is higher than the cost of asking several models.
@@ -6,16 +6,16 @@ cost of being wrong is higher than the cost of asking several models.
 ## In Claude Code
 
 ```
-/fusion ask We have a 200k-row/day ingestion pipeline on Postgres. Should we move
+/alloy ask We have a 200k-row/day ingestion pipeline on Postgres. Should we move
 to event sourcing, add a CQRS read model, or just partition + add read replicas?
 Optimize for a 3-person team. Give trade-offs and a recommendation.
 ```
 
-## What fusion does
+## What alloy does
 
 1. Runs `doctor` (2 panelists ready: codex, gemini).
 2. Writes the question to a temp file and dispatches one read-only round:
-   `fusion panel --prompt-file ... --mode consult`.
+   `alloy panel --prompt-file ... --mode consult`.
 3. Reads `manifest.json`, then each `ok` panelist's `result.md`.
 4. **Judges**: which option each model favored, where they agreed (e.g. "don't
    jump to event sourcing for a 3-person team"), where they split (CQRS vs.

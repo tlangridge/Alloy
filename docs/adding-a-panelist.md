@@ -1,16 +1,16 @@
 # Adding a panelist
 
-A panelist is one CLI fusion can dispatch to. Adding one is a small, well-defined
-adapter in `bin/fusion`. The goal is that supporting a new CLI is a ~30-line pull
+A panelist is one CLI alloy can dispatch to. Adding one is a small, well-defined
+adapter in `bin/alloy`. The goal is that supporting a new CLI is a ~30-line pull
 request, not a reverse-engineering project.
 
 ## The 5-function adapter contract
 
 Every adapter answers five questions. They map to methods on the `Adapter` base
-class in `bin/fusion`:
+class in `bin/alloy`:
 
 1. **detect** — *is this CLI installed?* (`detect()` / `resolved_bin()`): is the
-   binary on `PATH` (or overridden via `FUSION_BIN_<NAME>`)?
+   binary on `PATH` (or overridden via `ALLOY_BIN_<NAME>`)?
 2. **auth** — *is it actually logged in?* (`is_authed()` → `auth_state()`):
    presence on `PATH` says nothing about login state. Use a **cheap, no-token**
    heuristic — an env var or a credentials file — so `doctor` does not spend
@@ -25,13 +25,13 @@ class in `bin/fusion`:
 5. **capabilities** — *what can it do?* (`read_only`, `experimental`,
    `model()`): set the class attributes. If the CLI has **no real read-only
    mode**, set `read_only = False`; the engine will refuse to dispatch to it
-   unless the user sets `FUSION_ALLOW_UNSANDBOXED=1`.
+   unless the user sets `ALLOY_ALLOW_UNSANDBOXED=1`.
 
 ## Template
 
 ```python
 class MyToolAdapter(Adapter):
-    name = "mytool"                 # what users put in FUSION_PANELISTS
+    name = "mytool"                 # what users put in ALLOY_PANELISTS
     bin = "mytool"                  # the executable on PATH
     read_only = True                # does it have a verified read-only mode?
     experimental = False            # ship only verified adapters as non-experimental
@@ -45,7 +45,7 @@ class MyToolAdapter(Adapter):
         return os.path.isfile(os.path.expanduser("~/.mytool/auth.json"))
 
     def model(self):
-        return setting("FUSION_MYTOOL_MODEL")   # optional per-adapter override
+        return setting("ALLOY_MYTOOL_MODEL")   # optional per-adapter override
 
     def build_args(self, last_message_path, mode):
         # prompt arrives on STDIN; return only the flags. Use the read-only flag.
@@ -74,11 +74,11 @@ DEFAULT_PANEL_ORDER = ["codex", "gemini", "mytool"]   # if it should run by defa
 ## Verify it
 
 ```bash
-bin/fusion doctor                 # your adapter should show up with the right status
-echo "Say READY." | bin/fusion panel --panelists mytool --timeout 60
+bin/alloy doctor                 # your adapter should show up with the right status
+echo "Say READY." | bin/alloy panel --panelists mytool --timeout 60
 ```
 
-Add a mock in `tests/mocks/` and a case in `tests/test_fusion.py` so CI exercises
+Add a mock in `tests/mocks/` and a case in `tests/test_alloy.py` so CI exercises
 your adapter's failure modes (timeout, nonzero exit, empty output) without
 spending tokens. See the existing `mock_codex` / `mock_gemini` mocks.
 
@@ -102,16 +102,16 @@ class CursorAgentAdapter(Adapter):
 
     def build_args(self, last_message_path, mode):
         # NB: even in --print mode this can write files and run bash. It is only
-        # contained by fusion's throwaway cwd. Never pass -f/--force.
+        # contained by alloy's throwaway cwd. Never pass -f/--force.
         return ["--print", "--output-format", "text"]
 
     def parse(self, stdout, stderr, last_message):
         return strip_ansi(stdout).strip()
 ```
 
-Because `read_only = False`, `bin/fusion panel` skips it (recording the reason in
-the manifest) unless the user explicitly sets `FUSION_ALLOW_UNSANDBOXED=1`. This
-keeps "I added an adapter" from silently weakening fusion's safety promise.
+Because `read_only = False`, `bin/alloy panel` skips it (recording the reason in
+the manifest) unless the user explicitly sets `ALLOY_ALLOW_UNSANDBOXED=1`. This
+keeps "I added an adapter" from silently weakening alloy's safety promise.
 
 > Lesson: an adapter is more than an invocation string. The `read_only` and
-> `auth` answers are what keep fusion safe and honest.
+> `auth` answers are what keep alloy safe and honest.

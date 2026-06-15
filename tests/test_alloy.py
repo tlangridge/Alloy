@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the fusion dispatcher, driven by a mock panelist CLI so they cost
+"""Tests for the alloy dispatcher, driven by a mock panelist CLI so they cost
 no tokens. Run with:  python3 -m unittest discover -s tests -v
 """
 import json
@@ -12,21 +12,21 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-FUSION = os.path.join(REPO, "bin", "fusion")
+ALLOY = os.path.join(REPO, "bin", "alloy")
 MOCK = os.path.join(HERE, "mocks", "mock_panelist.py")
 
 
-def run_fusion(args, env_extra=None, timeout=60):
+def run_alloy(args, env_extra=None, timeout=60):
     env = dict(os.environ)
     # Point both adapters at the mock and make them look authenticated.
-    env["FUSION_BIN_CODEX"] = MOCK
-    env["FUSION_BIN_GEMINI"] = MOCK
+    env["ALLOY_BIN_CODEX"] = MOCK
+    env["ALLOY_BIN_GEMINI"] = MOCK
     env["CODEX_API_KEY"] = "test"
     env["GEMINI_API_KEY"] = "test"
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(
-        [sys.executable, FUSION] + args,
+        [sys.executable, ALLOY] + args,
         capture_output=True, text=True, env=env, timeout=timeout,
     )
     return proc
@@ -39,7 +39,7 @@ def panel(tmp, env_extra=None, extra_args=None, timeout=60):
     args = ["panel", "--prompt-file", prompt, "--run-dir", os.path.join(tmp, "runs")]
     if extra_args:
         args += extra_args
-    proc = run_fusion(args, env_extra=env_extra, timeout=timeout)
+    proc = run_alloy(args, env_extra=env_extra, timeout=timeout)
     manifest_path = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
     manifest = None
     if manifest_path and os.path.isfile(manifest_path):
@@ -55,10 +55,10 @@ def by_name(manifest, name):
     return None
 
 
-class FusionTests(unittest.TestCase):
+class AlloyTests(unittest.TestCase):
     def setUp(self):
         os.chmod(MOCK, 0o755)
-        self.tmp = tempfile.mkdtemp(prefix="fusiontest-")
+        self.tmp = tempfile.mkdtemp(prefix="alloytest-")
 
     def test_both_ok(self):
         proc, m = panel(self.tmp)
@@ -129,7 +129,7 @@ class FusionTests(unittest.TestCase):
             os.kill(child_pid, 0)  # raises if the pid is gone -> group kill worked
 
     def test_not_installed(self):
-        proc, m = panel(self.tmp, env_extra={"FUSION_BIN_CODEX": "/no/such/binary"})
+        proc, m = panel(self.tmp, env_extra={"ALLOY_BIN_CODEX": "/no/such/binary"})
         self.assertEqual(by_name(m, "codex")["status"], "not_installed")
 
     def test_no_panelists_fallback(self):
@@ -143,7 +143,7 @@ class FusionTests(unittest.TestCase):
         self.assertTrue(m["summary"]["skipped"])
 
     def test_doctor_json(self):
-        proc = run_fusion(["doctor", "--json"])
+        proc = run_alloy(["doctor", "--json"])
         self.assertEqual(proc.returncode, 0)
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
@@ -154,14 +154,14 @@ class FusionTests(unittest.TestCase):
     def test_empty_prompt_refused(self):
         empty = os.path.join(self.tmp, "empty.txt")
         open(empty, "w").close()
-        proc = run_fusion(["panel", "--prompt-file", empty])
+        proc = run_alloy(["panel", "--prompt-file", empty])
         self.assertEqual(proc.returncode, 2)
 
     def test_invalid_timeout_rejected(self):
         prompt = os.path.join(self.tmp, "p.txt")
         with open(prompt, "w") as f:
             f.write("hi")
-        proc = run_fusion(["panel", "--prompt-file", prompt, "--timeout", "0"])
+        proc = run_alloy(["panel", "--prompt-file", prompt, "--timeout", "0"])
         self.assertEqual(proc.returncode, 2)
 
     def test_run_root_has_gitignore(self):
@@ -192,9 +192,9 @@ class RedactionUnitTests(unittest.TestCase):
     def setUpClass(cls):
         import importlib.util
         import importlib.machinery
-        # bin/fusion has no .py extension, so give importlib an explicit loader.
-        loader = importlib.machinery.SourceFileLoader("fusion_mod", FUSION)
-        spec = importlib.util.spec_from_loader("fusion_mod", loader)
+        # bin/alloy has no .py extension, so give importlib an explicit loader.
+        loader = importlib.machinery.SourceFileLoader("alloy_mod", ALLOY)
+        spec = importlib.util.spec_from_loader("alloy_mod", loader)
         cls.f = importlib.util.module_from_spec(spec)
         loader.exec_module(cls.f)
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""fusion - a local, multi-CLI implementation of the "Fusion beats Frontier" idea.
+"""alloy - a local, multi-CLI implementation of the "Fusion beats Frontier" idea.
 
 Dispatches one prompt to every available AI-coding CLI panelist IN PARALLEL,
 strictly read-only, and captures each panelist's answer into a run directory
-with a machine-readable manifest. The host model (Claude, running the /fusion
+with a machine-readable manifest. The host model (Claude, running the /alloy
 skill) then reads the manifest, JUDGES the answers (compares, does not merge:
 consensus / contradictions / unique insights / blind spots), and SYNTHESIZES a
 final answer that surfaces disagreement rather than hiding it.
@@ -13,7 +13,7 @@ itself. The PANELISTS never touch your repository: they run read-only, in a
 throwaway temporary working directory, with stdin fed from the prompt file. The
 dispatcher writes run artifacts (the prompt, redacted CLI output, a manifest) to
 a run directory OUTSIDE your repo by default (under XDG_STATE_HOME; override with
-FUSION_RUN_ROOT).
+ALLOY_RUN_ROOT).
 
 Design notes (why it is the way it is):
   * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
@@ -27,10 +27,10 @@ Design notes (why it is the way it is):
     and scanned for secrets before being persisted, so a runaway or leaky
     panelist cannot blow up the host's context or commit a key.
   * Configuration is read from environment variables and an optional
-    KEY=value file at ~/.config/fusion/config. It NEVER `source`s a file from
+    KEY=value file at ~/.config/alloy/config. It NEVER `source`s a file from
     the project directory (that would let a hostile repo run code).
 
-No API keys live here. fusion makes no network calls of its own; it only
+No API keys live here. alloy makes no network calls of its own; it only
 invokes the CLIs you have already installed and authenticated, and your
 prompts/diffs go to whichever model providers those CLIs use.
 """
@@ -50,12 +50,12 @@ import threading
 import time
 from datetime import datetime, timezone
 
-FUSION_VERSION = "0.1.0"
+ALLOY_VERSION = "0.1.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 240
 DEFAULT_MAX_CHARS = 200_000
-TRUNCATION_MARKER = "\n\n[... fusion: output truncated at {n} characters ...]\n"
+TRUNCATION_MARKER = "\n\n[... alloy: output truncated at {n} characters ...]\n"
 
 # Track spawned process groups so we can clean them up on SIGINT/SIGTERM.
 _LIVE_PGIDS: "set[int]" = set()
@@ -78,7 +78,7 @@ def log(msg: str) -> None:
     """Progress goes to stderr so a 30-45s parallel dispatch never looks hung,
     and so it never pollutes the stdout the host parses."""
     with _STDERR_LOCK:
-        sys.stderr.write("[fusion] " + msg + "\n")
+        sys.stderr.write("[alloy] " + msg + "\n")
         sys.stderr.flush()
 
 
@@ -181,12 +181,12 @@ def cap_chars(text: str, max_chars: int) -> "tuple[str, bool]":
 # configuration (env + optional KEY=value file; NEVER sourced as shell)
 # --------------------------------------------------------------------------- #
 def config_path() -> str:
-    if os.environ.get("FUSION_CONFIG"):
-        return os.environ["FUSION_CONFIG"]
+    if os.environ.get("ALLOY_CONFIG"):
+        return os.environ["ALLOY_CONFIG"]
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
         os.path.expanduser("~"), ".config"
     )
-    return os.path.join(base, "fusion", "config")
+    return os.path.join(base, "alloy", "config")
 
 
 def load_config() -> "dict[str, str]":
@@ -246,7 +246,7 @@ class Adapter:
 
     # -- detection / auth ---------------------------------------------------- #
     def resolved_bin(self) -> "str | None":
-        override = setting("FUSION_BIN_" + self.name.upper().replace("-", "_"))
+        override = setting("ALLOY_BIN_" + self.name.upper().replace("-", "_"))
         if override:
             override = os.path.expanduser(override)
             if os.sep in override:        # a path: make absolute (child runs in a different cwd)
@@ -316,7 +316,7 @@ class CodexAdapter(Adapter):
         return os.path.isfile(os.path.join(home, "auth.json"))
 
     def model(self) -> "str | None":
-        return setting("FUSION_CODEX_MODEL")
+        return setting("ALLOY_CODEX_MODEL")
 
     def build_args(self, last_message_path: str, mode: str) -> "list[str]":
         # Prompt is fed on stdin (NOT as an argv prompt): passing both a prompt
@@ -367,7 +367,7 @@ class GeminiAdapter(Adapter):
             return False
 
     def model(self) -> "str | None":
-        return setting("FUSION_GEMINI_MODEL")
+        return setting("ALLOY_GEMINI_MODEL")
 
     def build_args(self, last_message_path: str, mode: str) -> "list[str]":
         # `-p` triggers headless mode; the real prompt is appended from stdin.
@@ -397,7 +397,7 @@ class GeminiAdapter(Adapter):
 
 class AntigravityAdapter(Adapter):
     # Experimental: invocation flags are not yet verified against a real binary,
-    # so this adapter is OFF unless explicitly listed in FUSION_PANELISTS. doctor
+    # so this adapter is OFF unless explicitly listed in ALLOY_PANELISTS. doctor
     # reports it honestly rather than pretending it works.
     name = "antigravity"
     bin = "antigravity"
@@ -429,7 +429,7 @@ DEFAULT_PANEL_ORDER = ["codex", "gemini"]
 def selected_panelists() -> "list[str]":
     # Return names verbatim (including typos) so cmd_panel can report an unknown
     # adapter as skipped rather than silently dropping it.
-    raw = setting("FUSION_PANELISTS")
+    raw = setting("ALLOY_PANELISTS")
     if raw:
         return [n.strip() for n in raw.split(",") if n.strip()]
     return list(DEFAULT_PANEL_ORDER)
@@ -441,11 +441,11 @@ def default_run_root() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.join(
         os.path.expanduser("~"), ".local", "state"
     )
-    return os.path.join(base, "fusion", "runs")
+    return os.path.join(base, "alloy", "runs")
 
 
 def allow_unsandboxed() -> bool:
-    return (setting("FUSION_ALLOW_UNSANDBOXED", "0") or "0").lower() in (
+    return (setting("ALLOY_ALLOW_UNSANDBOXED", "0") or "0").lower() in (
         "1",
         "true",
         "yes",
@@ -496,7 +496,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "command": argv,
         "model": adapter.model(),
         "cli_version": adapter.cli_version(),
-        "adapter_version": FUSION_VERSION,
+        "adapter_version": ALLOY_VERSION,
         "read_only": adapter.read_only,
         "status": "error",
         "exit_code": None,
@@ -606,9 +606,9 @@ def cmd_panel(args: argparse.Namespace) -> int:
     # `is not None` so an explicit --timeout 0 is caught by validation below,
     # not silently swallowed by `or` and replaced with the default.
     timeout_s = (args.timeout if args.timeout is not None
-                 else setting_int("FUSION_TIMEOUT", DEFAULT_TIMEOUT_S))
+                 else setting_int("ALLOY_TIMEOUT", DEFAULT_TIMEOUT_S))
     max_chars = (args.max_chars if args.max_chars is not None
-                 else setting_int("FUSION_MAX_CHARS", DEFAULT_MAX_CHARS))
+                 else setting_int("ALLOY_MAX_CHARS", DEFAULT_MAX_CHARS))
     if timeout_s < 1:
         log(f"invalid timeout {timeout_s}: must be a positive integer")
         return 2
@@ -632,11 +632,11 @@ def cmd_panel(args: argparse.Namespace) -> int:
             skipped.append({"name": n, "reason": "not_installed"})
             continue
         if not ad.read_only and not allow_unsandboxed():
-            skipped.append({"name": n, "reason": "no read-only mode (set FUSION_ALLOW_UNSANDBOXED=1 to permit)"})
+            skipped.append({"name": n, "reason": "no read-only mode (set ALLOY_ALLOW_UNSANDBOXED=1 to permit)"})
             continue
         chosen.append(ad)
 
-    run_root = args.run_dir or setting("FUSION_RUN_ROOT") or default_run_root()
+    run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
     run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
     os.makedirs(run_root, exist_ok=True)
     # Belt-and-suspenders: even if a user points the run root inside a repo, keep
@@ -653,7 +653,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
     write_atomic(prompt_path, prompt)
 
     manifest = {
-        "fusion_version": FUSION_VERSION,
+        "alloy_version": ALLOY_VERSION,
         "schema": MANIFEST_SCHEMA,
         "created_utc": now_utc_iso(),
         "mode": args.mode,
@@ -737,13 +737,13 @@ def _doctor_rows() -> "list[dict]":
 def cmd_doctor(args: argparse.Namespace) -> int:
     rows = _doctor_rows()
     if args.json:
-        print(json.dumps({"fusion_version": FUSION_VERSION,
+        print(json.dumps({"alloy_version": ALLOY_VERSION,
                           "panelists": rows}, indent=2))
         return 0
 
     icon = {"ready": "[ready]", "installed_not_authed": "[auth?]",
             "not_installed": "[ --- ]"}
-    print(f"fusion {FUSION_VERSION}  -  panelist status\n")
+    print(f"alloy {ALLOY_VERSION}  -  panelist status\n")
     ready = 0
     for r in rows:
         tag = icon.get(r["status"], "[ ? ]")
@@ -763,13 +763,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"          not installed -> {r['install_hint']}")
     print()
     if ready == 0:
-        print("  No panelists are ready. fusion will fall back to a single-model")
+        print("  No panelists are ready. alloy will fall back to a single-model")
         print("  (Claude-only) answer until you install and authenticate at least")
-        print("  one panelist above. fusion is most useful with 2+ panelists.")
+        print("  one panelist above. alloy is most useful with 2+ panelists.")
     else:
-        print(f"  {ready} panelist(s) ready. A fusion round makes {ready} parallel")
+        print(f"  {ready} panelist(s) ready. An alloy round makes {ready} parallel")
         print("  model call(s) -- one per ready panelist, billed to your own")
-        print("  provider accounts. fusion ships no keys and makes no calls of its own.")
+        print("  provider accounts. alloy ships no keys and makes no calls of its own.")
     return 0
 
 
@@ -783,14 +783,14 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "rounds": rounds,
         "model_calls": calls,
         "note": "Each call runs on your already-authenticated CLI and bills to "
-                "your provider account. fusion ships no API keys and makes no "
+                "your provider account. alloy ships no API keys and makes no "
                 "network calls of its own.",
     }, indent=2))
     return 0
 
 
 def cmd_version(args: argparse.Namespace) -> int:
-    print(f"fusion {FUSION_VERSION} (python {sys.version.split()[0]})")
+    print(f"alloy {ALLOY_VERSION} (python {sys.version.split()[0]})")
     print("adapters: " + ", ".join(
         f"{n}{'*' if a.experimental else ''}" for n, a in ADAPTERS.items()))
     print("config: " + config_path())
@@ -806,7 +806,7 @@ def _install_signal_handlers() -> None:
             pgids = list(_LIVE_PGIDS)
         for pg in pgids:
             _kill_group(pg)
-        sys.stderr.write("\n[fusion] interrupted; killed in-flight panelists\n")
+        sys.stderr.write("\n[alloy] interrupted; killed in-flight panelists\n")
         sys.exit(130)
 
     for s in (signal.SIGINT, signal.SIGTERM):
@@ -818,8 +818,8 @@ def _install_signal_handlers() -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="fusion",
-        description="Local multi-CLI 'Fusion' panel dispatcher (read-only).",
+        prog="alloy",
+        description="Local multi-CLI model-panel dispatcher (read-only).",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -828,7 +828,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--mode", default="consult",
                     choices=["consult", "review"],
                     help="framing hint recorded in the manifest")
-    pa.add_argument("--panelists", help="comma list overriding FUSION_PANELISTS")
+    pa.add_argument("--panelists", help="comma list overriding ALLOY_PANELISTS")
     pa.add_argument("--run-dir", help="root dir for run output")
     pa.add_argument("--timeout", type=int, help="per-panelist timeout (seconds)")
     pa.add_argument("--max-chars", type=int, help="cap per-panelist output chars")

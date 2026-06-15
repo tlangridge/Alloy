@@ -1,6 +1,6 @@
-# Example: a real fusion round where the panel disagrees
+# Example: a real alloy round where the panel disagrees
 
-This is an actual, unedited fusion round (it was run while building fusion). It
+This is an actual, unedited alloy round (it was run while building alloy). It
 shows the most valuable thing a panel does: **disagree**, and let the judge keep
 both signals instead of averaging them away.
 
@@ -13,13 +13,13 @@ both signals instead of averaging them away.
 ## Dispatch
 
 ```
-$ fusion panel --prompt-file prompt.txt
-[fusion] panel: codex, gemini (2 model call(s))
-[fusion] codex: dispatching (read-only, timeout 280s)
-[fusion] gemini: dispatching (read-only, timeout 280s)
-[fusion] codex: ok in 10.4s (exit 0)
-[fusion] gemini: ok in 13.6s (exit 0)
-[fusion] done: 2/2 panelist(s) ok -> .fusion/runs/.../manifest.json
+$ alloy panel --prompt-file prompt.txt
+[alloy] panel: codex, gemini (2 model call(s))
+[alloy] codex: dispatching (read-only, timeout 280s)
+[alloy] gemini: dispatching (read-only, timeout 280s)
+[alloy] codex: ok in 10.4s (exit 0)
+[alloy] gemini: ok in 13.6s (exit 0)
+[alloy] done: 2/2 panelist(s) ok -> .alloy/runs/.../manifest.json
 ```
 
 ## The panel answers (verbatim from the run dir)
@@ -67,10 +67,10 @@ to the wrong CLI) and **gemini** on the *write* path (concurrent agents mutating
 shared files can silently corrupt state). Both are real; a single model would
 likely have given you only one.
 
-For fusion itself, both are designed out: each panelist writes to its **own**
+For alloy itself, both are designed out: each panelist writes to its **own**
 files (no interleaving, no misattribution) and runs **read-only in a throwaway
 working directory** (no shared-state writes). The judge also flagged a blind spot
 neither model raised — a hung/unauthenticated CLI stalling the panel — which
-fusion handles with non-TTY stdin and process-group timeouts.
+alloy handles with non-TTY stdin and process-group timeouts.
 
 > Cross-model agreement is a recommendation, not proof. You decide.

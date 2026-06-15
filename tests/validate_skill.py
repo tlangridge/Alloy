@@ -27,8 +27,8 @@ def main():
         fail("SKILL.md must start with a --- frontmatter block ---")
     fm, body = m.group(1), m.group(2)
 
-    if not re.search(r"^name:\s*fusion\s*$", fm, re.MULTILINE):
-        fail("frontmatter must declare `name: fusion`")
+    if not re.search(r"^name:\s*alloy\s*$", fm, re.MULTILINE):
+        fail("frontmatter must declare `name: alloy`")
     if "description:" not in fm:
         fail("frontmatter must declare a `description`")
     if "allowed-tools:" not in fm:

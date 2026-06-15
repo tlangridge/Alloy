@@ -24,9 +24,9 @@ jobs:
         run: python3 tests/validate_skill.py
       - name: Smoke test doctor/version/estimate
         run: |
-          python3 bin/fusion version
-          python3 bin/fusion doctor
-          python3 bin/fusion estimate --rounds 3
+          python3 bin/alloy version
+          python3 bin/alloy doctor
+          python3 bin/alloy estimate --rounds 3
 
   shellcheck:
     runs-on: ubuntu-latest

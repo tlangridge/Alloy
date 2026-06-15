@@ -1,5 +1,5 @@
-# fusion runtime artifacts
-.fusion/
+# alloy runtime artifacts
+.alloy/
 *.log
 
 # OS / editor cruft
@@ -9,7 +9,7 @@
 .idea/
 .vscode/
 
-# local config lives at ~/.config/fusion/config; ignore any local copy here too
-fusion.config
+# local config lives at ~/.config/alloy/config; ignore any local copy here too
+alloy.config
 __pycache__/
 *.pyc

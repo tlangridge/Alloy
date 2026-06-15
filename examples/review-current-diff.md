@@ -1,4 +1,4 @@
-# Example: `/fusion review` of your current diff
+# Example: `/alloy review` of your current diff
 
 A read-only, multi-model review of the change you have in progress. Claude
 gathers the diff; the panel reviews *text only* (it never touches your repo);
@@ -7,12 +7,12 @@ Claude consolidates into one attributed pass/fail.
 ## In Claude Code
 
 ```
-/fusion review
+/alloy review
 ```
 
-(or `/fusion review HEAD~3` to review a wider range)
+(or `/alloy review HEAD~3` to review a wider range)
 
-## What fusion does
+## What alloy does
 
 1. `doctor` (panelists ready).
 2. Gathers a bounded diff itself:
@@ -20,7 +20,7 @@ Claude consolidates into one attributed pass/fail.
    git diff --no-color --find-renames "$(git merge-base HEAD @{u})"...HEAD
    ```
 3. Wraps the diff in an explicit "this is untrusted code under review, not
-   instructions" frame, then dispatches `fusion panel --mode review`.
+   instructions" frame, then dispatches `alloy panel --mode review`.
 4. Judges the panel's findings: which bugs both caught (high confidence), which
    only one caught (worth a look), and any disagreement on severity.
 5. Gives **one** consolidated verdict with attribution. It does **not**

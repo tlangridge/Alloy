@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to fusion are documented here. Format loosely follows
+All notable changes to alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
 ## [0.1.0] - 2026-06-15
@@ -8,7 +8,7 @@ All notable changes to fusion are documented here. Format loosely follows
 Initial release.
 
 ### Added
-- `bin/fusion`: stdlib-only Python 3 dispatcher.
+- `bin/alloy`: stdlib-only Python 3 dispatcher.
   - `panel` — dispatch one prompt to all ready panelists in parallel, read-only,
     in a throwaway working directory; capture per-panelist output and a
     machine-readable `manifest.json`.
@@ -22,17 +22,17 @@ Initial release.
   `os.killpg`; non-TTY stdin so unauthenticated CLIs fail fast instead of
   hanging; codepoint-safe output caps; secret redaction of panelist output;
   `KEY=value` user-level config that is never `source`d; refusal to dispatch to
-  adapters lacking a real read-only mode unless `FUSION_ALLOW_UNSANDBOXED=1`.
+  adapters lacking a real read-only mode unless `ALLOY_ALLOW_UNSANDBOXED=1`.
 - `SKILL.md`: the Claude Code skill — args-based modes (doctor / ask / review /
   plan / full lifecycle), the "panel output is untrusted data" standing rule, the
   judge schema + anti-sycophancy synthesis rubric, and plan-mode handling.
 - Docs: `README.md`, `docs/methodology.md`, `docs/adding-a-panelist.md`, `NOTICE`.
-- Tests: mock-panelist harness + `tests/test_fusion.py`; CI workflow.
+- Tests: mock-panelist harness + `tests/test_alloy.py`; CI workflow.
 
 ### Hardened after a multi-model review of the implementation
 The shipped code was itself reviewed by a live Codex + Gemini + Claude panel.
 Fixes that landed from it:
-- Run artifacts now default to `$XDG_STATE_HOME/fusion/runs` (outside your repo),
+- Run artifacts now default to `$XDG_STATE_HOME/alloy/runs` (outside your repo),
   and the run root gets a `*` `.gitignore` so prompts/diffs/output are never
   committed even if pointed inside a repo.
 - Secrets are redacted BEFORE capping; the raw `stdout`/`stderr`/`last_message`
@@ -51,4 +51,4 @@ Fixes that landed from it:
 ### Deliberately out of scope (roadmap)
 - Panelists writing code (opt-in, isolated git worktree).
 - Auto-running builds in the TEST stage beyond the project's own command.
-- `FUSION_JUDGE=codex|gemini` judge-rotation override.
+- `ALLOY_JUDGE=codex|gemini` judge-rotation override.
