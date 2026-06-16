@@ -6,7 +6,10 @@
 # of the same name override values here.
 
 # Which adapters form the panel (comma-separated, in order).
-# Shipped + verified: codex, gemini. Experimental/off by default: antigravity.
+# Verified read-only adapters: codex, gemini, grok. codex+gemini are the default
+# panel; add grok (or llm) here to include them, e.g. codex,gemini,grok.
+# No real read-only mode / experimental (skipped unless ALLOY_ALLOW_UNSANDBOXED=1):
+# opencode, cursor-agent, antigravity.
 ALLOY_PANELISTS=codex,gemini
 
 # Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
@@ -42,6 +45,7 @@ ALLOY_WEB=1
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
 # ALLOY_GEMINI_MODEL=gemini-2.5-pro
+# ALLOY_GROK_MODEL=grok-build          # or grok-composer-2.5-fast (grok's default)
 
 # Codex reasoning effort for panel runs. Default "high" keeps runs inside the
 # timeout; otherwise a global `model_reasoning_effort = "xhigh"` in

@@ -18,6 +18,9 @@ MOCK = os.path.join(HERE, "mocks", "mock_panelist.py")
 
 def run_alloy(args, env_extra=None, timeout=60):
     env = dict(os.environ)
+    # Hermetic: ignore the developer's ~/.config/alloy/config (e.g. a local
+    # ALLOY_PANELISTS=...,grok must not leak real CLIs into the test panel).
+    env["ALLOY_CONFIG"] = "/dev/null"
     # Point both adapters at the mock and make them look authenticated.
     env["ALLOY_BIN_CODEX"] = MOCK
     env["ALLOY_BIN_GEMINI"] = MOCK
@@ -148,7 +151,7 @@ class AlloyTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
         self.assertEqual(
-            {"codex", "gemini", "llm", "opencode", "cursor-agent", "antigravity"},
+            {"codex", "gemini", "grok", "llm", "opencode", "cursor-agent", "antigravity"},
             names)
         codex = next(p for p in data["panelists"] if p["name"] == "codex")
         self.assertEqual(codex["status"], "ready")
@@ -276,6 +279,21 @@ class AlloyTests(unittest.TestCase):
             env_extra={"MOCK_BEHAVIOR": "hang", "ALLOY_STALL_TIMEOUT": "1",
                        "ALLOY_HEARTBEAT": "1"}, timeout=20)
         self.assertIn("stalled", proc.stderr)  # killed by stall, not the 30s timeout
+
+    def test_grok_uses_plan_and_prompt_file(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        cmd = " ".join(by_name(m, "grok")["command"])
+        self.assertIn("--permission-mode plan", cmd)  # read-only
+        self.assertIn("--prompt-file", cmd)           # prompt from a real file
+        self.assertNotIn("--disable-web-search", cmd)  # web on by default
+
+    def test_grok_web_can_be_disabled(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x",
+                                    "ALLOY_WEB": "0"})
+        cmd = " ".join(by_name(m, "grok")["command"])
+        self.assertIn("--disable-web-search", cmd)
 
 
 class RedactionUnitTests(unittest.TestCase):

@@ -285,6 +285,7 @@ variables (env wins over the file):
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
+| `ALLOY_GROK_MODEL` | grok default | Grok model: `grok-build` or `grok-composer-2.5-fast` |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
 | `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |

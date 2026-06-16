@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.1"
+ALLOY_VERSION = "0.1.2"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -310,7 +310,7 @@ class Adapter:
         return None
 
     # -- invocation ---------------------------------------------------------- #
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         raise NotImplementedError
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
@@ -342,7 +342,7 @@ class CodexAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CODEX_MODEL")
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         # Prompt is fed on stdin (NOT as an argv prompt): passing both a prompt
         # arg AND stdin makes codex append stdin as a <stdin> block, so we pass
         # neither a prompt arg nor '-'. `-o` captures only the final message.
@@ -408,7 +408,7 @@ class GeminiAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_GEMINI_MODEL")
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         # `-p` triggers headless mode; the real prompt is appended from stdin.
         # `--approval-mode plan` is gemini's read-only mode. Never --yolo / -y.
         # `--skip-trust` is required: panelists run in an empty throwaway cwd,
@@ -449,7 +449,7 @@ class AntigravityAdapter(Adapter):
     install_hint = "see https://antigravity.google (experimental; adapter unverified)"
     auth_hint = "n/a (experimental)"
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         raise RuntimeError(
             "antigravity adapter is experimental and unverified; enable only after "
             "verifying its read-only flags. See docs/adding-a-panelist.md."
@@ -480,7 +480,7 @@ class LlmAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_LLM_MODEL")
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         # `llm` reads the prompt from stdin when none is given as an argument.
         args: "list[str]" = []
         m = self.model()
@@ -506,7 +506,7 @@ class OpenCodeAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_OPENCODE_MODEL")
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         args = ["run"]
         m = self.model()
         if m:
@@ -531,7 +531,7 @@ class CursorAgentAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CURSOR_AGENT_MODEL")
 
-    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         args = ["--print", "--output-format", "text"]
         m = self.model()
         if m:
@@ -542,12 +542,52 @@ class CursorAgentAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
+class GrokAdapter(Adapter):
+    # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` (like gemini's
+    # plan mode); headless single-turn reads the prompt from a real file via
+    # `--prompt-file` (it does NOT accept '-'/stdin) and prints the answer to
+    # stdout (`--output-format plain`). Verified live. Models: grok-build,
+    # grok-composer-2.5-fast (default).
+    name = "grok"
+    bin = "grok"
+    read_only = True
+    install_hint = "see https://grok.com (Grok CLI), then `grok login`"
+    auth_hint = "grok login   (or set XAI_API_KEY)"
+
+    def is_authed(self) -> bool:
+        if setting("XAI_API_KEY") or setting("GROK_API_KEY"):
+            return True
+        return os.path.isfile(os.path.join(os.path.expanduser("~"), ".grok", "auth.json"))
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_GROK_MODEL")  # e.g. grok-build / grok-composer-2.5-fast
+
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+        # plan = read-only (no edits/bash); prompt from a real file; plain stdout.
+        # Never use --always-approve or --permission-mode bypassPermissions.
+        args = ["--permission-mode", "plan", "--output-format", "plain",
+                "--prompt-file", prompt_path]
+        if not web_enabled():
+            args += ["--disable-web-search"]
+        effort = setting("ALLOY_GROK_EFFORT")
+        if effort and effort.lower() not in ("inherit", "default"):
+            args += ["--effort", effort]
+        m = self.model()
+        if m:
+            args += ["-m", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
 # Verified read-only adapters ship in the default panel. The rest are registered
-# (so `doctor` lists them) but excluded by default: `llm` is opt-in, and the
-# no-read-only / experimental ones are refused unless ALLOY_ALLOW_UNSANDBOXED=1.
+# (so `doctor` lists them) but excluded by default: `grok`/`llm` are opt-in, and
+# the no-read-only / experimental ones are refused unless ALLOY_ALLOW_UNSANDBOXED=1.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
     "gemini": GeminiAdapter(),
+    "grok": GrokAdapter(),
     "llm": LlmAdapter(),
     "opencode": OpenCodeAdapter(),
     "cursor-agent": CursorAgentAdapter(),
@@ -640,7 +680,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     status_path = os.path.join(pdir, "status.json")
 
     binp = adapter.resolved_bin()
-    argv = [binp] + adapter.build_args(last_path, mode)
+    argv = [binp] + adapter.build_args(prompt_path, last_path, mode)
 
     # quiet down ANSI / interactive behaviour in the child
     env = dict(os.environ)

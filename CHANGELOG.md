@@ -3,6 +3,20 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.2] - 2026-06-16
+
+### Added
+- **Grok CLI adapter** (`grok`, xAI). Verified read-only via `--permission-mode
+  plan`; headless, web-search-aware (`--disable-web-search` when `ALLOY_WEB=0`),
+  with model selection via `ALLOY_GROK_MODEL` (`grok-build` /
+  `grok-composer-2.5-fast`). Registered and opt-in — add `grok` to
+  `ALLOY_PANELISTS` to include it in the panel.
+
+### Changed
+- Adapter `build_args` now receive the prompt-file path, so a CLI that reads its
+  prompt from a file (like Grok's `--prompt-file`, which doesn't accept stdin) is
+  supported alongside the stdin-based panelists.
+
 ## [0.1.1] - 2026-06-16
 
 ### Fixed

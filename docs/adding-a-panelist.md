@@ -15,10 +15,12 @@ class in `bin/alloy`:
    presence on `PATH` says nothing about login state. Use a **cheap, no-token**
    heuristic — an env var or a credentials file — so `doctor` does not spend
    money. Return `ready` / `installed_not_authed` / `not_installed`.
-3. **invoke-read-only** — *how do I run it read-only, with the prompt on stdin?*
-   (`build_args(last_message_path, mode)`): return the argv **after** the binary.
-   The prompt is always fed on stdin by the engine — your args must **not**
-   include the prompt. Include the CLI's read-only flag here.
+3. **invoke-read-only** — *how do I run it read-only?*
+   (`build_args(prompt_path, last_message_path, mode)`): return the argv **after**
+   the binary, including the CLI's read-only flag. The engine feeds the prompt on
+   **stdin**, so most adapters need nothing for input. If your CLI reads its prompt
+   from a **file** instead (e.g. Grok's `--prompt-file`), pass the `prompt_path`
+   argument. Either way, never put the prompt text in argv.
 4. **parse** — *where is the clean answer?* (`parse(stdout, stderr, last_message)`):
    return the answer text. Never return stderr as the answer (CLIs put banners,
    telemetry, and warnings there). Strip ANSI if needed (`strip_ansi` helper).
@@ -47,9 +49,11 @@ class MyToolAdapter(Adapter):
     def model(self):
         return setting("ALLOY_MYTOOL_MODEL")   # optional per-adapter override
 
-    def build_args(self, last_message_path, mode):
-        # prompt arrives on STDIN; return only the flags. Use the read-only flag.
-        # never include --yolo / auto-approve / bypass flags.
+    def build_args(self, prompt_path, last_message_path, mode):
+        # The engine feeds the prompt on STDIN, so most adapters return only flags
+        # plus the read-only flag. (If your CLI needs a prompt file instead, pass
+        # prompt_path, e.g. ["--prompt-file", prompt_path].) Never include
+        # --yolo / auto-approve / bypass flags.
         args = ["--print", "--read-only", "--no-color"]
         if self.model():
             args += ["--model", self.model()]
@@ -100,7 +104,7 @@ class CursorAgentAdapter(Adapter):
     def is_authed(self) -> bool:
         return bool(os.environ.get("CURSOR_API_KEY"))  # + creds-file check
 
-    def build_args(self, last_message_path, mode):
+    def build_args(self, prompt_path, last_message_path, mode):
         # NB: even in --print mode this can write files and run bash. It is only
         # contained by alloy's throwaway cwd. Never pass -f/--force.
         return ["--print", "--output-format", "text"]
