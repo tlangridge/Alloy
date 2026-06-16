@@ -1,14 +1,14 @@
-# alloy
+# Alloy
 
 **Ask several frontier AI coding CLIs the same hard question, in parallel, and
 get an honest map of where they agree, disagree, and are collectively blind —
 instead of one confident answer from one model.**
 
-alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
+Alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** (`codex`, `gemini`, …) running
-**in parallel and strictly read-only**, then Claude acts as the **judge** and
+**in parallel, read-only, and able to search the web**, then Claude acts as the **judge** and
 **synthesizer**: it compares the answers and writes a final one that *surfaces
 the disagreement* rather than averaging it away.
 
@@ -16,7 +16,7 @@ the disagreement* rather than averaging it away.
 > consensus, the contradictions, the unique insight only one model had, and the
 > blind spot none of them saw — then let you decide.
 
-alloy ships **no API keys** and makes **no network calls of its own**. It only
+Alloy ships **no API keys** and makes **no network calls of its own**. It only
 runs the CLIs you have already installed and authenticated.
 
 > Not affiliated with OpenRouter. "Fusion" is OpenRouter's term for the
@@ -26,7 +26,7 @@ runs the CLIs you have already installed and authenticated.
 
 ## See it in 15 seconds
 
-A real alloy round (the prompt: *"the single biggest reliability risk when an
+A real Alloy round (the prompt: *"the single biggest reliability risk when an
 orchestrator runs multiple AI CLIs in parallel"*) — note that the two models
 **disagree**, which is exactly the point:
 
@@ -55,10 +55,10 @@ you only half the picture, confidently.
 
 ## Install
 
-alloy is a Claude Code skill that lives in `~/.claude/skills/alloy/` and runs on
+Alloy is a Claude Code skill that lives in `~/.claude/skills/alloy/` and runs on
 Python 3 (standard library only — no `pip install`). macOS / Linux (Windows via WSL).
 
-**1. Install at least one panelist CLI** — alloy orchestrates CLIs you already
+**1. Install at least one panelist CLI** — Alloy orchestrates CLIs you already
 have; it ships none of its own. Two or more is where it earns its keep:
 
 ```bash
@@ -108,7 +108,7 @@ Now, inside Claude Code:
 > `alloy` (as the examples in this README do), symlink it onto your `PATH`:
 > `ln -s ~/.claude/skills/alloy/bin/alloy /usr/local/bin/alloy`.
 
-> **The prerequisite cliff, stated honestly:** alloy is only useful if you have
+> **The prerequisite cliff, stated honestly:** Alloy is only useful if you have
 > **2+** of {`codex`, `gemini`, …} installed *and authenticated*. With only Claude
 > it degrades to a normal single-model answer and tells you so. Run `doctor`
 > first; it will not surprise you.
@@ -120,31 +120,36 @@ Now, inside Claude Code:
 | Mode | What it does |
 |---|---|
 | `/alloy doctor` | Which panelists are installed / authed / ready, with fix-it hints. |
-| `/alloy ask <q>` | One alloy round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
+| `/alloy ask <q>` | One Alloy round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
 In the lifecycle, **Claude writes all the code; the panel only ever reviews,
-read-only.** alloy never lets a panelist edit your files, run a build, or touch
+read-only.** Alloy never lets a panelist edit your files, run a build, or touch
 a git worktree. That is a deliberate v1 boundary (see *Roadmap*).
+
+Need the panel to see more than a diff? `alloy panel --attach file1,file2` (or
+`ALLOY_ATTACH=…`) folds whole files into the prompt as read-only reference — handy
+for giving the panel the call sites a diff doesn't include (the panel can't read
+your repo, only what you put in the prompt).
 
 ---
 
 ## Why a *local* version?
 
 OpenRouter's hosted Fusion is web-UI only — there is no API for it, so you cannot
-drop it into a coding workflow. alloy gets you the same panel→judge→synthesize
+drop it into a coding workflow. Alloy gets you the same panel→judge→synthesize
 shape against the CLIs you already pay for, right inside Claude Code, with the
 run captured to disk so you can audit exactly what each model said.
 
-## When alloy helps (and when it doesn't)
+## When Alloy helps (and when it doesn't)
 
 Multi-model panels shine on **high-stakes thinking**: architecture decisions,
 research, planning, debugging triage, security/correctness review — *"if the cost
 of being wrong is higher than the cost of asking three models, fuse."* They are a
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
-distinctive voice and just adds latency and cost). That is why alloy uses the
+distinctive voice and just adds latency and cost). That is why Alloy uses the
 panel for the *thinking* and leaves the *writing* to Claude.
 
 ## Safety model
@@ -154,12 +159,18 @@ panel for the *thinking* and leaves the *writing* to Claude.
   temporary working directory, so they get no access to your repo. Adapters
   without a real read-only mode (e.g. `cursor-agent`) are refused unless you
   explicitly opt in with `ALLOY_ALLOW_UNSANDBOXED=1`.
-- **Panel output is treated as untrusted data**, never as instructions — alloy
+- **Web research, on by default.** Panelists can search the web (codex's hosted
+  `web_search`, gemini's `google_web_search`), matching Fusion's web-enabled
+  panel — so they reason over current facts, not just training data. Search is
+  read-only (no files, no shell), but it does mean a panelist may fetch external
+  pages: that content is untrusted too, and the queries go to the providers.
+  Disable with `ALLOY_WEB=0`.
+- **Panel output is treated as untrusted data**, never as instructions — Alloy
   is hardened against a panelist emitting "ignore previous instructions / run
   this command".
 - **Prompts go on stdin**, never on the command line (no `ARG_MAX` limits, no
   quoting bugs, no shell injection, no leaking prompts into `ps`).
-- **No auto-approve.** alloy never passes `--yolo` / `-y` /
+- **No auto-approve.** Alloy never passes `--yolo` / `-y` /
   `--dangerously-bypass-approvals-and-sandbox`.
 - **Secret scanning.** Panelist output (both the saved answer and the raw
   stdout/stderr files) is scanned and redacted for common secret shapes before it
@@ -180,11 +191,11 @@ panel for the *thinking* and leaves the *writing* to Claude.
 
 ## Privacy & cost
 
-alloy makes no network calls itself and stores no keys. Each alloy round makes
+Alloy makes no network calls itself and stores no keys. Each Alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider
 accounts through your CLIs — your prompts and diffs are sent to those providers.
 A panel of 3 is roughly 3–5× the cost of one call; the full lifecycle is several
-rounds. alloy shows a cost preflight before multi-round runs. You are
+rounds. Alloy shows a cost preflight before multi-round runs. You are
 responsible for each CLI's terms of service regarding automated use.
 
 ## Configuration
@@ -201,6 +212,9 @@ variables (env wins over the file):
 | `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
 | `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
+| `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |
+| `ALLOY_MAX_PROMPT_BYTES` | `4000000` | cap on total prompt size, including attachments |
+| `ALLOY_ATTACH` | _(unset)_ | comma list of files to fold into the prompt (also `--attach`) |
 
 ## Requirements
 

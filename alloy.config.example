@@ -16,6 +16,18 @@ ALLOY_TIMEOUT=240
 # context window from a runaway panelist. Truncation is recorded in the manifest.
 ALLOY_MAX_CHARS=200000
 
+# Cap on total prompt size in bytes (the prompt plus any --attach files).
+# Guards against a huge prompt exhausting memory before output caps apply.
+ALLOY_MAX_PROMPT_BYTES=4000000
+
+# Web research: panelists may search the web (codex tools.web_search; gemini's
+# google_web_search in plan mode). On by default; set to 0 to disable (codex).
+ALLOY_WEB=1
+
+# Optional: comma-separated files to fold into every prompt as read-only
+# reference context (also available per-run as `--attach`). Unset by default.
+# ALLOY_ATTACH=src/foo.ts,src/bar.ts
+
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
 # ALLOY_GEMINI_MODEL=gemini-2.5-pro

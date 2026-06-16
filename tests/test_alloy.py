@@ -202,6 +202,34 @@ class AlloyTests(unittest.TestCase):
         result = by_name(m, "codex")["result_path"]
         self.assertEqual(os.stat(result).st_mode & 0o777, 0o600)
 
+    def test_attach_folds_file_into_prompt(self):
+        att = os.path.join(self.tmp, "ctx.txt")
+        with open(att, "w") as f:
+            f.write("MARKER_CONTEXT_LINE_42")
+        _proc, m = panel(self.tmp, extra_args=["--attach", att])
+        with open(m["prompt_path"]) as f:
+            sent = f.read()
+        self.assertIn("MARKER_CONTEXT_LINE_42", sent)
+        self.assertIn("ATTACHED FILE", sent)
+
+    def test_attach_missing_file_rejected(self):
+        prompt = os.path.join(self.tmp, "p.txt")
+        with open(prompt, "w") as f:
+            f.write("hi")
+        proc = run_alloy(["panel", "--prompt-file", prompt,
+                          "--attach", "/no/such/file.txt"])
+        self.assertEqual(proc.returncode, 2)
+
+    def test_web_search_flag_default_on_for_codex(self):
+        _proc, m = panel(self.tmp)
+        cmd = " ".join(by_name(m, "codex")["command"])
+        self.assertIn("tools.web_search=true", cmd)
+
+    def test_web_search_flag_off_when_disabled(self):
+        _proc, m = panel(self.tmp, env_extra={"ALLOY_WEB": "0"})
+        cmd = " ".join(by_name(m, "codex")["command"])
+        self.assertNotIn("tools.web_search=true", cmd)
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the

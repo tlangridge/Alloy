@@ -20,9 +20,9 @@ allowed-tools:
   - Edit
 ---
 
-# alloy — a local multi-CLI model panel
+# Alloy — a local multi-CLI model panel
 
-You are running the **alloy** skill. It is a local implementation of the idea
+You are running the **Alloy** skill. It is a local implementation of the idea
 behind OpenRouter's "Fusion" router ("fusion beats frontier"): instead of
 trusting one model, dispatch the same prompt to a **panel** of independent
 models in parallel, then have a **judge** compare their answers and a
@@ -31,13 +31,15 @@ models in parallel, then have a **judge** compare their answers and a
 Here the roles map to local tools:
 
 - **Panel** = the AI coding CLIs installed on this machine (`codex`, `gemini`,
-  extensible), run **in parallel and strictly read-only** by `bin/alloy`.
+  extensible), run **in parallel, strictly read-only, and with web search
+  enabled** by `bin/alloy` — so they can research current facts, like Fusion's
+  web-enabled panel (`ALLOY_WEB=0` disables it).
 - **Judge + Synthesizer** = **you** (Claude, the host). You read the panel's
   answers, compare them (you do **not** merge them), and write the final answer.
 
-alloy ships no API keys and makes no network calls of its own. It orchestrates
-CLIs the user already installed and authenticated; their prompts/diffs go to
-those CLIs' own model providers.
+Alloy ships no API keys and makes no network calls of its own. It orchestrates
+CLIs the user already installed and authenticated; their prompts/diffs (and any
+web pages a panelist chooses to fetch) go to those CLIs' own model providers.
 
 ---
 
@@ -103,8 +105,8 @@ Parse the **first token** of the skill arguments:
 | First token | Mode | What you do |
 |---|---|---|
 | `doctor` | Doctor | run `bin/alloy doctor` and explain the result. Stop. |
-| `ask` | One-shot consult | one alloy round on the rest of the args. Stop. |
-| `review` | Diff review | gather the diff, one alloy round in `review` mode, give a pass/fail + findings. Stop. |
+| `ask` | One-shot consult | one Alloy round on the rest of the args. Stop. |
+| `review` | Diff review | gather the diff, one Alloy round in `review` mode, give a pass/fail + findings. Stop. |
 | `plan` | Plan | research + plan rounds, present the plan for approval. Stop at the plan. |
 | anything else (a task description) | **Full lifecycle** | research → plan → collaborate → implement → test, with approval gates. |
 | *(empty)* | Help | run `doctor` and briefly list the modes. Stop. |
@@ -112,14 +114,14 @@ Parse the **first token** of the skill arguments:
 When in doubt between "ask" and "lifecycle", prefer **ask** — it is cheaper and
 safer. Only enter the full lifecycle for an explicit build/change task.
 
-Before any mode that will run **more than one** alloy round (plan, lifecycle),
+Before any mode that will run **more than one** Alloy round (plan, lifecycle),
 show a one-line **cost preflight** using `bin/alloy estimate --rounds N` (it
 prints how many parallel model calls the run will make, billed to the user's
 accounts) and get a go-ahead.
 
 ---
 
-## The alloy round (the core primitive used by every mode)
+## The Alloy round (the core primitive used by every mode)
 
 A single round is: **dispatch → judge → synthesize.**
 
@@ -214,12 +216,12 @@ it (via the normal plan-approval flow) only after that approval.
 
 ## Full lifecycle (only for an explicit build/change task)
 
-Apply an alloy round at the decision-heavy stages. **You** write all code; the
+Apply an Alloy round at the decision-heavy stages. **You** write all code; the
 panel only ever reviews, read-only.
 
-1. **RESEARCH** — alloy round: "what are the unknowns, prior art, constraints,
+1. **RESEARCH** — Alloy round: "what are the unknowns, prior art, constraints,
    and risks for <task>?" Synthesize a short research brief.
-2. **PLAN** — alloy round: ask each panelist to propose an implementation plan;
+2. **PLAN** — Alloy round: ask each panelist to propose an implementation plan;
    judge (consensus plan vs. contested choices) and synthesize **one** plan.
    **Approval gate:** present the plan and stop until the user approves.
 3. **COLLABORATE** — draft the key interfaces/approach yourself, then an alloy
@@ -227,7 +229,7 @@ panel only ever reviews, read-only.
 4. **IMPLEMENT** — **you** write the code with Write/Edit, normal approvals. The
    panel does not write. Optionally run a `review`-mode round on your own diff.
 5. **TEST** — run the project's existing test/build command yourself. On failure,
-   run an alloy round to triage ("here is the failing output + the diff; each of
+   run an Alloy round to triage ("here is the failing output + the diff; each of
    you: most likely root cause and minimal fix"), judge, and apply the fix you
    trust. Loop until green or the user stops.
 
@@ -251,12 +253,21 @@ missing tests with a pass-fail verdict, dispatch with `--mode review`, then judg
 and give a consolidated pass/fail + findings (attributed). Do not auto-apply
 fixes from panelists; propose them.
 
+**Curate enough context — the panel cannot read the repo.** A raw diff hunk often
+omits the call sites of the symbols it changes (e.g. a renamed constant whose
+risky usage is 200 lines away), which forces the panel to hedge ("if this is
+called via X…"). Before dispatching, pull in those call sites and the enclosing
+function for any changed export/constant — either inline in the prompt, or with
+`alloy panel --attach <files>` (folds whole files in as read-only reference).
+You (the judge) have full repo access; spend it on curation so the panel reasons
+over real context instead of guessing.
+
 ---
 
 ## Failure handling (write these into your behavior)
 
 - **No panelists ready / exit 3** → say there is no panel; offer a Claude-only
-  answer or to stop. Never silently pretend a single-model answer is "alloy".
+  answer or to stop. Never silently pretend a single-model answer is a panel.
 - **Partial panel** (M of N ok) → proceed with M; explicitly name who dropped and
   why. Missing ≠ agreeing.
 - **Timeout / hang** → already handled by the dispatcher (it kills the process
@@ -272,7 +283,7 @@ fixes from panelists; propose them.
 
 ## Cost / privacy (say this when relevant)
 
-Each alloy round makes one model call **per ready panelist**, in parallel,
+Each Alloy round makes one model call **per ready panelist**, in parallel,
 billed to the **user's own** provider accounts via their CLIs. The full lifecycle
 is several rounds. alloy ships no keys and makes no network calls of its own.
 For a one-off question, `ask` is the cheap path; reserve the lifecycle for real

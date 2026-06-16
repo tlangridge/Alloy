@@ -11,7 +11,7 @@ to event sourcing, add a CQRS read model, or just partition + add read replicas?
 Optimize for a 3-person team. Give trade-offs and a recommendation.
 ```
 
-## What alloy does
+## What Alloy does
 
 1. Runs `doctor` (2 panelists ready: codex, gemini).
 2. Writes the question to a temp file and dispatches one read-only round:

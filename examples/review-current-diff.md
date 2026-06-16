@@ -12,7 +12,7 @@ Claude consolidates into one attributed pass/fail.
 
 (or `/alloy review HEAD~3` to review a wider range)
 
-## What alloy does
+## What Alloy does
 
 1. `doctor` (panelists ready).
 2. Gathers a bounded diff itself:

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to alloy are documented here. Format loosely follows
+All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
 ## [0.1.0] - 2026-06-15
@@ -48,7 +48,7 @@ Fixes that landed from it:
 - `strip_ansi` also strips OSC sequences (clipboard / hyperlink escapes).
 - Timeout / max-chars are validated; relative run roots are made absolute.
 
-A second pass (alloy reviewing its own source) added:
+A second pass (Alloy reviewing its own source) added:
 - Refuse a panelist binary that PATH resolved from inside the current working
   directory (PATH-shadowing guard) unless an explicit absolute `ALLOY_BIN_<NAME>`.
 - Bounded prompt ingestion (`ALLOY_MAX_PROMPT_BYTES`, default 4 MB) for both
@@ -59,6 +59,20 @@ A second pass (alloy reviewing its own source) added:
   host), and `secrets_redacted` now counts sidecar redactions too.
 - `--approval-mode plan` group kill always escalates to `SIGKILL` (reaps forked
   daemons); duplicate panelist names are de-duped; OSC stripping is newline-safe.
+
+A third pass added web research, attachments, and the brand name:
+- **Web research for the panel** (matches Fusion): codex runs with
+  `-c tools.web_search=true`; gemini's `google_web_search` is auto-accepted in
+  plan mode. On by default; `ALLOY_WEB=0` disables it (codex). Both verified live
+  to search and cite post-training-cutoff facts while staying read-only.
+- **`--attach` / `ALLOY_ATTACH`** folds explicit files into the prompt as
+  read-only reference (e.g. the call sites a diff omits), bounded by
+  `ALLOY_MAX_PROMPT_BYTES`.
+- **Review mode curates context**: SKILL.md tells the judge to pull in the call
+  sites of changed symbols before dispatching, so the panel stops hedging on code
+  it cannot see.
+- **The brand is "Alloy"** in prose and CLI output; the command, paths, and the
+  `ALLOY_*` / `name: alloy` identifiers stay lowercase.
 
 ### Deliberately out of scope (roadmap)
 - Panelists writing code (opt-in, isolated git worktree).

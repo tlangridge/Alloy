@@ -1,6 +1,6 @@
 # Adding a panelist
 
-A panelist is one CLI alloy can dispatch to. Adding one is a small, well-defined
+A panelist is one CLI Alloy can dispatch to. Adding one is a small, well-defined
 adapter in `bin/alloy`. The goal is that supporting a new CLI is a ~30-line pull
 request, not a reverse-engineering project.
 
@@ -111,7 +111,7 @@ class CursorAgentAdapter(Adapter):
 
 Because `read_only = False`, `bin/alloy panel` skips it (recording the reason in
 the manifest) unless the user explicitly sets `ALLOY_ALLOW_UNSANDBOXED=1`. This
-keeps "I added an adapter" from silently weakening alloy's safety promise.
+keeps "I added an adapter" from silently weakening Alloy's safety promise.
 
 > Lesson: an adapter is more than an invocation string. The `read_only` and
-> `auth` answers are what keep alloy safe and honest.
+> `auth` answers are what keep Alloy safe and honest.
