@@ -276,6 +276,7 @@ variables (env wins over the file):
 | `ALLOY_TIMEOUT` | `240` | per-panelist timeout, seconds |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
+| `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
 | `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
 | `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |

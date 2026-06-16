@@ -241,6 +241,21 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("UPDATE_CHECK_DISABLED", proc.stdout)
 
+    def test_codex_effort_pinned_high_by_default(self):
+        _proc, m = panel(self.tmp)
+        cmd = " ".join(by_name(m, "codex")["command"])
+        self.assertIn("model_reasoning_effort=high", cmd)
+
+    def test_codex_effort_overridable(self):
+        _proc, m = panel(self.tmp, env_extra={"ALLOY_CODEX_EFFORT": "medium"})
+        cmd = " ".join(by_name(m, "codex")["command"])
+        self.assertIn("model_reasoning_effort=medium", cmd)
+
+    def test_codex_effort_inherit_skips_flag(self):
+        _proc, m = panel(self.tmp, env_extra={"ALLOY_CODEX_EFFORT": "inherit"})
+        cmd = " ".join(by_name(m, "codex")["command"])
+        self.assertNotIn("model_reasoning_effort", cmd)
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the

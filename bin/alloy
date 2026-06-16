@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.0"
+ALLOY_VERSION = "0.1.1"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 240
@@ -358,6 +358,13 @@ class CodexAdapter(Adapter):
         if web_enabled():
             # Hosted web-search tool; orthogonal to the read-only FS sandbox.
             args += ["-c", "tools.web_search=true"]
+        # Pin reasoning effort so a panel run doesn't inherit a global
+        # `model_reasoning_effort = "xhigh"` from ~/.codex/config.toml that
+        # routinely blows the timeout. Override with ALLOY_CODEX_EFFORT
+        # (e.g. medium / xhigh), or set it to "inherit" to use the user's config.
+        effort = setting("ALLOY_CODEX_EFFORT", "high")
+        if effort and effort.lower() not in ("inherit", "default"):
+            args += ["-c", f"model_reasoning_effort={effort}"]
         m = self.model()
         if m:
             args += ["-m", m]
@@ -367,7 +374,12 @@ class CodexAdapter(Adapter):
         lm = strip_ansi(last_message).strip()
         if lm:
             return lm
-        return strip_ansi(stdout).strip()
+        out = strip_ansi(stdout).strip()
+        if out:
+            return out
+        # Last resort (e.g. killed mid-generation): codex streams its reasoning
+        # preamble to stderr, so salvage that rather than returning nothing.
+        return strip_ansi(stderr).strip()
 
 
 class GeminiAdapter(Adapter):
@@ -667,14 +679,24 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             with _LIVE_LOCK:
                 _LIVE_PGIDS.add(pgid)
             try:
-                proc.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                status["timed_out"] = True
-                _kill_group(pgid)
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    pass
+                deadline = time.monotonic() + timeout_s
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        status["timed_out"] = True
+                        _kill_group(pgid)
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        break
+                    try:
+                        proc.wait(timeout=min(60, remaining))
+                        break  # finished on its own
+                    except subprocess.TimeoutExpired:
+                        # heartbeat so the caller can tell slow-but-alive from hung
+                        log(f"{adapter.name}: still running "
+                            f"({int(time.monotonic() - start)}s / {timeout_s}s)")
             finally:
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.discard(pgid)
@@ -731,7 +753,10 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     write_atomic(status_path, json.dumps(status, indent=2))
     dur = status["duration_ms"] / 1000.0
-    log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
+    if status["timed_out"]:
+        log(f"{adapter.name}: timeout after {dur:.1f}s (killed)")
+    else:
+        log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
     return status
 
 

@@ -32,6 +32,12 @@ ALLOY_WEB=1
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
 # ALLOY_GEMINI_MODEL=gemini-2.5-pro
 
+# Codex reasoning effort for panel runs. Default "high" keeps runs inside the
+# timeout; otherwise a global `model_reasoning_effort = "xhigh"` in
+# ~/.codex/config.toml gets inherited and can blow past it. Use medium/high/xhigh,
+# or "inherit" to use whatever your codex config sets.
+ALLOY_CODEX_EFFORT=high
+
 # Who judges the panel. Default is the host (Claude). Judge rotation to a CLI is
 # on the roadmap; today this is informational.
 # ALLOY_JUDGE=claude

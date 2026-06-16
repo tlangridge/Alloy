@@ -3,6 +3,25 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.1] - 2026-06-16
+
+### Fixed
+- **Codex timeouts from an inherited `xhigh` reasoning effort.** A panel run used
+  to inherit the global `model_reasoning_effort` from `~/.codex/config.toml`; an
+  `xhigh` default routinely exceeded the 240 s timeout on heavy prompts. The codex
+  adapter now pins effort to `high` by default (`-c model_reasoning_effort=high`),
+  configurable via **`ALLOY_CODEX_EFFORT`** (`medium` / `high` / `xhigh`, or
+  `inherit` to use your codex config).
+- **Partial output on timeout is no longer discarded** — codex streams its preamble
+  to stderr, so `parse()` now falls back to stderr when the final message and
+  stdout are both empty.
+- **Misleading `(exit 0)` on a timed-out panelist** — the log now reads
+  `timeout after Ns (killed)` instead of showing a 0 exit code.
+
+### Added
+- **Heartbeat:** a long-running panelist logs `still running (Ns / timeout)` every
+  60 s, so you can tell slow-but-alive from hung.
+
 ## [0.1.0] - 2026-06-16
 
 First public release. Alloy runs OpenRouter's "Fusion" methodology locally with
