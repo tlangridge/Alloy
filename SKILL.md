@@ -103,8 +103,23 @@ remote at most once per day and sends no data):
 ~/.claude/skills/alloy/bin/alloy update-check
 ```
 
-If it prints `UPDATE_AVAILABLE …`, tell the user once and show the exact
-`git -C … pull` command it suggests. Otherwise say nothing about updates.
+If it prints `UPDATE_AVAILABLE …`, **stop and ask the user whether to update
+before running** (AskUserQuestion, or a plain question if that's unavailable):
+
+- **Update now**, then continue on the new version:
+  - git checkout → `git -C <skill-root> pull --ff-only` (fast-forward only, so it
+    can't clobber local work; if it fails because the checkout diverged or has
+    local changes, report that and let the user resolve — never force).
+  - installed via skills.sh → `npx skills update alloy`.
+  - `bin/alloy` changes take effect immediately; updated SKILL.md instructions
+    load on the next session, so finish this run, then re-invoke.
+- **Continue on the current version** → proceed without updating.
+
+If it prints anything else (`UP_TO_DATE` / `UPDATE_CHECK_SKIPPED` / `UNKNOWN` /
+`UPDATE_CHECK_DISABLED`), say nothing about updates and proceed. The check is
+throttled to once per day, so this offer appears at most about once a day — not
+on every run. If you are running non-interactively (no human to ask), just report
+`UPDATE_AVAILABLE` and proceed.
 
 ---
 
