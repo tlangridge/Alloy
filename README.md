@@ -3,6 +3,7 @@
 [![CI](https://github.com/tlangridge/Alloy/actions/workflows/ci.yml/badge.svg)](https://github.com/tlangridge/Alloy/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
+[![Install with skills.sh](https://img.shields.io/badge/skills.sh-npx%20skills%20add-000000)](https://www.skills.sh/)
 
 > **The local, CLI-agent way to run [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router) methodology** — no hosted router, no API keys, just the AI CLIs you already have.
 
@@ -60,6 +61,54 @@ you only half the picture, confidently.
 
 ---
 
+## Does fusing models actually help?
+
+Yes — and not just "more models = better." OpenRouter benchmarked the Fusion
+methodology Alloy implements and found that a **panel + a synthesis step** beats
+any single model, with a meaningful chunk of the gain coming from the *synthesis
+itself*:
+
+| Configuration — OpenRouter's DRACO benchmark (100 deep-research tasks) | Score |
+|---|---|
+| **Fable 5 + GPT-5.5, fused** (synthesized by Opus 4.8) | **69.0%** |
+| Fable 5 alone (best single model tested) | 65.3% |
+| Opus 4.8 *fused with itself* (same model, run twice) | 65.5% |
+| Opus 4.8 alone | 58.8% |
+
+> "Fable 5 + GPT-5.5 fused together scored 69.0%, surpassing every individual
+> model, including Fable 5 alone at 65.3%."
+> — [OpenRouter, *Fusion beats Frontier*](https://openrouter.ai/blog/announcements/fusion-beats-frontier/) (figures and charts © OpenRouter)
+
+The third row is the telling one: fusing a model **with itself** still gained
+**+6.7 points** (58.8% → 65.5%), because parallel runs take different reasoning
+paths — so much of the lift is the *compare-and-synthesize* step, not just model
+diversity. (OpenRouter notes Fusion runs ~2–3× the latency of a single call; panel
+size is the cost knob.)
+
+```mermaid
+flowchart LR
+  Q["your hard question"] --> P{"panel — parallel,<br/>read-only, web search"}
+  P --> C["codex"]
+  P --> G["gemini"]
+  P --> M["…more CLIs"]
+  C --> J["Claude: JUDGE<br/>(compare, don't merge)"]
+  G --> J
+  M --> J
+  J --> S["Claude: SYNTHESIZE<br/>(surface disagreement)"]
+  S --> A["one answer + a map of<br/>agreement · conflict · blind spots"]
+```
+
+**It is not a universal win, and Alloy is built around that.** Multi-model methods
+help most on *objective, high-stakes thinking* (research, architecture, debugging,
+factuality) and can *hurt* on subjective work — or when a confident-but-wrong voice
+drags the panel into agreement (a measured 10–40% accuracy drop in the multi-agent
+debate literature). So Alloy **surfaces disagreement instead of averaging it away**,
+keeps you as the decider, and gates its `debate` round on genuine, checkable
+disagreement. Evidence, sources, and the Claude-as-judge bias discussion are in
+[`docs/methodology.md`](docs/methodology.md).
+
+---
+
 ## Install
 
 Alloy is a Claude Code skill that lives in `~/.claude/skills/alloy/` and runs on
@@ -75,7 +124,16 @@ npm install -g @google/gemini-cli   # then authenticate: run `gemini` once
 
 **2. Install the skill — pick _one_ method:**
 
-_Recommended (clone anywhere, then symlink — keeps `git pull` updates clean):_
+_Quickest, via [skills.sh](https://www.skills.sh):_
+
+```bash
+npx skills add tlangridge/Alloy
+```
+
+It auto-detects Claude Code, installs the skill, and updates later via
+`npx skills update`. Then do step 3.
+
+_From source (recommended if you'll contribute, or want `git pull` updates):_
 
 ```bash
 git clone https://github.com/tlangridge/Alloy.git ~/Developer/alloy
@@ -89,7 +147,7 @@ git clone https://github.com/tlangridge/Alloy.git ~/.claude/skills/alloy
 ~/.claude/skills/alloy/bin/alloy doctor
 ```
 
-Do one or the other, not both.
+Pick one of these, not several.
 
 **3. Restart Claude Code** (or open a new session) so it discovers the skill.
 Then run `doctor` first — it tells you which panelists are installed, which are
