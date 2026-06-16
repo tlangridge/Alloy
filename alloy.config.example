@@ -45,3 +45,7 @@ ALLOY_WEB=1
 # Off by default. Only enable if you understand that such a panelist can write
 # files and run shell, contained only by alloy's throwaway working directory.
 # ALLOY_ALLOW_UNSANDBOXED=0
+
+# Disable the throttled, git-based update check (the one optional network call
+# Alloy makes; it sends no data of its own).
+# ALLOY_NO_UPDATE_CHECK=0

@@ -96,6 +96,16 @@ Run `doctor` first:
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
 
+Then run the throttled update check (it does a `git fetch` against the skill's own
+remote at most once per day and sends no data):
+
+```bash
+~/.claude/skills/alloy/bin/alloy update-check
+```
+
+If it prints `UPDATE_AVAILABLE …`, tell the user once and show the exact
+`git -C … pull` command it suggests. Otherwise say nothing about updates.
+
 ---
 
 ## Step 1 — pick the mode from the arguments
@@ -106,6 +116,7 @@ Parse the **first token** of the skill arguments:
 |---|---|---|
 | `doctor` | Doctor | run `bin/alloy doctor` and explain the result. Stop. |
 | `ask` | One-shot consult | one Alloy round on the rest of the args. Stop. |
+| `debate` | Gated debate | a second, evidence-gated rebuttal round — see "Debate round". Used rarely. Stop. |
 | `review` | Diff review | gather the diff, one Alloy round in `review` mode, give a pass/fail + findings. Stop. |
 | `plan` | Plan | research + plan rounds, present the plan for approval. Stop at the plan. |
 | anything else (a task description) | **Full lifecycle** | research → plan → collaborate → implement → test, with approval gates. |
@@ -261,6 +272,50 @@ function for any changed export/constant — either inline in the prompt, or wit
 `alloy panel --attach <files>` (folds whole files in as read-only reference).
 You (the judge) have full repo access; spend it on curation so the panel reasons
 over real context instead of guessing.
+
+---
+
+## Debate round (opt-in, used rarely, gated by evidence)
+
+A debate round runs a **second** pass where each panelist sees the others'
+(anonymized) round-1 answers and must defend or revise with evidence, then you
+re-judge. Research on multi-agent debate is clear it is **not** a free win: it
+helps on *objective, verifiable* questions (math, reasoning, factuality,
+code-correctness) **when the panel is diverse**, but it can *lower* accuracy when a
+confident, persuasive-but-wrong voice drags the others into agreement (the
+"bully" / sycophancy / conformity effect — a single confident wrong agent can cut
+group accuracy 10–40%). So it is **off by default** and gated.
+
+Reach it via `/alloy debate <question>`, or **offer** it (don't run unprompted)
+after an `ask`/`review` round that surfaced a real disagreement.
+
+**Only run a debate round when ALL hold:**
+1. The question is **objective / checkable** (facts, reasoning, a decision with
+   verifiable claims, code correctness) — NOT taste, style, or open-ended creative
+   work, where "better debater" ≠ "more right".
+2. Round 1 produced a **substantive disagreement on a checkable point** (not mere
+   wording). If the panel already agrees, STOP (a second round mostly invites
+   conformity and burns tokens). If they split only on subjective preference, STOP.
+3. There are **≥2 ready panelists from different model families** (the diversity
+   that makes debate help — you have this with codex + gemini).
+
+If any fails, do NOT debate: say why and synthesize from round 1.
+
+**Run it so the better debater can't bully the better-informed model:**
+- **Anonymize** the round-1 answers as "Answer A / Answer B …", never by model name
+  (naming triggers identity bias and deference).
+- **Demand evidence, not rhetoric.** The round-2 prompt tells each panelist to cite
+  concrete evidence (web sources / a checkable argument) for its position or concede.
+  Web search is on, so they can substantiate.
+- **You stay the arbiter.** Debate informs your judgment; it does not auto-pick a
+  winner. Weight positions by **evidence and verifiability, NOT confidence or
+  assertiveness**, and flag explicitly if one side is merely louder.
+- **One round only** — deeper debate has diminishing, sometimes negative returns.
+
+Mechanically: build the round-2 prompt (question + anonymized answers + "defend with
+evidence or concede"), dispatch with `--mode debate`, then re-judge how positions
+held up under evidence and synthesize. Tell the user you ran a debate round and why
+it met the bar. (Evidence + citations: see `docs/methodology.md`.)
 
 ---
 

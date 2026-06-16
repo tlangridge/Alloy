@@ -147,7 +147,9 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
-        self.assertEqual({"codex", "gemini", "antigravity"}, names)
+        self.assertEqual(
+            {"codex", "gemini", "llm", "opencode", "cursor-agent", "antigravity"},
+            names)
         codex = next(p for p in data["panelists"] if p["name"] == "codex")
         self.assertEqual(codex["status"], "ready")
 
@@ -229,6 +231,15 @@ class AlloyTests(unittest.TestCase):
         _proc, m = panel(self.tmp, env_extra={"ALLOY_WEB": "0"})
         cmd = " ".join(by_name(m, "codex")["command"])
         self.assertNotIn("tools.web_search=true", cmd)
+
+    def test_matrix_printed_on_stderr(self):
+        proc, _m = panel(self.tmp)
+        self.assertIn("panel matrix", proc.stderr)
+
+    def test_update_check_can_be_disabled(self):
+        proc = run_alloy(["update-check"], env_extra={"ALLOY_NO_UPDATE_CHECK": "1"})
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("UPDATE_CHECK_DISABLED", proc.stdout)
 
 
 class RedactionUnitTests(unittest.TestCase):

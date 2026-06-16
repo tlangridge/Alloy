@@ -30,9 +30,10 @@ Design notes (why it is the way it is):
     KEY=value file at ~/.config/alloy/config. It NEVER `source`s a file from
     the project directory (that would let a hostile repo run code).
 
-No API keys live here. Alloy makes no network calls of its own; it only
-invokes the CLIs you have already installed and authenticated, and your
-prompts/diffs go to whichever model providers those CLIs use.
+No API keys live here and Alloy sends no telemetry. Your prompts/diffs go only to
+the model providers behind the CLIs you invoke. The one optional network call
+Alloy itself makes is a throttled `git fetch` update check against this repo's own
+remote (no data sent); disable it with ALLOY_NO_UPDATE_CHECK=1.
 """
 
 from __future__ import annotations
@@ -445,11 +446,98 @@ class AntigravityAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
-# Active, verified adapters ship by default. Experimental ones are registered
-# but excluded from the default panel.
+class LlmAdapter(Adapter):
+    # Simon Willison's `llm` CLI: by default it just calls a model API with no
+    # filesystem or shell tools, so it is read-only by nature. Marked
+    # experimental (not yet live-verified in CI); opt in via ALLOY_PANELISTS.
+    name = "llm"
+    bin = "llm"
+    read_only = True
+    experimental = True
+    install_hint = "uv tool install llm   (or: pipx install llm)"
+    auth_hint = "llm keys set openai   (or set OPENAI_API_KEY)"
+
+    def is_authed(self) -> bool:
+        base = setting("LLM_USER_PATH") or os.path.join(
+            os.path.expanduser("~"), ".config", "io.datasette.llm")
+        if os.path.isfile(os.path.join(base, "keys.json")):
+            return True
+        return bool(setting("OPENAI_API_KEY"))
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_LLM_MODEL")
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        # `llm` reads the prompt from stdin when none is given as an argument.
+        args: "list[str]" = []
+        m = self.model()
+        if m:
+            args += ["-m", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
+class OpenCodeAdapter(Adapter):
+    # opencode has `opencode run <message>` but no verified read-only mode (it is
+    # an agentic editor). Registered so `doctor` lists it; refused by default
+    # unless ALLOY_ALLOW_UNSANDBOXED=1. read_only stays False on purpose.
+    name = "opencode"
+    bin = "opencode"
+    read_only = False
+    experimental = True
+    install_hint = "see https://opencode.ai (npm i -g opencode-ai)"
+    auth_hint = "opencode auth login"
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_OPENCODE_MODEL")
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        args = ["run"]
+        m = self.model()
+        if m:
+            args += ["-m", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
+class CursorAgentAdapter(Adapter):
+    # cursor-agent --print runs non-interactively but has NO read-only mode (its
+    # own help: "access to all tools, including write and bash"). Registered for
+    # visibility; refused by default. See docs/adding-a-panelist.md.
+    name = "cursor-agent"
+    bin = "cursor-agent"
+    read_only = False
+    experimental = True
+    install_hint = "see https://cursor.com/cli"
+    auth_hint = "cursor-agent login"
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_CURSOR_AGENT_MODEL")
+
+    def build_args(self, last_message_path: str, mode: str) -> "list[str]":
+        args = ["--print", "--output-format", "text"]
+        m = self.model()
+        if m:
+            args += ["--model", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
+# Verified read-only adapters ship in the default panel. The rest are registered
+# (so `doctor` lists them) but excluded by default: `llm` is opt-in, and the
+# no-read-only / experimental ones are refused unless ALLOY_ALLOW_UNSANDBOXED=1.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
     "gemini": GeminiAdapter(),
+    "llm": LlmAdapter(),
+    "opencode": OpenCodeAdapter(),
+    "cursor-agent": CursorAgentAdapter(),
     "antigravity": AntigravityAdapter(),
 }
 DEFAULT_PANEL_ORDER = ["codex", "gemini"]
@@ -486,6 +574,19 @@ def web_enabled() -> bool:
     # web_search/web_fetch). Hosted search is read-only (no local FS/shell), so
     # it does not weaken the sandbox. Set ALLOY_WEB=0 to disable.
     return (setting("ALLOY_WEB", "1") or "1").lower() not in ("0", "false", "no")
+
+
+def skill_root() -> str:
+    # The repo / skill directory (parent of bin/), used for the update check.
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _git(root: str, *args: str, timeout: int = 20):
+    try:
+        return subprocess.run(["git", "-C", root, *args], capture_output=True,
+                              text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -637,6 +738,28 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 # --------------------------------------------------------------------------- #
 # commands
 # --------------------------------------------------------------------------- #
+def _print_matrix(manifest: dict) -> None:
+    # A compact run matrix on stderr (stdout stays the manifest path the host
+    # parses). Cheap -- it just renders fields the manifest already has.
+    rows = manifest.get("panelists", [])
+    if not rows:
+        return
+    with _STDERR_LOCK:
+        w = sys.stderr.write
+        w("[alloy] panel matrix:\n")
+        w("[alloy]   %-14s %-8s %8s %8s %8s\n"
+          % ("panelist", "status", "time", "chars", "redacted"))
+        for p in rows:
+            w("[alloy]   %-14s %-8s %7.1fs %8d %8d\n" % (
+                str(p.get("name", "?"))[:14],
+                str(p.get("status", "?"))[:8],
+                (p.get("duration_ms") or 0) / 1000.0,
+                p.get("result_chars") or 0,
+                p.get("secrets_redacted") or 0,
+            ))
+        sys.stderr.flush()
+
+
 def cmd_panel(args: argparse.Namespace) -> int:
     max_prompt = setting_int("ALLOY_MAX_PROMPT_BYTES", DEFAULT_MAX_PROMPT_BYTES)
     if args.prompt_file:
@@ -802,6 +925,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
     manifest_path = os.path.join(run_dir, "manifest.json")
     write_atomic(manifest_path, json.dumps(manifest, indent=2))
 
+    _print_matrix(manifest)
     print(manifest_path)
     log(f"done: {ok}/{len(manifest['panelists'])} panelist(s) ok -> {manifest_path}")
     return 0 if ok > 0 else 3
@@ -833,12 +957,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                           "panelists": rows}, indent=2))
         return 0
 
-    icon = {"ready": "[ready]", "installed_not_authed": "[auth?]",
-            "not_installed": "[ --- ]"}
     print(f"Alloy {ALLOY_VERSION}  -  panelist status\n")
-    ready = 0
+    ready_default = 0
     for r in rows:
-        tag = icon.get(r["status"], "[ ? ]")
+        usable = r["status"] == "ready" and r["read_only"]
+        if usable:
+            tag = "[ready]"
+        elif r["status"] == "ready":          # installed + authed but no read-only mode
+            tag = "[no-ro]"
+        elif r["status"] == "installed_not_authed":
+            tag = "[auth?]"
+        else:
+            tag = "[ --- ]"
         extra = []
         if r["experimental"]:
             extra.append("experimental")
@@ -847,21 +977,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         suffix = ("  (" + ", ".join(extra) + ")") if extra else ""
         ver = ("  " + r["cli_version"]) if r["cli_version"] else ""
         print(f"  {tag} {r['name']}{suffix}{ver}")
-        if r["status"] == "ready":
-            ready += 1
+        if usable and r["default_panel"]:
+            ready_default += 1
+        elif usable:  # read-only + authed, but not in the default panel
+            print("          ready; opt in by adding it to ALLOY_PANELISTS")
+        elif r["status"] == "ready" and not r["read_only"]:
+            print("          installed but has NO read-only mode -> skipped unless ALLOY_ALLOW_UNSANDBOXED=1")
         elif r["status"] == "installed_not_authed":
             print(f"          installed but not authenticated -> {r['auth_hint']}")
         elif r["status"] == "not_installed" and not r["experimental"]:
             print(f"          not installed -> {r['install_hint']}")
     print()
-    if ready == 0:
-        print("  No panelists are ready. Alloy will fall back to a single-model")
-        print("  (Claude-only) answer until you install and authenticate at least")
-        print("  one panelist above. Alloy is most useful with 2+ panelists.")
+    if ready_default == 0:
+        print("  No default panelists are ready. Alloy will fall back to a single-model")
+        print("  (Claude-only) answer until you install and authenticate at least one of")
+        print("  codex / gemini above. Alloy is most useful with 2+ panelists.")
     else:
-        print(f"  {ready} panelist(s) ready. An Alloy round makes {ready} parallel")
-        print("  model call(s) -- one per ready panelist, billed to your own")
-        print("  provider accounts. Alloy ships no keys and makes no calls of its own.")
+        print(f"  {ready_default} panelist(s) in the default panel. An Alloy round makes")
+        print(f"  {ready_default} parallel model call(s) -- one per ready panelist, billed to")
+        print("  your own provider accounts. Alloy ships no keys and sends no telemetry.")
         print(f"  Web research: {'on' if web_enabled() else 'off'} "
               "(panelists may search the web; set ALLOY_WEB=0 to disable).")
     return 0
@@ -869,7 +1003,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_estimate(args: argparse.Namespace) -> int:
     ready = [r for r in _doctor_rows() if r["status"] == "ready"
-             and r["name"] in selected_panelists()]
+             and r["name"] in selected_panelists()
+             and (r["read_only"] or allow_unsandboxed())]
     rounds = max(1, args.rounds)
     calls = len(ready) * rounds
     print(json.dumps({
@@ -877,9 +1012,47 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "rounds": rounds,
         "model_calls": calls,
         "note": "Each call runs on your already-authenticated CLI and bills to "
-                "your provider account. Alloy ships no API keys and makes no "
-                "network calls of its own.",
+                "your provider account. Alloy ships no API keys and sends no "
+                "telemetry.",
     }, indent=2))
+    return 0
+
+
+def cmd_update_check(args: argparse.Namespace) -> int:
+    # Best-effort, throttled (once / 24h), git-based update check against this
+    # repo's own remote. Prints UPDATE_AVAILABLE / UP_TO_DATE / UNKNOWN /
+    # UPDATE_CHECK_*. Sends no data; disable with ALLOY_NO_UPDATE_CHECK=1.
+    if (setting("ALLOY_NO_UPDATE_CHECK", "0") or "0").lower() in ("1", "true", "yes"):
+        print("UPDATE_CHECK_DISABLED")
+        return 0
+    root = skill_root()
+    if not os.path.isdir(os.path.join(root, ".git")):
+        print("UNKNOWN (not a git checkout)")
+        return 0
+    stamp = os.path.join(default_run_root(), ".last-update-check")
+    now = int(time.time())
+    if not args.force:
+        try:
+            if now - int((read_text(stamp).strip() or "0")) < 86400:
+                print("UPDATE_CHECK_SKIPPED (checked < 24h ago; --force to recheck)")
+                return 0
+        except ValueError:
+            pass
+    fetch = _git(root, "fetch", "--quiet")
+    try:
+        os.makedirs(default_run_root(), exist_ok=True)
+        write_atomic(stamp, str(now))
+    except OSError:
+        pass
+    if fetch is None or fetch.returncode != 0:
+        print("UNKNOWN (git fetch failed; offline?)")
+        return 0
+    cp = _git(root, "rev-list", "--count", "HEAD..@{u}")
+    behind = cp.stdout.strip() if cp and cp.returncode == 0 else ""
+    if behind.isdigit() and int(behind) > 0:
+        print(f"UPDATE_AVAILABLE {behind} commit(s) behind. Update: git -C {root} pull")
+    else:
+        print("UP_TO_DATE")
     return 0
 
 
@@ -920,7 +1093,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa = sub.add_parser("panel", help="dispatch a prompt to all ready panelists")
     pa.add_argument("--prompt-file", help="file with the prompt (default: stdin)")
     pa.add_argument("--mode", default="consult",
-                    choices=["consult", "review"],
+                    choices=["consult", "review", "debate"],
                     help="framing hint recorded in the manifest")
     pa.add_argument("--panelists", help="comma list overriding ALLOY_PANELISTS")
     pa.add_argument("--attach", help="comma list of files to fold into the prompt "
@@ -937,6 +1110,11 @@ def build_parser() -> argparse.ArgumentParser:
     es = sub.add_parser("estimate", help="print the model-call count for a run")
     es.add_argument("--rounds", type=int, default=1)
     es.set_defaults(func=cmd_estimate)
+
+    uc = sub.add_parser("update-check",
+                        help="check (throttled, git-based) if the skill repo has updates")
+    uc.add_argument("--force", action="store_true", help="ignore the 24h throttle")
+    uc.set_defaults(func=cmd_update_check)
 
     ve = sub.add_parser("version", help="print version and adapters")
     ve.set_defaults(func=cmd_version)

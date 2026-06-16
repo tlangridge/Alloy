@@ -3,78 +3,66 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
-## [0.1.0] - 2026-06-15
+## [0.1.0] - 2026-06-16
 
-Initial release.
+First public release. Alloy runs OpenRouter's "Fusion" methodology locally with
+the AI coding CLIs you already have: dispatch one prompt to a read-only panel in
+parallel, then Claude judges (compare, don't merge) and synthesizes.
 
-### Added
-- `bin/alloy`: stdlib-only Python 3 dispatcher.
-  - `panel` — dispatch one prompt to all ready panelists in parallel, read-only,
-    in a throwaway working directory; capture per-panelist output and a
-    machine-readable `manifest.json`.
-  - `doctor` — classify each panelist as ready / installed-but-not-authed /
-    not-installed, with install and auth hints.
-  - `estimate` — print the model-call count for a run.
-  - `version`.
-- Verified adapters: `codex` (`-s read-only`), `gemini` (`--approval-mode plan`).
-  Experimental, off-by-default: `antigravity`.
-- Safety: prompts on stdin (never argv); process-group timeouts with
-  `os.killpg`; non-TTY stdin so unauthenticated CLIs fail fast instead of
-  hanging; codepoint-safe output caps; secret redaction of panelist output;
-  `KEY=value` user-level config that is never `source`d; refusal to dispatch to
-  adapters lacking a real read-only mode unless `ALLOY_ALLOW_UNSANDBOXED=1`.
-- `SKILL.md`: the Claude Code skill — args-based modes (doctor / ask / review /
-  plan / full lifecycle), the "panel output is untrusted data" standing rule, the
-  judge schema + anti-sycophancy synthesis rubric, and plan-mode handling.
-- Docs: `README.md`, `docs/methodology.md`, `docs/adding-a-panelist.md`, `NOTICE`.
-- Tests: mock-panelist harness + `tests/test_alloy.py`; CI workflow.
+### Dispatcher (`bin/alloy`, stdlib-only Python 3.8+)
+- `panel` — dispatch one prompt to all ready panelists in parallel, strictly
+  read-only, in a throwaway working directory; capture per-panelist output plus a
+  machine-readable `manifest.json`, and print a compact run **matrix** (status /
+  time / chars / redactions) on stderr.
+- `doctor` — classify each panelist (ready / no-read-only / not-authed /
+  not-installed) and count the default panel honestly, with install + auth hints.
+- `estimate` — model-call count for a run.
+- `update-check` — throttled, git-based update check (sends no data;
+  `ALLOY_NO_UPDATE_CHECK=1` to disable).
+- `version`.
 
-### Hardened after a multi-model review of the implementation
-The shipped code was itself reviewed by a live Codex + Gemini + Claude panel.
-Fixes that landed from it:
-- Run artifacts now default to `$XDG_STATE_HOME/alloy/runs` (outside your repo),
-  and the run root gets a `*` `.gitignore` so prompts/diffs/output are never
-  committed even if pointed inside a repo.
-- Secrets are redacted BEFORE capping; the raw `stdout`/`stderr`/`last_message`
-  sidecar files are redacted in place; patterns expanded (GitHub/GitLab/npm/JWT/
-  Stripe/ASIA), full PEM blocks redacted, name-with-suffix keys
-  (`AWS_SECRET_ACCESS_KEY`) caught, and placeholder double-counting fixed.
-- Output reads are byte-bounded to prevent a runaway panelist from OOMing.
-- `gemini` runs with `--skip-trust` (its throwaway cwd is untrusted, which
-  otherwise silently downgrades `--approval-mode plan` and fails headless).
-- Config-file keys/overrides now actually reach the child and `doctor`'s auth
-  check (`setting()` everywhere, `env.update(_CONFIG)`).
-- `_kill_group` no longer skips `SIGKILL` on a transient `PermissionError`.
-- `strip_ansi` also strips OSC sequences (clipboard / hyperlink escapes).
-- Timeout / max-chars are validated; relative run roots are made absolute.
+### Panelists
+- Verified read-only, in the default panel: **codex** (`-s read-only`) and
+  **gemini** (`--approval-mode plan`).
+- Registered but off by default: **llm** (read-only; opt in via `ALLOY_PANELISTS`),
+  **opencode** / **cursor-agent** (no read-only mode → refused unless
+  `ALLOY_ALLOW_UNSANDBOXED=1`), **antigravity** (experimental).
+- **Web research on by default** (codex `tools.web_search`; gemini's
+  `google_web_search` in plan mode), matching Fusion's web-enabled panel;
+  `ALLOY_WEB=0` disables it.
+- `--attach` / `ALLOY_ATTACH` folds explicit files into the prompt as read-only
+  reference context (e.g. the call sites a diff omits).
 
-A second pass (Alloy reviewing its own source) added:
-- Refuse a panelist binary that PATH resolved from inside the current working
-  directory (PATH-shadowing guard) unless an explicit absolute `ALLOY_BIN_<NAME>`.
-- Bounded prompt ingestion (`ALLOY_MAX_PROMPT_BYTES`, default 4 MB) for both
-  `--prompt-file` and stdin; clear error if a prompt file is missing.
-- Fail fast (not hang) when `alloy panel` is run in a TTY with no prompt.
-- Run dirs are `0700` and all run artifacts `0600`.
-- Redaction preserves the assignment operator and quotes (valid syntax for the
-  host), and `secrets_redacted` now counts sidecar redactions too.
-- `--approval-mode plan` group kill always escalates to `SIGKILL` (reaps forked
-  daemons); duplicate panelist names are de-duped; OSC stripping is newline-safe.
+### Skill (`SKILL.md`)
+- Args-based modes: `ask`, `review`, `plan`, the full
+  research → plan → implement → test lifecycle, `doctor`, and an opt-in,
+  **evidence-gated `debate`** round — used only for objective questions with real
+  disagreement, with anonymized answers, evidence-weighted judging, and a single
+  round, to avoid the "confident bully" / conformity failure mode of multi-agent
+  debate.
+- Standing rules: panel output is untrusted data; the panel is read-only and the
+  host does the writing; surface disagreement; "cross-model agreement is a
+  recommendation — you decide." Judge schema + anti-sycophancy rubric; plan-mode
+  handling.
 
-A third pass added web research, attachments, and the brand name:
-- **Web research for the panel** (matches Fusion): codex runs with
-  `-c tools.web_search=true`; gemini's `google_web_search` is auto-accepted in
-  plan mode. On by default; `ALLOY_WEB=0` disables it (codex). Both verified live
-  to search and cite post-training-cutoff facts while staying read-only.
-- **`--attach` / `ALLOY_ATTACH`** folds explicit files into the prompt as
-  read-only reference (e.g. the call sites a diff omits), bounded by
-  `ALLOY_MAX_PROMPT_BYTES`.
-- **Review mode curates context**: SKILL.md tells the judge to pull in the call
-  sites of changed symbols before dispatching, so the panel stops hedging on code
-  it cannot see.
-- **The brand is "Alloy"** in prose and CLI output; the command, paths, and the
-  `ALLOY_*` / `name: alloy` identifiers stay lowercase.
+### Safety
+- Prompts on stdin (never argv); process-group timeouts (`os.killpg`, always
+  escalating to SIGKILL); non-TTY stdin so unauthenticated CLIs fail fast; bounded
+  prompt + output reads; codepoint-safe caps.
+- Best-effort secret redaction of all persisted panelist output (redact before
+  capping; whole PEM blocks; common token families; syntax-preserving).
+- Run artifacts kept outside your repo (`$XDG_STATE_HOME/alloy/runs`; `0700` dirs
+  / `0600` files; auto `.gitignore`); `KEY=value` config that is never `source`d;
+  PATH-shadow guard; no auto-approve / bypass flags; no telemetry.
 
-### Deliberately out of scope (roadmap)
+### Docs & CI
+- `README`, `docs/methodology.md` (Fusion mapping, Claude-as-judge bias, debate
+  evidence), `docs/adding-a-panelist.md`, `NOTICE`, `CONTRIBUTING`, `SECURITY`,
+  issue/PR templates.
+- Mock-panelist test suite (31 tests, no token spend) + GitHub Actions CI
+  (macOS + Linux, Python 3.8 + 3.12).
+
+### Out of scope (roadmap)
 - Panelists writing code (opt-in, isolated git worktree).
 - Auto-running builds in the TEST stage beyond the project's own command.
-- `ALLOY_JUDGE=codex|gemini` judge-rotation override.
+- An `ALLOY_JUDGE=codex|gemini` judge-rotation override.

@@ -1,5 +1,11 @@
 # Alloy
 
+[![CI](https://github.com/tlangridge/Alloy/actions/workflows/ci.yml/badge.svg)](https://github.com/tlangridge/Alloy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
+
+> **The local, CLI-agent way to run [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router) methodology** — no hosted router, no API keys, just the AI CLIs you already have.
+
 **Ask several frontier AI coding CLIs the same hard question, in parallel, and
 get an honest map of where they agree, disagree, and are collectively blind —
 instead of one confident answer from one model.**
@@ -16,8 +22,9 @@ the disagreement* rather than averaging it away.
 > consensus, the contradictions, the unique insight only one model had, and the
 > blind spot none of them saw — then let you decide.
 
-Alloy ships **no API keys** and makes **no network calls of its own**. It only
-runs the CLIs you have already installed and authenticated.
+Alloy ships **no API keys** and sends **no telemetry** — your prompts go only to
+the CLIs you already installed and authenticated. (Its one optional network call
+is a throttled `git fetch` update check; `ALLOY_NO_UPDATE_CHECK=1` disables it.)
 
 > Not affiliated with OpenRouter. "Fusion" is OpenRouter's term for the
 > methodology; this is an independent local reimplementation. See [`NOTICE`](NOTICE).
@@ -71,14 +78,14 @@ npm install -g @google/gemini-cli   # then authenticate: run `gemini` once
 _Recommended (clone anywhere, then symlink — keeps `git pull` updates clean):_
 
 ```bash
-git clone https://github.com/tlangridge/alloy.git ~/Developer/alloy
+git clone https://github.com/tlangridge/Alloy.git ~/Developer/alloy
 cd ~/Developer/alloy && ./install.sh   # symlinks into ~/.claude/skills/alloy and runs doctor
 ```
 
 _Or (clone straight into the skills directory, no symlink):_
 
 ```bash
-git clone https://github.com/tlangridge/alloy.git ~/.claude/skills/alloy
+git clone https://github.com/tlangridge/Alloy.git ~/.claude/skills/alloy
 ~/.claude/skills/alloy/bin/alloy doctor
 ```
 
@@ -121,6 +128,7 @@ Now, inside Claude Code:
 |---|---|
 | `/alloy doctor` | Which panelists are installed / authed / ready, with fix-it hints. |
 | `/alloy ask <q>` | One Alloy round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
+| `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
@@ -215,6 +223,7 @@ variables (env wins over the file):
 | `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |
 | `ALLOY_MAX_PROMPT_BYTES` | `4000000` | cap on total prompt size, including attachments |
 | `ALLOY_ATTACH` | _(unset)_ | comma list of files to fold into the prompt (also `--attach`) |
+| `ALLOY_NO_UPDATE_CHECK` | `0` | set to `1` to disable the throttled git update check |
 
 ## Requirements
 

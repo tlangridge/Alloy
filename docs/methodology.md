@@ -82,9 +82,26 @@ which model holds the gavel.
 - It is not an answer-merger. It is a disagreement surfacer.
 - It is not a code-writing swarm. The panel is read-only; Claude writes.
 
+## On debate rounds (and the "bully effect")
+
+Alloy's optional `debate` round (a second pass where panelists critique each
+other's *anonymized* answers) is gated deliberately, because the research on
+multi-agent debate is mixed. It improves **objective** tasks — math, reasoning,
+factuality, code-correctness — especially with a **diverse** panel. But it can
+*lower* accuracy when a confident, persuasive-but-wrong agent pulls the others
+into agreement (sycophancy / conformity); a single such agent has been measured
+cutting group accuracy 10–40%. The mitigations Alloy uses — anonymizing answers,
+weighting evidence over assertiveness, keeping the host judge as the arbiter,
+triggering only on a genuine objective disagreement, and running a single round —
+come straight from that literature. That is why debate is off by default and used
+rarely.
+
 ## Sources
 
 - OpenRouter, *Fusion beats Frontier* — https://openrouter.ai/blog/announcements/fusion-beats-frontier/
 - OpenRouter docs, *Fusion router* — https://openrouter.ai/docs/guides/routing/routers/fusion-router
 - Digital Applied, *OpenRouter Fusion: multi-model AI responses guide* —
   https://www.digitalapplied.com/blog/openrouter-fusion-multi-model-ai-responses-guide
+- Du et al., *Improving Factuality and Reasoning in Language Models through Multiagent Debate* — https://arxiv.org/abs/2305.14325
+- *Talk Isn't Always Cheap: Understanding Failure Modes in Multi-Agent Debate* — https://arxiv.org/abs/2509.05396
+- *Measuring and Mitigating Identity Bias in Multi-Agent Debate via Anonymization* — https://arxiv.org/abs/2510.07517
