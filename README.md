@@ -79,6 +79,13 @@ itself*:
 > model, including Fable 5 alone at 65.3%."
 > — [OpenRouter, *Fusion beats Frontier*](https://openrouter.ai/blog/announcements/fusion-beats-frontier/) (figures and charts © OpenRouter)
 
+<p align="center">
+  <img src="https://openrouter.ai/blog/images/blog/fusion-benchmark-chart.png" alt="DRACO benchmark scores: Fusion vs solo configurations" width="49%" />
+  <img src="https://openrouter.ai/blog/images/blog/fusion-benchmark-cost.png" alt="Score vs cost per task: Fusion vs solo configurations" width="49%" />
+</p>
+
+<sub>Charts © OpenRouter, from <a href="https://openrouter.ai/blog/announcements/fusion-beats-frontier/"><em>Surpassing Frontier Performance with Fusion</em></a> (Brian Thomas, 2026), shown with attribution. Alloy is an independent reimplementation and is not affiliated with OpenRouter.</sub>
+
 The third row is the telling one: fusing a model **with itself** still gained
 **+6.7 points** (58.8% → 65.5%), because parallel runs take different reasoning
 paths — so much of the lift is the *compare-and-synthesize* step, not just model
