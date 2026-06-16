@@ -54,7 +54,8 @@ from datetime import datetime, timezone
 ALLOY_VERSION = "0.1.1"
 MANIFEST_SCHEMA = 1
 
-DEFAULT_TIMEOUT_S = 240
+DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
+DEFAULT_HEARTBEAT_S = 30           # how often a long-running panelist logs progress
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_MAX_PROMPT_BYTES = 4_000_000  # cap prompt ingestion so a huge file/stdin can't OOM
 TRUNCATION_MARKER = "\n\n[... alloy: output truncated at {n} characters ...]\n"
@@ -618,6 +619,13 @@ def _kill_group(pgid: int) -> None:
         time.sleep(0.3)
 
 
+def _safe_size(path: str) -> int:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                  timeout_s: int, max_chars: int, mode: str) -> dict:
     os.makedirs(pdir, exist_ok=True)
@@ -653,7 +661,9 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "status": "error",
         "exit_code": None,
         "timed_out": False,
+        "stalled": False,
         "duration_ms": 0,
+        "output_bytes": 0,
         "stdout_path": out_path,
         "stderr_path": err_path,
         "last_message_path": last_path,
@@ -679,10 +689,23 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             with _LIVE_LOCK:
                 _LIVE_PGIDS.add(pgid)
             try:
-                deadline = time.monotonic() + timeout_s
+                hb = max(2, setting_int("ALLOY_HEARTBEAT", DEFAULT_HEARTBEAT_S))
+                stall_s = max(0, setting_int("ALLOY_STALL_TIMEOUT", 0))  # 0 = off
+                last_bytes, last_activity = 0, time.monotonic()
+                next_hb = time.monotonic() + hb
                 while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    remaining = timeout_s - (time.monotonic() - start)
+                    poll = max(0.5, min(remaining, hb, stall_s or 5, 5))
+                    try:
+                        proc.wait(timeout=poll)
+                        break  # finished on its own
+                    except subprocess.TimeoutExpired:
+                        pass
+                    now = time.monotonic()
+                    cur = _safe_size(out_path) + _safe_size(err_path)
+                    if cur > last_bytes:
+                        last_bytes, last_activity = cur, now
+                    if now - start >= timeout_s:
                         status["timed_out"] = True
                         _kill_group(pgid)
                         try:
@@ -690,13 +713,28 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                         except subprocess.TimeoutExpired:
                             pass
                         break
-                    try:
-                        proc.wait(timeout=min(60, remaining))
-                        break  # finished on its own
-                    except subprocess.TimeoutExpired:
-                        # heartbeat so the caller can tell slow-but-alive from hung
-                        log(f"{adapter.name}: still running "
-                            f"({int(time.monotonic() - start)}s / {timeout_s}s)")
+                    # Opt-in stall kill (ALLOY_STALL_TIMEOUT). OFF by default,
+                    # because reasoning CLIs are legitimately silent while they
+                    # think -- "no output" is NOT a reliable "dead" signal.
+                    if stall_s and (now - last_activity) >= stall_s:
+                        status["stalled"] = True
+                        _kill_group(pgid)
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        break
+                    if now >= next_hb:
+                        # Progress-aware heartbeat: total bytes + idle age tell
+                        # "working" (bytes climbing across beats) from "maybe
+                        # stuck" (idle keeps growing, bytes flat).
+                        idle = int(now - last_activity)
+                        if cur == 0:
+                            note = "no output yet (model reasoning, or stuck)"
+                        else:
+                            note = f"{cur / 1024:.1f}KB produced, last activity {idle}s ago"
+                        log(f"{adapter.name}: working {int(now - start)}s/{timeout_s}s -- {note}")
+                        next_hb = now + hb
             finally:
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.discard(pgid)
@@ -716,6 +754,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         return status
 
     status["duration_ms"] = int((time.monotonic() - start) * 1000)
+    status["output_bytes"] = _safe_size(out_path) + _safe_size(err_path)
 
     read_cap = max_chars * 4  # bytes; UTF-8 is <=4 bytes/char, bounds memory
     stdout_text = read_text(out_path, read_cap)
@@ -744,6 +783,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     if status["timed_out"]:
         status["status"] = "timeout"
+    elif status["stalled"]:
+        status["status"] = "stalled"
     elif status["exit_code"] != 0:
         status["status"] = "error"
     elif result.strip() == "":
@@ -754,7 +795,10 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     write_atomic(status_path, json.dumps(status, indent=2))
     dur = status["duration_ms"] / 1000.0
     if status["timed_out"]:
-        log(f"{adapter.name}: timeout after {dur:.1f}s (killed)")
+        log(f"{adapter.name}: timeout after {dur:.1f}s "
+            f"(killed; {status['output_bytes']} bytes produced)")
+    elif status["stalled"]:
+        log(f"{adapter.name}: stalled after {dur:.1f}s (no new output; killed)")
     else:
         log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
     return status

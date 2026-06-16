@@ -256,6 +256,27 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "codex")["command"])
         self.assertNotIn("model_reasoning_effort", cmd)
 
+    def test_heartbeat_logged_for_slow_panelist(self):
+        prompt = os.path.join(self.tmp, "p.txt")
+        with open(prompt, "w") as f:
+            f.write("hi")
+        proc = run_alloy(
+            ["panel", "--prompt-file", prompt, "--panelists", "codex",
+             "--timeout", "3", "--run-dir", os.path.join(self.tmp, "runs")],
+            env_extra={"MOCK_BEHAVIOR": "hang", "ALLOY_HEARTBEAT": "1"})
+        self.assertIn("working", proc.stderr)
+
+    def test_stall_timeout_kills_early(self):
+        prompt = os.path.join(self.tmp, "p.txt")
+        with open(prompt, "w") as f:
+            f.write("hi")
+        proc = run_alloy(
+            ["panel", "--prompt-file", prompt, "--panelists", "codex",
+             "--timeout", "30", "--run-dir", os.path.join(self.tmp, "runs")],
+            env_extra={"MOCK_BEHAVIOR": "hang", "ALLOY_STALL_TIMEOUT": "1",
+                       "ALLOY_HEARTBEAT": "1"}, timeout=20)
+        self.assertIn("stalled", proc.stderr)  # killed by stall, not the 30s timeout
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the

@@ -9,8 +9,19 @@
 # Shipped + verified: codex, gemini. Experimental/off by default: antigravity.
 ALLOY_PANELISTS=codex,gemini
 
-# Per-panelist timeout in seconds. A hung CLI is killed (process group) at this.
-ALLOY_TIMEOUT=240
+# Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
+# not the sum). A still-running panelist is killed at this; raise it for very
+# heavy prompts.
+ALLOY_TIMEOUT=300
+
+# How often (seconds) a long-running panelist logs a progress heartbeat
+# (bytes produced + idle age), so you can tell slow-but-working from hung.
+ALLOY_HEARTBEAT=30
+
+# Optional stall kill: if >0, kill a panelist that has produced no new output for
+# this many seconds. OFF (0) by default -- reasoning CLIs are legitimately silent
+# while they think, so silence is not a reliable "dead" signal.
+ALLOY_STALL_TIMEOUT=0
 
 # Cap on each panelist's captured output (characters). Protects the host's
 # context window from a runaway panelist. Truncation is recorded in the manifest.

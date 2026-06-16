@@ -325,11 +325,16 @@ it met the bar. (Evidence + citations: see `docs/methodology.md`.)
   answer or to stop. Never silently pretend a single-model answer is a panel.
 - **Partial panel** (M of N ok) → proceed with M; explicitly name who dropped and
   why. Missing ≠ agreeing.
-- **Timeout / hang** → the dispatcher kills the process group (and logs a
-  heartbeat while a panelist runs). If a panelist times out — most often codex at
-  high reasoning effort on a heavy prompt — you may retry it once with a lower
-  effort (`ALLOY_CODEX_EFFORT=medium`) or a higher `--timeout`, or just proceed as
-  a partial panel. Report it either way; never treat the silence as agreement.
+- **Slow vs dead** → while a panelist runs, the dispatcher logs a progress
+  heartbeat (`working Ns/limit -- KB produced, last activity Ns ago`). Bytes rising
+  across beats = it's working (reasoning CLIs are often silent for a while, then
+  stream); a growing idle age with flat bytes = it may be stuck. A panelist killed
+  at the timeout shows status `timeout`; one killed by the opt-in
+  `ALLOY_STALL_TIMEOUT` shows `stalled`.
+- **Timeout / hang** → if a panelist times out — most often codex at high
+  reasoning effort on a heavy prompt — retry it once with a lower effort
+  (`ALLOY_CODEX_EFFORT=medium`) or a higher `--timeout`, or proceed as a partial
+  panel. Never treat the silence as agreement.
 - **Truncated output** (`truncated: true` in the manifest) → note that the
   panelist's answer was capped at `max_chars`. The run dir's `stdout.txt` is also
   redacted and may itself be capped, so do not treat it as the complete raw

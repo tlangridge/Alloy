@@ -273,7 +273,9 @@ variables (env wins over the file):
 | Key | Default | Meaning |
 |---|---|---|
 | `ALLOY_PANELISTS` | `codex,gemini` | which adapters form the panel |
-| `ALLOY_TIMEOUT` | `240` | per-panelist timeout, seconds |
+| `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
+| `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
+| `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |

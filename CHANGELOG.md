@@ -19,8 +19,15 @@ All notable changes to Alloy are documented here. Format loosely follows
   `timeout after Ns (killed)` instead of showing a 0 exit code.
 
 ### Added
-- **Heartbeat:** a long-running panelist logs `still running (Ns / timeout)` every
-  60 s, so you can tell slow-but-alive from hung.
+- **Progress-aware heartbeat:** a long-running panelist logs `working Ns/limit --
+  KB produced, last activity Ns ago` (every `ALLOY_HEARTBEAT`, default 30 s), so
+  rising bytes mean it's working and a growing idle age means it may be stuck.
+- **Opt-in stall kill** (`ALLOY_STALL_TIMEOUT`, off by default): kill a panelist
+  that produces no new output for N seconds — off by default because reasoning
+  CLIs are legitimately silent while thinking, so silence is not a reliable
+  "dead" signal. A stall-killed panelist gets the distinct status `stalled`.
+- Default per-panelist timeout raised 240 → **300 s** (a panel runs in parallel,
+  so it's the max, not the sum), and `output_bytes` is recorded per panelist.
 
 ## [0.1.0] - 2026-06-16
 
