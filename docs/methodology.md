@@ -13,7 +13,7 @@ but realizes them with local tools:
 
 | Fusion role | What it does | In Alloy |
 |---|---|---|
-| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The local CLIs (`codex`, `gemini`, …), run in parallel, read-only, and web-search-enabled by `bin/alloy`. |
+| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `gemini`, `grok`, and a fresh `claude` instance), run in parallel, read-only, and web-search-enabled by `bin/alloy`. |
 | **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **Claude** (the host), producing `judge.json`. |
 | **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **Claude**, in its synthesis step. |
 
@@ -21,9 +21,13 @@ The hosted router defaults to a 3-model panel (≈ Claude Opus + a GPT + Gemini
 Pro) and reports roughly 4–5× the cost of a single completion for that default.
 The practical advice that shaped Alloy's design:
 
-- **Diversity over quantity.** Three models from different families beat five
-  near-duplicates. Alloy's default panel (`codex` = a GPT family, `gemini` =
-  Gemini family, judged/synthesized by Claude) is deliberately cross-family.
+- **Diversity over quantity.** Models from different families beat near-duplicates.
+  Alloy's default panel spans families on purpose — `codex` (GPT), `gemini`
+  (Gemini), `grok` (xAI), plus a `claude` panelist — judged/synthesized by Claude.
+- **Self-fusion still helps.** OpenRouter found that fusing a model *with itself*
+  added ~+6.7 points, so the panel deliberately includes a fresh, independent
+  `claude` instance even though Claude is also the judge. The judge must treat that
+  panelist as one anonymized voice and never self-prefer (see the bias section).
 - **Use the strongest model as the synthesizer.** Alloy makes Claude — the host
   — the judge and synthesizer.
 - **Fusion is for thinking, not for raw codegen.** Multi-model synthesis helps on
@@ -52,10 +56,11 @@ smoothed-over paragraph that hides the conflict.
 
 ## The Claude-as-judge bias (and the honest answer to "isn't this rigged?")
 
-Claude is both the judge and the synthesizer here, and it is *not* a neutral
-juror — an LLM judging a panel and then writing the final answer can favor its
-own framing. Alloy handles this honestly rather than pretending the judge is
-neutral:
+Claude is the judge and the synthesizer here — and, since the panel includes a
+`claude` instance, often a panelist too. It is *not* a neutral juror: an LLM
+judging a panel (one of whose answers may be its own type) and then writing the
+final answer can favor its own framing. Alloy handles this honestly rather than
+pretending the judge is neutral:
 
 1. **The judge output is written to disk** (`judge.json` in the run directory),
    so its reasoning is auditable, not hidden.
@@ -66,6 +71,10 @@ neutral:
    read.
 4. The honest framing Alloy always ends on: **cross-model agreement is a
    recommendation; you decide.**
+5. **No self-preference.** The `claude` panelist is judged like any other —
+   anonymized, on its merits — and its agreement with Claude's own view counts as
+   self-agreement, not consensus. The independent check comes from the non-Claude
+   panelists.
 
 A future `ALLOY_JUDGE=codex|gemini` override will let the independence-minded
 rotate the judge role to a different model. It is intentionally *not* the default:

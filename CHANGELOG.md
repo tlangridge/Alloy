@@ -3,6 +3,31 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.3] - 2026-06-17
+
+### Added
+- **`claude` panelist — the host's own model in the panel.** A fresh, independent
+  `claude` (Claude Code) instance now runs as a read-only panelist
+  (`-p --permission-mode plan`; `-p` skips the workspace-trust dialog), with model
+  selection via **`ALLOY_CLAUDE_MODEL`**. This is deliberate "self-fusion" (in
+  OpenRouter's data a model fused with itself still gains lift) and makes the panel
+  a complete set of available models.
+
+### Changed
+- **Default panel is now the complete set of available models.** With
+  `ALLOY_PANELISTS` unset, the panel is every verified, read-only, non-experimental
+  adapter that is installed + authenticated (codex, gemini, grok, claude) — it
+  auto-includes new adapters instead of a fixed `codex,gemini` list. Set
+  `ALLOY_PANELISTS` to pin a narrower / cheaper panel.
+- **Judge guidance hardened** for the case where Claude is *both* a panelist and
+  the judge: treat the `claude` panelist as one anonymized voice, never
+  self-prefer, and count agreement with it as self-agreement (not consensus).
+
+### Tests
+- Test harness now pins `ALLOY_PANELISTS=codex,gemini` so the "all available"
+  default can't spawn real CLIs installed on a contributor's machine; +2 `claude`
+  adapter cases. 40 pass.
+
 ## [0.1.2] - 2026-06-16
 
 ### Added

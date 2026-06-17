@@ -6,11 +6,12 @@
 # of the same name override values here.
 
 # Which adapters form the panel (comma-separated, in order).
-# Verified read-only adapters: codex, gemini, grok. codex+gemini are the default
-# panel; add grok (or llm) here to include them, e.g. codex,gemini,grok.
-# No real read-only mode / experimental (skipped unless ALLOY_ALLOW_UNSANDBOXED=1):
-# opencode, cursor-agent, antigravity.
-ALLOY_PANELISTS=codex,gemini
+# LEAVE UNSET to use the default: the COMPLETE SET of available models -- every
+# verified read-only CLI that is installed + authenticated (codex, gemini, grok,
+# and a fresh `claude` instance). Set this only to pin a narrower/cheaper panel.
+# `llm` is read-only but experimental (opt-in); opencode/cursor-agent/antigravity
+# have no real read-only mode (skipped unless ALLOY_ALLOW_UNSANDBOXED=1).
+# ALLOY_PANELISTS=codex,gemini
 
 # Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
 # not the sum). A still-running panelist is killed at this; raise it for very
@@ -46,6 +47,7 @@ ALLOY_WEB=1
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
 # ALLOY_GEMINI_MODEL=gemini-2.5-pro
 # ALLOY_GROK_MODEL=grok-build          # or grok-composer-2.5-fast (grok's default)
+# ALLOY_CLAUDE_MODEL=opus              # the `claude` panelist's model (alias or full id)
 
 # Codex reasoning effort for panel runs. Default "high" keeps runs inside the
 # timeout; otherwise a global `model_reasoning_effort = "xhigh"` in

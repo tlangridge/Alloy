@@ -18,9 +18,13 @@ MOCK = os.path.join(HERE, "mocks", "mock_panelist.py")
 
 def run_alloy(args, env_extra=None, timeout=60):
     env = dict(os.environ)
-    # Hermetic: ignore the developer's ~/.config/alloy/config (e.g. a local
-    # ALLOY_PANELISTS=...,grok must not leak real CLIs into the test panel).
+    # Hermetic: the default panel is now "all available" adapters, and a dev
+    # machine has real grok/claude/etc. installed. Ignore the user config and pin
+    # the panel to the two mocked adapters so no real CLI is ever spawned. Tests
+    # that exercise another adapter pass --panelists explicitly (the CLI flag
+    # overrides this env).
     env["ALLOY_CONFIG"] = "/dev/null"
+    env["ALLOY_PANELISTS"] = "codex,gemini"
     # Point both adapters at the mock and make them look authenticated.
     env["ALLOY_BIN_CODEX"] = MOCK
     env["ALLOY_BIN_GEMINI"] = MOCK
@@ -151,7 +155,7 @@ class AlloyTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
         self.assertEqual(
-            {"codex", "gemini", "grok", "llm", "opencode", "cursor-agent", "antigravity"},
+            {"codex", "gemini", "grok", "claude", "llm", "opencode", "cursor-agent", "antigravity"},
             names)
         codex = next(p for p in data["panelists"] if p["name"] == "codex")
         self.assertEqual(codex["status"], "ready")
@@ -294,6 +298,25 @@ class AlloyTests(unittest.TestCase):
                                     "ALLOY_WEB": "0"})
         cmd = " ".join(by_name(m, "grok")["command"])
         self.assertIn("--disable-web-search", cmd)
+
+    def test_claude_uses_plan_and_print(self):
+        # The host's own model as a panelist: headless (-p), read-only (plan),
+        # never a bypass flag.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"],
+                         env_extra={"ALLOY_BIN_CLAUDE": MOCK, "ANTHROPIC_API_KEY": "x"})
+        cmdlist = by_name(m, "claude")["command"]
+        self.assertIn("-p", cmdlist)                       # headless print mode
+        cmd = " ".join(cmdlist)
+        self.assertIn("--permission-mode plan", cmd)       # read-only
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+        self.assertNotIn("bypassPermissions", cmd)
+
+    def test_claude_model_override(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"],
+                         env_extra={"ALLOY_BIN_CLAUDE": MOCK, "ANTHROPIC_API_KEY": "x",
+                                    "ALLOY_CLAUDE_MODEL": "opus"})
+        cmd = " ".join(by_name(m, "claude")["command"])
+        self.assertIn("--model opus", cmd)
 
 
 class RedactionUnitTests(unittest.TestCase):

@@ -14,7 +14,8 @@ instead of one confident answer from one model.**
 Alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
-machine. It dispatches one prompt to a **panel** (`codex`, `gemini`, …) running
+machine. It dispatches one prompt to a **panel** of every model you have —
+`codex`, `gemini`, `grok`, and a fresh `claude` instance ("self-fusion") — running
 **in parallel, read-only, and able to search the web**, then Claude acts as the **judge** and
 **synthesizer**: it compares the answers and writes a final one that *surfaces
 the disagreement* rather than averaging it away.
@@ -97,10 +98,12 @@ flowchart LR
   Q["your hard question"] --> P{"panel — parallel,<br/>read-only, web search"}
   P --> C["codex"]
   P --> G["gemini"]
-  P --> M["…more CLIs"]
+  P --> K["grok"]
+  P --> CL["claude<br/>(self-fusion)"]
   C --> J["Claude: JUDGE<br/>(compare, don't merge)"]
   G --> J
-  M --> J
+  K --> J
+  CL --> J
   J --> S["Claude: SYNTHESIZE<br/>(surface disagreement)"]
   S --> A["one answer + a map of<br/>agreement · conflict · blind spots"]
 ```
@@ -228,8 +231,9 @@ panel for the *thinking* and leaves the *writing* to Claude.
 ## Safety model
 
 - **Read-only panel.** Panelists run behind their CLI's read-only sandbox flag
-  (`codex -s read-only`, `gemini --approval-mode plan`) **and** in a throwaway
-  temporary working directory, so they get no access to your repo. Adapters
+  (`codex -s read-only`, `gemini --approval-mode plan`, `grok --permission-mode
+  plan`, `claude --permission-mode plan`) **and** in a throwaway temporary working
+  directory, so they get no access to your repo. Adapters
   without a real read-only mode (e.g. `cursor-agent`) are refused unless you
   explicitly opt in with `ALLOY_ALLOW_UNSANDBOXED=1`.
 - **Web research, on by default.** Panelists can search the web (codex's hosted
@@ -279,13 +283,14 @@ variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ALLOY_PANELISTS` | `codex,gemini` | which adapters form the panel |
+| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, gemini, grok, claude). Set it to pin a narrower / cheaper panel. |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
 | `ALLOY_GROK_MODEL` | grok default | Grok model: `grok-build` or `grok-composer-2.5-fast` |
+| `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
 | `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |

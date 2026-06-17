@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.2"
+ALLOY_VERSION = "0.1.3"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -581,19 +581,61 @@ class GrokAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
-# Verified read-only adapters ship in the default panel. The rest are registered
-# (so `doctor` lists them) but excluded by default: `grok`/`llm` are opt-in, and
-# the no-read-only / experimental ones are refused unless ALLOY_ALLOW_UNSANDBOXED=1.
+class ClaudeAdapter(Adapter):
+    # The host's own model, as a panelist: a FRESH `claude` (Claude Code) instance
+    # run headless and read-only (`--permission-mode plan`; `-p` skips the trust
+    # dialog). Including it makes the panel a complete set of available models and
+    # adds the "self-fusion" lift (a model fused with itself still helps). The host
+    # Claude that JUDGES is a *separate* instance and must treat this panelist's
+    # answer as one anonymized voice -- never favor it for being Claude.
+    name = "claude"
+    bin = "claude"
+    read_only = True
+    install_hint = "npm install -g @anthropic-ai/claude-code"
+    auth_hint = "run `claude` once to sign in   (or set ANTHROPIC_API_KEY)"
+
+    def is_authed(self) -> bool:
+        if setting("ANTHROPIC_API_KEY") or setting("CLAUDE_CODE_OAUTH_TOKEN"):
+            return True
+        home = os.path.expanduser("~")
+        return (os.path.isfile(os.path.join(home, ".claude", ".credentials.json"))
+                or os.path.isfile(os.path.join(home, ".claude.json")))
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_CLAUDE_MODEL")
+
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+        # `-p` reads the prompt from stdin; `plan` is read-only. Never use
+        # --dangerously-skip-permissions / --permission-mode bypassPermissions.
+        args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
+        m = self.model()
+        if m:
+            args += ["--model", m]
+        return args
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        return strip_ansi(stdout).strip()
+
+
+# The default panel is the COMPLETE SET of available models: every verified,
+# read-only, non-experimental adapter (codex, gemini, grok, claude) that is
+# installed + authed -- including a fresh `claude` instance of the host's own
+# type. `llm` (experimental) and the no-read-only adapters are opt-in only.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
     "gemini": GeminiAdapter(),
     "grok": GrokAdapter(),
+    "claude": ClaudeAdapter(),
     "llm": LlmAdapter(),
     "opencode": OpenCodeAdapter(),
     "cursor-agent": CursorAgentAdapter(),
     "antigravity": AntigravityAdapter(),
 }
-DEFAULT_PANEL_ORDER = ["codex", "gemini"]
+
+
+def default_panel_names() -> "list[str]":
+    # All verified read-only adapters; cmd_panel further skips any not ready.
+    return [n for n, ad in ADAPTERS.items() if ad.read_only and not ad.experimental]
 
 
 def selected_panelists() -> "list[str]":
@@ -602,7 +644,7 @@ def selected_panelists() -> "list[str]":
     raw = setting("ALLOY_PANELISTS")
     if raw:
         return [n.strip() for n in raw.split(",") if n.strip()]
-    return list(DEFAULT_PANEL_ORDER)
+    return default_panel_names()
 
 
 def default_run_root() -> str:
@@ -1054,7 +1096,7 @@ def _doctor_rows() -> "list[dict]":
             "model": ad.model(),
             "install_hint": ad.install_hint,
             "auth_hint": ad.auth_hint,
-            "default_panel": name in DEFAULT_PANEL_ORDER,
+            "default_panel": ad.read_only and not ad.experimental,
         })
     return rows
 
@@ -1099,8 +1141,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print()
     if ready_default == 0:
         print("  No default panelists are ready. Alloy will fall back to a single-model")
-        print("  (Claude-only) answer until you install and authenticate at least one of")
-        print("  codex / gemini above. Alloy is most useful with 2+ panelists.")
+        print("  (Claude-only) answer until you install and authenticate at least one")
+        print("  panelist above. Alloy is most useful with 2+ panelists.")
     else:
         print(f"  {ready_default} panelist(s) in the default panel. An Alloy round makes")
         print(f"  {ready_default} parallel model call(s) -- one per ready panelist, billed to")

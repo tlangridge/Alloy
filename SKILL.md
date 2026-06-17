@@ -1,8 +1,8 @@
 ---
 name: alloy
 description: >-
-  Run a multi-model panel: dispatch one prompt to the AI coding CLIs
-  installed locally (Codex, Gemini) in parallel as a READ-ONLY panel, then judge
+  Run a multi-model panel: dispatch one prompt to every AI coding CLI
+  installed locally (Codex, Gemini, Grok, Claude) in parallel as a READ-ONLY panel, then judge
   and synthesize their answers (consensus, disagreements, unique insights, blind
   spots) into one answer that surfaces disagreement instead of hiding it. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
@@ -30,12 +30,18 @@ models in parallel, then have a **judge** compare their answers and a
 
 Here the roles map to local tools:
 
-- **Panel** = the AI coding CLIs installed on this machine (`codex`, `gemini`,
-  extensible), run **in parallel, strictly read-only, and with web search
-  enabled** by `bin/alloy` — so they can research current facts, like Fusion's
-  web-enabled panel (`ALLOY_WEB=0` disables it).
+- **Panel** = the **complete set of available models** — every AI coding CLI
+  installed and authenticated here (`codex`, `gemini`, `grok`, and a fresh,
+  independent `claude` instance; extensible), run **in parallel, strictly
+  read-only, and with web search enabled** by `bin/alloy` — so they can research
+  current facts, like Fusion's web-enabled panel (`ALLOY_WEB=0` disables it).
+  Including a `claude` panelist is deliberate **self-fusion** (a model fused with
+  itself still adds lift); it is a *separate* process with its own fresh context.
 - **Judge + Synthesizer** = **you** (Claude, the host). You read the panel's
   answers, compare them (you do **not** merge them), and write the final answer.
+  Because one panelist may be a `claude` instance of your own type, treat its
+  answer as just one anonymized voice — weigh it on merit, never favor it for
+  being Claude (see rule 6).
 
 Alloy ships no API keys and makes no network calls of its own. It orchestrates
 CLIs the user already installed and authenticated; their prompts/diffs (and any
@@ -73,6 +79,13 @@ web pages a panelist chooses to fetch) go to those CLIs' own model providers.
 5. **Dispatching the panel is a real, side-effecting, metered action.** It
    spawns subprocesses and spends tokens on the user's provider accounts. It is
    not a free no-op. See *Plan mode* below.
+
+6. **You may be a panelist too — do not self-prefer.** The panel usually includes
+   a `claude` instance. It is independent of you (separate process, fresh
+   context), so judge its answer exactly like any other: on evidence and
+   reasoning, anonymized. Never rank it higher just because it is Claude, and
+   never count "the claude panelist agrees with me" as consensus — that is
+   self-agreement, and your independent check comes from the non-Claude panelists.
 
 ---
 
@@ -200,7 +213,9 @@ around it — so the file parses.
 Anti-sycophancy rule: **agreement is not proof of correctness.** Panelists share
 training data and can be confidently wrong together. When all panelists agree but
 the reasoning is thin or you have contrary evidence, say so explicitly and lower
-the confidence.
+the confidence. And if the `claude` panelist agrees with your own view, that is
+**self-agreement, not consensus** — discount it, and lean on the non-Claude
+panelists for the independent check.
 
 ### d) Synthesize
 
