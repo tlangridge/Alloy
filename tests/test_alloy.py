@@ -24,12 +24,12 @@ def run_alloy(args, env_extra=None, timeout=60):
     # that exercise another adapter pass --panelists explicitly (the CLI flag
     # overrides this env).
     env["ALLOY_CONFIG"] = "/dev/null"
-    env["ALLOY_PANELISTS"] = "codex,gemini"
+    env["ALLOY_PANELISTS"] = "codex,claude"
     # Point both adapters at the mock and make them look authenticated.
     env["ALLOY_BIN_CODEX"] = MOCK
-    env["ALLOY_BIN_GEMINI"] = MOCK
+    env["ALLOY_BIN_CLAUDE"] = MOCK
     env["CODEX_API_KEY"] = "test"
-    env["GEMINI_API_KEY"] = "test"
+    env["ANTHROPIC_API_KEY"] = "test"
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(
@@ -71,7 +71,7 @@ class AlloyTests(unittest.TestCase):
         proc, m = panel(self.tmp)
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(m["summary"]["ok"], 2)
-        for name in ("codex", "gemini"):
+        for name in ("codex", "claude"):
             p = by_name(m, name)
             self.assertEqual(p["status"], "ok")
             self.assertTrue(os.path.isfile(p["result_path"]))
@@ -79,13 +79,13 @@ class AlloyTests(unittest.TestCase):
                 self.assertIn("MOCK", f.read())
 
     def test_partial_failure(self):
-        # codex ok, gemini fails -> proceed with 1, mark the other failed
-        proc, m = panel(self.tmp, env_extra={"MOCK_BEHAVIOR_GEMINI": "fail"})
+        # codex ok, claude fails -> proceed with 1, mark the other failed
+        proc, m = panel(self.tmp, env_extra={"MOCK_BEHAVIOR_CLAUDE": "fail"})
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(m["summary"]["ok"], 1)
         self.assertEqual(by_name(m, "codex")["status"], "ok")
-        self.assertEqual(by_name(m, "gemini")["status"], "error")
-        self.assertEqual(by_name(m, "gemini")["exit_code"], 3)
+        self.assertEqual(by_name(m, "claude")["status"], "error")
+        self.assertEqual(by_name(m, "claude")["exit_code"], 3)
 
     def test_empty_output(self):
         proc, m = panel(self.tmp, env_extra={"MOCK_BEHAVIOR": "empty"})
@@ -140,9 +140,10 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(by_name(m, "codex")["status"], "not_installed")
 
     def test_no_panelists_fallback(self):
-        # antigravity has no binary and no read-only mode -> always skipped, so
-        # this exercises the 0-panelist Claude-only fallback without invoking any
-        # real CLI (and without spending tokens).
+        # antigravity has no read-only mode -> refused/skipped by default (even
+        # when listed explicitly, unless ALLOY_ALLOW_UNSANDBOXED=1), so this
+        # exercises the 0-panelist Claude-only fallback without invoking any real
+        # CLI (and without spending tokens).
         proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"])
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(m["panelists"], [])
@@ -155,7 +156,7 @@ class AlloyTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
         self.assertEqual(
-            {"codex", "gemini", "grok", "claude", "llm", "opencode", "cursor-agent", "antigravity"},
+            {"codex", "grok", "claude", "llm", "opencode", "cursor-agent", "antigravity"},
             names)
         codex = next(p for p in data["panelists"] if p["name"] == "codex")
         self.assertEqual(codex["status"], "ready")
@@ -317,6 +318,41 @@ class AlloyTests(unittest.TestCase):
                                     "ALLOY_CLAUDE_MODEL": "opus"})
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertIn("--model opus", cmd)
+
+    def test_antigravity_refused_without_unsandboxed(self):
+        # agy (`antigravity`) has no read-only mode -> read_only=False, so even
+        # when listed explicitly it is skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
+        proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                        env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
+                                   "ANTIGRAVITY_API_KEY": "x"})
+        self.assertEqual(proc.returncode, 3)  # 0 panelists -> Claude-only fallback
+        self.assertIsNone(by_name(m, "antigravity"))  # never dispatched
+        skipped = {s["name"]: s["reason"] for s in m["summary"]["skipped"]}
+        self.assertIn("antigravity", skipped)
+        self.assertIn("read-only", skipped["antigravity"])
+
+    def test_antigravity_runs_unsandboxed_print_mode(self):
+        # Opt in: it dispatches headless via `-p`, prompt on stdin, and MUST NOT
+        # carry the auto-approve bypass flag (the adapter never adds it).
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
+                                    "ANTIGRAVITY_API_KEY": "x",
+                                    "ALLOY_ALLOW_UNSANDBOXED": "1"})
+        p = by_name(m, "antigravity")
+        self.assertEqual(p["status"], "ok")
+        cmdlist = p["command"]
+        self.assertIn("-p", cmdlist)
+        cmd = " ".join(cmdlist)
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+
+    def test_antigravity_model_override(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
+                                    "ANTIGRAVITY_API_KEY": "x",
+                                    "ALLOY_ALLOW_UNSANDBOXED": "1",
+                                    "ALLOY_ANTIGRAVITY_MODEL": "gemini-3.1-pro"})
+        cmd = " ".join(by_name(m, "antigravity")["command"])
+        self.assertIn("--model gemini-3.1-pro", cmd)
 
 
 class RedactionUnitTests(unittest.TestCase):

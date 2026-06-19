@@ -18,7 +18,7 @@ labels: bug
 - OS:
 - Python: `python3 --version`
 - Alloy: `alloy version`
-- Panelist CLIs + versions (codex / gemini / …):
+- Panelist CLIs + versions (codex / grok / …):
 
 **Run artifacts (optional)**
 <!-- The manifest.json from the run dir is very helpful. Redact anything sensitive. -->

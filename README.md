@@ -15,7 +15,7 @@ Alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** of every model you have —
-`codex`, `gemini`, `grok`, and a fresh `claude` instance ("self-fusion") — running
+`codex`, `grok`, and a fresh `claude` instance ("self-fusion") — running
 **in parallel, read-only, and able to search the web**, then Claude acts as the **judge** and
 **synthesizer**: it compares the answers and writes a final one that *surfaces
 the disagreement* rather than averaging it away.
@@ -42,21 +42,21 @@ orchestrator runs multiple AI CLIs in parallel"*) — note that the two models
 ```
 $ alloy doctor
   [ready] codex   codex-cli 0.139.0
-  [ready] gemini  0.46.0
+  [ready] grok    0.46.0
 
 $ alloy panel --prompt-file prompt.txt
-[alloy] panel: codex, gemini (2 model call(s))
+[alloy] panel: codex, grok (2 model call(s))
 [alloy] codex: ok in 10.4s (exit 0)
-[alloy] gemini: ok in 13.6s (exit 0)
+[alloy] grok: ok in 13.6s (exit 0)
 ```
 
 - **codex:** "…nondeterministic, interleaved output causing the orchestrator to
   misattribute messages to the wrong CLI."
-- **gemini:** "…race conditions where agents modify the same shared files, leading
+- **grok:** "…race conditions where agents modify the same shared files, leading
   to silent code corruption."
 
 Claude then judges (*they answered different questions — codex is about reading
-output, gemini about writing files; both are real, they are not in conflict*) and
+output, grok about writing files; both are real, they are not in conflict*) and
 synthesizes one answer that keeps both, attributed. One model would have given
 you only half the picture, confidently.
 
@@ -97,11 +97,9 @@ size is the cost knob.)
 flowchart LR
   Q["your hard question"] --> P{"panel — parallel,<br/>read-only, web search"}
   P --> C["codex"]
-  P --> G["gemini"]
   P --> K["grok"]
   P --> CL["claude<br/>(self-fusion)"]
   C --> J["Claude: JUDGE<br/>(compare, don't merge)"]
-  G --> J
   K --> J
   CL --> J
   J --> S["Claude: SYNTHESIZE<br/>(surface disagreement)"]
@@ -129,7 +127,7 @@ have; it ships none of its own. Two or more is where it earns its keep:
 
 ```bash
 npm install -g @openai/codex        # then authenticate: codex login
-npm install -g @google/gemini-cli   # then authenticate: run `gemini` once
+# see https://grok.com (Grok CLI)   # then authenticate: grok login
 ```
 
 **2. Install the skill — pick _one_ method:**
@@ -165,7 +163,7 @@ authenticated, and exactly how to add the missing ones:
 
 ```
   [ready]  codex   codex-cli 0.139.0
-  [auth?]  gemini             installed but not authenticated -> run `gemini` once to log in
+  [auth?]  grok               installed but not authenticated -> run `grok login` to log in
   [ --- ]  antigravity  (experimental, no read-only mode)
 ```
 
@@ -184,7 +182,7 @@ Now, inside Claude Code:
 > `ln -s ~/.claude/skills/alloy/bin/alloy /usr/local/bin/alloy`.
 
 > **The prerequisite cliff, stated honestly:** Alloy is only useful if you have
-> **2+** of {`codex`, `gemini`, …} installed *and authenticated*. With only Claude
+> **2+** of {`codex`, `grok`, …} installed *and authenticated*. With only Claude
 > it degrades to a normal single-model answer and tells you so. Run `doctor`
 > first; it will not surprise you.
 
@@ -231,13 +229,13 @@ panel for the *thinking* and leaves the *writing* to Claude.
 ## Safety model
 
 - **Read-only panel.** Panelists run behind their CLI's read-only sandbox flag
-  (`codex -s read-only`, `gemini --approval-mode plan`, `grok --permission-mode
-  plan`, `claude --permission-mode plan`) **and** in a throwaway temporary working
-  directory, so they get no access to your repo. Adapters
+  (`codex -s read-only`, `grok --permission-mode plan`, `claude --permission-mode
+  plan`) **and** in a throwaway temporary working directory, so they get no access
+  to your repo. Adapters
   without a real read-only mode (e.g. `cursor-agent`) are refused unless you
   explicitly opt in with `ALLOY_ALLOW_UNSANDBOXED=1`.
 - **Web research, on by default.** Panelists can search the web (codex's hosted
-  `web_search`, gemini's `google_web_search`), matching Fusion's web-enabled
+  `web_search`; grok and claude search the web in plan mode), matching Fusion's web-enabled
   panel — so they reason over current facts, not just training data. Search is
   read-only (no files, no shell), but it does mean a panelist may fetch external
   pages: that content is untrusted too, and the queries go to the providers.
@@ -283,12 +281,12 @@ variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, gemini, grok, claude). Set it to pin a narrower / cheaper panel. |
+| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude). Set it to pin a narrower / cheaper panel. |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
-| `ALLOY_CODEX_MODEL` / `ALLOY_GEMINI_MODEL` | CLI default | model override per adapter |
+| `ALLOY_CODEX_MODEL` / `ALLOY_ANTIGRAVITY_MODEL` | CLI default | model override per adapter (e.g. `ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro`; antigravity is opt-in — only runs with `ALLOY_ALLOW_UNSANDBOXED=1`) |
 | `ALLOY_GROK_MODEL` | grok default | Grok model: `grok-build` or `grok-composer-2.5-fast` |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
@@ -304,7 +302,7 @@ variables (env wins over the file):
 - Python 3.8+ (standard library only — no `pip install`).
 - macOS or Linux (Windows via WSL).
 - At least one supported CLI, ideally two: [`codex`](https://github.com/openai/codex),
-  [`gemini`](https://github.com/google-gemini/gemini-cli).
+  [`grok`](https://grok.com).
 
 ## How it works
 
@@ -313,7 +311,7 @@ variables (env wins over the file):
                       |
         bin/alloy panel  -- parallel, read-only, throwaway cwd, process-group timeouts
           /        |        \
-      codex      gemini     (more adapters)
+      codex      grok       (more adapters)
           \        |        /
        run dir + manifest.json  (per-panelist status, paths, caps, redactions)
                       |
@@ -338,7 +336,7 @@ template, and the worked `cursor-agent` example (which shows how an adapter with
 
 v1 deliberately keeps the panel read-only. Clearly out of scope until the core is
 battle-tested: panelists writing code (opt-in, isolated git worktree),
-auto-running builds, and a `ALLOY_JUDGE=codex|gemini` judge-rotation override.
+auto-running builds, and a `ALLOY_JUDGE=codex|grok` judge-rotation override.
 
 ## License
 

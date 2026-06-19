@@ -13,7 +13,7 @@ but realizes them with local tools:
 
 | Fusion role | What it does | In Alloy |
 |---|---|---|
-| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `gemini`, `grok`, and a fresh `claude` instance), run in parallel, read-only, and web-search-enabled by `bin/alloy`. |
+| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `grok`, and a fresh `claude` instance), run in parallel, read-only, and web-search-enabled by `bin/alloy`. |
 | **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **Claude** (the host), producing `judge.json`. |
 | **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **Claude**, in its synthesis step. |
 
@@ -22,8 +22,8 @@ Pro) and reports roughly 4–5× the cost of a single completion for that defaul
 The practical advice that shaped Alloy's design:
 
 - **Diversity over quantity.** Models from different families beat near-duplicates.
-  Alloy's default panel spans families on purpose — `codex` (GPT), `gemini`
-  (Gemini), `grok` (xAI), plus a `claude` panelist — judged/synthesized by Claude.
+  Alloy's default panel spans families on purpose — `codex` (GPT), `grok` (xAI),
+  plus a `claude` panelist — judged/synthesized by Claude.
 - **Self-fusion still helps.** OpenRouter found that fusing a model *with itself*
   added ~+6.7 points, so the panel deliberately includes a fresh, independent
   `claude` instance even though Claude is also the judge. The judge must treat that
@@ -38,8 +38,8 @@ The practical advice that shaped Alloy's design:
   Fusion."** That is the one-line decision rule for when to reach for `/alloy`.
 
 **Web research, like Fusion.** Fusion enables `web_search`/`web_fetch` for every
-panelist. Alloy matches this: codex runs with `tools.web_search=true` and gemini's
-`google_web_search` is auto-accepted in plan mode, so the panel can pull in current
+panelist. Alloy matches this: codex runs with `tools.web_search=true`, and grok and
+claude search the web in plan mode, so the panel can pull in current
 facts (e.g. "the latest release of X") instead of reasoning only from its training
 data. It stays read-only — search is a hosted tool, not local shell — and
 `ALLOY_WEB=0` turns it off (codex). This was the one place Alloy used to diverge
@@ -51,7 +51,7 @@ A naive multi-model wrapper averages answers and produces confident mush. The
 value is the opposite: a panel is most useful when it **disagrees**, because the
 disagreement is information. Alloy's judge step is required to attribute every
 consensus claim to named panelists and to keep contradictions visible, so you see
-"codex says X, gemini says not-X, here's who's right and why" rather than a
+"codex says X, grok says not-X, here's who's right and why" rather than a
 smoothed-over paragraph that hides the conflict.
 
 ## The Claude-as-judge bias (and the honest answer to "isn't this rigged?")
@@ -76,7 +76,7 @@ pretending the judge is neutral:
    self-agreement, not consensus. The independent check comes from the non-Claude
    panelists.
 
-A future `ALLOY_JUDGE=codex|gemini` override will let the independence-minded
+A future `ALLOY_JUDGE=codex|grok` override will let the independence-minded
 rotate the judge role to a different model. It is intentionally *not* the default:
 rotating the judge adds latency, another auth dependency, and the CLI judges are
 weaker at structured comparison — and it is not truly independent anyway when all

@@ -7,11 +7,11 @@
 
 # Which adapters form the panel (comma-separated, in order).
 # LEAVE UNSET to use the default: the COMPLETE SET of available models -- every
-# verified read-only CLI that is installed + authenticated (codex, gemini, grok,
+# verified read-only CLI that is installed + authenticated (codex, grok,
 # and a fresh `claude` instance). Set this only to pin a narrower/cheaper panel.
 # `llm` is read-only but experimental (opt-in); opencode/cursor-agent/antigravity
 # have no real read-only mode (skipped unless ALLOY_ALLOW_UNSANDBOXED=1).
-# ALLOY_PANELISTS=codex,gemini
+# ALLOY_PANELISTS=codex,grok
 
 # Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
 # not the sum). A still-running panelist is killed at this; raise it for very
@@ -35,8 +35,8 @@ ALLOY_MAX_CHARS=200000
 # Guards against a huge prompt exhausting memory before output caps apply.
 ALLOY_MAX_PROMPT_BYTES=4000000
 
-# Web research: panelists may search the web (codex tools.web_search; gemini's
-# google_web_search in plan mode). On by default; set to 0 to disable (codex).
+# Web research: panelists may search the web (codex tools.web_search; grok and
+# claude search the web in plan mode). On by default; set to 0 to disable (codex).
 ALLOY_WEB=1
 
 # Optional: comma-separated files to fold into every prompt as read-only
@@ -45,7 +45,7 @@ ALLOY_WEB=1
 
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
-# ALLOY_GEMINI_MODEL=gemini-2.5-pro
+# ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro   # antigravity is opt-in (runs only with ALLOY_ALLOW_UNSANDBOXED=1)
 # ALLOY_GROK_MODEL=grok-build          # or grok-composer-2.5-fast (grok's default)
 # ALLOY_CLAUDE_MODEL=opus              # the `claude` panelist's model (alias or full id)
 

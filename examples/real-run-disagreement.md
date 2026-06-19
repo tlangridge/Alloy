@@ -14,11 +14,11 @@ both signals instead of averaging them away.
 
 ```
 $ alloy panel --prompt-file prompt.txt
-[alloy] panel: codex, gemini (2 model call(s))
+[alloy] panel: codex, grok (2 model call(s))
 [alloy] codex: dispatching (read-only, timeout 280s)
-[alloy] gemini: dispatching (read-only, timeout 280s)
+[alloy] grok: dispatching (read-only, timeout 280s)
 [alloy] codex: ok in 10.4s (exit 0)
-[alloy] gemini: ok in 13.6s (exit 0)
+[alloy] grok: ok in 13.6s (exit 0)
 [alloy] done: 2/2 panelist(s) ok -> .alloy/runs/.../manifest.json
 ```
 
@@ -30,7 +30,7 @@ $ alloy panel --prompt-file prompt.txt
 > the orchestrator to misattribute messages or state to the wrong CLI and make
 > incorrect decisions.
 
-**gemini** (`gemini/result.md`):
+**grok** (`grok/result.md`):
 
 > The single biggest reliability risk is encountering race conditions where
 > multiple agents attempt to modify the same shared files or system state
@@ -42,16 +42,16 @@ $ alloy panel --prompt-file prompt.txt
 ```json
 {
   "consensus": [
-    {"claim": "parallel orchestration of CLIs has a single dominant reliability risk worth designing against", "panelists": ["codex","gemini"]}
+    {"claim": "parallel orchestration of CLIs has a single dominant reliability risk worth designing against", "panelists": ["codex","grok"]}
   ],
   "contradictions": [],
   "partial_coverage": [
     {"panelist": "codex", "covers": "the READ path: interleaved/nondeterministic output -> misattribution"},
-    {"panelist": "gemini", "covers": "the WRITE path: concurrent file/state mutation -> corruption"}
+    {"panelist": "grok", "covers": "the WRITE path: concurrent file/state mutation -> corruption"}
   ],
   "unique_insights": [
     {"panelist": "codex", "insight": "the orchestrator can attribute a message to the wrong CLI"},
-    {"panelist": "gemini", "insight": "shared-state writes can silently corrupt the repo"}
+    {"panelist": "grok", "insight": "shared-state writes can silently corrupt the repo"}
   ],
   "blind_spots": ["neither mentioned a hung/unauthenticated CLI stalling the whole panel"],
   "confidence": "high that both are real; they answer different halves of the question, so this is complementary, not a conflict"
@@ -63,7 +63,7 @@ $ alloy panel --prompt-file prompt.txt
 The two models did not actually contradict each other — they answered different
 halves of the question. **codex** focused on the *read* path (parallel output is
 nondeterministic and interleaved, so an orchestrator can misattribute a message
-to the wrong CLI) and **gemini** on the *write* path (concurrent agents mutating
+to the wrong CLI) and **grok** on the *write* path (concurrent agents mutating
 shared files can silently corrupt state). Both are real; a single model would
 likely have given you only one.
 

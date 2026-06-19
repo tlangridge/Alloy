@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.3"
+ALLOY_VERSION = "0.1.4"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -383,79 +383,58 @@ class CodexAdapter(Adapter):
         return strip_ansi(stderr).strip()
 
 
-class GeminiAdapter(Adapter):
-    name = "gemini"
-    bin = "gemini"
-    read_only = True
-    install_hint = "npm install -g @google/gemini-cli"
-    auth_hint = "run `gemini` once to log in   (or set GEMINI_API_KEY)"
+class AntigravityAdapter(Adapter):
+    # Google's Antigravity CLI (the `agy` binary). IMPORTANT: agy has NO headless
+    # read-only mode. Its only non-interactive entry point is `agy -p` (print
+    # mode), which AUTO-EXECUTES every tool -- file writes AND arbitrary shell --
+    # regardless of `--sandbox`, `toolPermission: strict`, or `permissions.deny`
+    # (all three were verified ignored in print mode against agy 1.0.10: the deny
+    # list loads but run_command still executes). So this is a read_only = False
+    # adapter, in the same bucket as cursor-agent: registered for visibility,
+    # experimental, and REFUSED by default. The engine dispatches to it only when
+    # the user sets ALLOY_ALLOW_UNSANDBOXED=1, and even then it is contained only
+    # by alloy's throwaway cwd -- which does NOT stop agy's run_command from
+    # touching the network or paths outside that cwd. Prefer a real read-only
+    # panelist (codex / grok / claude). See docs/adding-a-panelist.md.
+    name = "antigravity"
+    bin = "agy"
+    read_only = False
+    experimental = True
+    install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+    auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
     def is_authed(self) -> bool:
-        if setting("GEMINI_API_KEY") or setting("GOOGLE_API_KEY"):
+        if (setting("ANTIGRAVITY_API_KEY") or setting("GEMINI_API_KEY")
+                or setting("GOOGLE_API_KEY")):
             return True
+        # agy keeps its CLI state under ~/.gemini/antigravity-cli but shares the
+        # Google OAuth login with ~/.gemini/oauth_creds.json.
         gdir = os.path.join(os.path.expanduser("~"), ".gemini")
-        if not os.path.isdir(gdir):
-            return False
-        for name in ("oauth_creds.json", "google_accounts.json", "access_tokens.json"):
+        for name in ("oauth_creds.json", "google_accounts.json"):
             if os.path.isfile(os.path.join(gdir, name)):
                 return True
-        # any json credential file as a fallback signal
-        try:
-            return any(n.endswith(".json") for n in os.listdir(gdir))
-        except OSError:
-            return False
+        return False
 
     def model(self) -> "str | None":
-        return setting("ALLOY_GEMINI_MODEL")
+        return setting("ALLOY_ANTIGRAVITY_MODEL")
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
-        # `-p` triggers headless mode; the real prompt is appended from stdin.
-        # `--approval-mode plan` is gemini's read-only mode. Never --yolo / -y.
-        # `--skip-trust` is required: panelists run in an empty throwaway cwd,
-        # which gemini treats as untrusted and then SILENTLY downgrades
-        # `--approval-mode plan` back to "default" and fails headless (exit 55).
-        # Trusting an empty temp dir is safe; it is the only way plan mode is
-        # actually honored without a TTY.
+        # `-p` is agy's only headless mode; the real prompt is fed on stdin. This
+        # mode is NOT read-only -- but never add --dangerously-skip-permissions
+        # (it only makes a non-sandboxed tool even more permissive). The engine
+        # reaches this code path only when ALLOY_ALLOW_UNSANDBOXED=1.
         args = [
             "-p",
             "Follow the instructions provided on standard input and answer them.",
-            "--approval-mode",
-            "plan",
-            "--skip-trust",
         ]
-        # Web research note: gemini's google_web_search tool is auto-accepted in
-        # plan mode (Policy Engine classifies it read-only), so the panel can
-        # already search the web here with no extra flag. There is no clean
-        # per-invocation switch to turn it off, so ALLOY_WEB only gates codex.
         m = self.model()
         if m:
-            args += ["-m", m]
+            args += ["--model", m]
         return args
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
-        # gemini emits MCP / skill-conflict warnings on stderr; never parse it
-        # as the answer. The answer is on stdout.
-        return strip_ansi(stdout).strip()
-
-
-class AntigravityAdapter(Adapter):
-    # Experimental: invocation flags are not yet verified against a real binary,
-    # so this adapter is OFF unless explicitly listed in ALLOY_PANELISTS. doctor
-    # reports it honestly rather than pretending it works.
-    name = "antigravity"
-    bin = "antigravity"
-    read_only = False
-    experimental = True
-    install_hint = "see https://antigravity.google (experimental; adapter unverified)"
-    auth_hint = "n/a (experimental)"
-
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
-        raise RuntimeError(
-            "antigravity adapter is experimental and unverified; enable only after "
-            "verifying its read-only flags. See docs/adding-a-panelist.md."
-        )
-
-    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        # The answer is rendered to stdout; stderr carries noise such as
+        # "Shell cwd was reset to ...". Never parse stderr as the answer.
         return strip_ansi(stdout).strip()
 
 
@@ -543,7 +522,7 @@ class CursorAgentAdapter(Adapter):
 
 
 class GrokAdapter(Adapter):
-    # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` (like gemini's
+    # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` (like claude's
     # plan mode); headless single-turn reads the prompt from a real file via
     # `--prompt-file` (it does NOT accept '-'/stdin) and prints the answer to
     # stdout (`--output-format plain`). Verified live. Models: grok-build,
@@ -618,12 +597,12 @@ class ClaudeAdapter(Adapter):
 
 
 # The default panel is the COMPLETE SET of available models: every verified,
-# read-only, non-experimental adapter (codex, gemini, grok, claude) that is
-# installed + authed -- including a fresh `claude` instance of the host's own
-# type. `llm` (experimental) and the no-read-only adapters are opt-in only.
+# read-only, non-experimental adapter (codex, grok, claude) that is installed +
+# authed -- including a fresh `claude` instance of the host's own type. `llm`
+# (experimental) and the no-read-only adapters (opencode, cursor-agent,
+# antigravity) are opt-in only.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
-    "gemini": GeminiAdapter(),
     "grok": GrokAdapter(),
     "claude": ClaudeAdapter(),
     "llm": LlmAdapter(),

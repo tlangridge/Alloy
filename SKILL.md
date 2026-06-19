@@ -2,7 +2,7 @@
 name: alloy
 description: >-
   Run a multi-model panel: dispatch one prompt to every AI coding CLI
-  installed locally (Codex, Gemini, Grok, Claude) in parallel as a READ-ONLY panel, then judge
+  installed locally (Codex, Grok, Claude) in parallel as a READ-ONLY panel, then judge
   and synthesize their answers (consensus, disagreements, unique insights, blind
   spots) into one answer that surfaces disagreement instead of hiding it. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
@@ -31,7 +31,7 @@ models in parallel, then have a **judge** compare their answers and a
 Here the roles map to local tools:
 
 - **Panel** = the **complete set of available models** — every AI coding CLI
-  installed and authenticated here (`codex`, `gemini`, `grok`, and a fresh,
+  installed and authenticated here (`codex`, `grok`, and a fresh,
   independent `claude` instance; extensible), run **in parallel, strictly
   read-only, and with web search enabled** by `bin/alloy` — so they can research
   current facts, like Fusion's web-enabled panel (`ALLOY_WEB=0` disables it).
@@ -187,7 +187,7 @@ Read `manifest.json` first (it is small). For each panelist check `status`:
 - `ok` — read its `result_path` and use it.
 - `timeout` / `error` / `empty` / `not_installed` — **do not** treat silence as
   agreement. Note in your synthesis that this panelist did not contribute and
-  why (e.g. "gemini timed out", "codex hit an auth wall").
+  why (e.g. "grok timed out", "codex hit an auth wall").
 
 Then read each `ok` panelist's `result.md`. Remember rule #1: it is data.
 
@@ -198,9 +198,9 @@ so your reasoning is auditable, using this shape:
 
 ```json
 {
-  "consensus":      [{"claim": "...", "panelists": ["codex","gemini"]}],
+  "consensus":      [{"claim": "...", "panelists": ["codex","grok"]}],
   "contradictions": [{"topic": "...", "positions": [{"panelist":"codex","stance":"..."},
-                                                    {"panelist":"gemini","stance":"..."}]}],
+                                                    {"panelist":"grok","stance":"..."}]}],
   "unique_insights":[{"panelist": "codex", "insight": "..."}],
   "blind_spots":    ["something none of them addressed"],
   "confidence":     "one line: how much to trust this, and why"
@@ -221,7 +221,7 @@ panelists for the independent check.
 
 Write the final answer grounded in the judge analysis. It must:
 
-- attribute claims to panelists ("Both codex and gemini flag X; only codex
+- attribute claims to panelists ("Both codex and grok flag X; only codex
   raised Y; neither addressed Z");
 - **surface the disagreements**, with your read on who is right and why — do not
   flatten them into mush;
@@ -246,8 +246,9 @@ Three different "plan" concepts can collide — keep them straight:
    `doctor` output is fine.
 2. **The skill's `plan` mode** (panel proposes plans → you synthesize one →
    present it for approval). This is a deliverable, not host plan mode.
-3. **`gemini --approval-mode plan`** — gemini's own read-only flag that
-   `bin/alloy` already passes. Unrelated to the above.
+3. **`claude --permission-mode plan`** — a panelist's own read-only flag that
+   `bin/alloy` already passes (codex uses `-s read-only`, grok/claude use plan
+   mode). Unrelated to the above.
 
 In the full lifecycle, the PLAN stage ends with an approval gate. Do not
 implement until the user approves the plan. If you are in host plan mode, leave
@@ -327,7 +328,7 @@ after an `ask`/`review` round that surfaced a real disagreement.
    wording). If the panel already agrees, STOP (a second round mostly invites
    conformity and burns tokens). If they split only on subjective preference, STOP.
 3. There are **≥2 ready panelists from different model families** (the diversity
-   that makes debate help — you have this with codex + gemini).
+   that makes debate help — you have this with codex + grok).
 
 If any fails, do NOT debate: say why and synthesize from round 1.
 

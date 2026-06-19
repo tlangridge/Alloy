@@ -13,7 +13,7 @@ Optimize for a 3-person team. Give trade-offs and a recommendation.
 
 ## What Alloy does
 
-1. Runs `doctor` (2 panelists ready: codex, gemini).
+1. Runs `doctor` (2 panelists ready: codex, grok).
 2. Writes the question to a temp file and dispatches one read-only round:
    `alloy panel --prompt-file ... --mode consult`.
 3. Reads `manifest.json`, then each `ok` panelist's `result.md`.
@@ -25,11 +25,11 @@ Optimize for a 3-person team. Give trade-offs and a recommendation.
 
 ## Shape of the output you get
 
-> **Consensus (codex + gemini):** event sourcing is overkill for a 3-person team
+> **Consensus (codex + grok):** event sourcing is overkill for a 3-person team
 > at 200k rows/day; the write volume does not justify the operational burden.
 >
 > **Disagreement:** codex leans *partition + read replicas* (lowest new
-> machinery); gemini leans a *CQRS read model* (better read scaling headroom). My
+> machinery); grok leans a *CQRS read model* (better read scaling headroom). My
 > read: start with partitioning + replicas because it solves today's bottleneck
 > with the least new failure surface for a small team; revisit CQRS only if read
 > patterns diverge sharply from writes.

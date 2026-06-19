@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """A fake panelist CLI for alloy's tests.
 
-It impersonates both codex and gemini closely enough to exercise the dispatcher
+It impersonates both codex and claude closely enough to exercise the dispatcher
 without spending tokens, and can be told to misbehave via env vars so we can test
 every failure mode (timeout, nonzero exit, empty/huge/non-UTF-8 output, leaked
 secret).
 
-Role is inferred from argv: codex passes `exec` (+ `-o <file>`), gemini passes
-`-p`. Behavior is read from MOCK_BEHAVIOR_<ROLE> then MOCK_BEHAVIOR (default ok):
+Role is inferred from argv: codex passes `exec` (+ `-o <file>`), the stdin/stdout
+adapters (claude) pass `-p`. Behavior is read from MOCK_BEHAVIOR_<ROLE> then
+MOCK_BEHAVIOR (default ok):
 
   ok        read stdin, emit a canned answer
   empty     emit nothing
@@ -27,12 +28,12 @@ def role_from_argv(argv):
     if "exec" in argv:
         return "codex"
     if "-p" in argv:
-        return "gemini"
+        return "claude"
     return "unknown"
 
 
 def output_target(argv):
-    """codex writes its final message to the file after -o; gemini uses stdout."""
+    """codex writes its final message to the file after -o; claude uses stdout."""
     if "-o" in argv:
         i = argv.index("-o")
         if i + 1 < len(argv):

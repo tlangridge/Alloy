@@ -9,8 +9,8 @@ sponsored by OpenRouter. "Fusion" is used here only to credit and describe the
 methodology; all trademarks belong to their respective owners.
 
 Alloy ships no API keys and makes no network calls of its own. It orchestrates
-third-party command-line tools (for example OpenAI's `codex` and Google's
-`gemini`) that you install and authenticate yourself. When Alloy invokes those
+third-party command-line tools (for example OpenAI's `codex` and xAI's
+`grok`) that you install and authenticate yourself. When Alloy invokes those
 tools, your prompts and any code you ask it to review are sent to those tools'
 model providers under their terms. You are responsible for complying with each
 tool's terms of service, including any restrictions on automated invocation.

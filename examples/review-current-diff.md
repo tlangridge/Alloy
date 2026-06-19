@@ -30,11 +30,11 @@ Claude consolidates into one attributed pass/fail.
 
 > **Verdict: changes requested** (1 high-confidence bug, 1 single-model flag).
 >
-> - **`auth.ts:47` — null deref (codex + gemini agree, high confidence):** the
+> - **`auth.ts:47` — null deref (codex + grok agree, high confidence):** the
 >   session lookup can return `undefined` when the cookie expired; both flagged
 >   the missing guard. Suggested fix below (yours to apply).
 > - **`rateLimit.ts:88` — off-by-one window (codex only):** codex thinks the
->   window boundary is inclusive on both ends; gemini did not flag it. Worth a
+>   window boundary is inclusive on both ends; grok did not flag it. Worth a
 >   2-minute check.
 > - **Missing tests (both):** neither the expiry path nor the limit boundary has
 >   a test.

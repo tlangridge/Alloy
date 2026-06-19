@@ -68,11 +68,10 @@ Then register it:
 ```python
 ADAPTERS = {
     "codex": CodexAdapter(),
-    "gemini": GeminiAdapter(),
     "mytool": MyToolAdapter(),     # <-- add here
     "antigravity": AntigravityAdapter(),
 }
-DEFAULT_PANEL_ORDER = ["codex", "gemini", "mytool"]   # if it should run by default
+DEFAULT_PANEL_ORDER = ["codex", "grok", "mytool"]   # if it should run by default
 ```
 
 ## Verify it
@@ -84,7 +83,7 @@ echo "Say READY." | bin/alloy panel --panelists mytool --timeout 60
 
 Add a mock in `tests/mocks/` and a case in `tests/test_alloy.py` so CI exercises
 your adapter's failure modes (timeout, nonzero exit, empty output) without
-spending tokens. See the existing `mock_codex` / `mock_gemini` mocks.
+spending tokens. See the existing `tests/mocks/mock_panelist.py` mock.
 
 ## Worked example: `cursor-agent` (an adapter with no read-only mode)
 

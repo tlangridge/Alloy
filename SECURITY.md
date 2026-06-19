@@ -12,7 +12,7 @@ Alloy orchestrates AI coding CLIs you already installed and authenticated. Its
 safety properties:
 
 - **The panel is read-only.** Panelists run behind each CLI's read-only sandbox
-  flag (`codex -s read-only`, `gemini --approval-mode plan`) **and** in a throwaway
+  flag (`codex -s read-only`, `claude --permission-mode plan`) **and** in a throwaway
   temp working directory, so they cannot read or write your repository. Adapters
   with no real read-only mode (`opencode`, `cursor-agent`) are **refused** unless
   you set `ALLOY_ALLOW_UNSANDBOXED=1`.

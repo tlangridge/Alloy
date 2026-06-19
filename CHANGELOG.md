@@ -3,6 +3,29 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.4] - 2026-06-19
+
+### Changed
+- **Swapped the Gemini CLI for Google's Antigravity CLI (`agy`).** The
+  `gemini` adapter is removed and replaced by an `antigravity` adapter that
+  drives the `agy` binary headlessly (`agy -p`, prompt on stdin).
+- **`antigravity` ships as a non-read-only, opt-in adapter** (`read_only = False`,
+  experimental — same bucket as `cursor-agent`). It is **refused by default** and
+  runs only when `ALLOY_ALLOW_UNSANDBOXED=1`. Reason: `agy` has **no enforceable
+  headless read-only mode** — its only non-interactive entry point, print mode,
+  auto-executes file-writes *and* arbitrary shell regardless of `--sandbox`,
+  `toolPermission: strict`, or `permissions.deny` (all three verified ignored in
+  print mode against `agy` 1.0.10). Model override via **`ALLOY_ANTIGRAVITY_MODEL`**.
+- **Default panel no longer includes a Google model.** With `ALLOY_PANELISTS`
+  unset, the panel is the verified read-only set that is installed + authed
+  (codex, grok, claude). Add `antigravity` explicitly (plus
+  `ALLOY_ALLOW_UNSANDBOXED=1`) to include it.
+
+### Tests
+- Harness default panel pinned to `codex,claude`; mock impersonates codex +
+  claude; added `antigravity` adapter cases (refused-by-default, opt-in `-p`
+  dispatch with no bypass flag, model override). 43 pass.
+
 ## [0.1.3] - 2026-06-17
 
 ### Added
