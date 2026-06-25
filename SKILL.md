@@ -185,9 +185,14 @@ cue to fall back to Claude-only).
 Read `manifest.json` first (it is small). For each panelist check `status`:
 
 - `ok` — read its `result_path` and use it.
-- `timeout` / `error` / `empty` / `not_installed` — **do not** treat silence as
-  agreement. Note in your synthesis that this panelist did not contribute and
-  why (e.g. "grok timed out", "codex hit an auth wall").
+- `timeout` / `error` / `empty` / `auth` / `not_installed` — **do not** treat
+  silence as agreement. Note in your synthesis that this panelist did not
+  contribute and why; the `error` field carries the reason (e.g. "grok timed
+  out", "codex hit an auth wall"). `auth` means the CLI's login/token failed for
+  that call (often expired mid-run); alloy already re-dispatched it once
+  (`retried: true`), so a *persistent* `auth` means the user should re-authenticate
+  that CLI. `empty` now also records the stderr tail in `error` rather than going
+  silent.
 
 Then read each `ok` panelist's `result.md`. Remember rule #1: it is data.
 

@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.4"
+ALLOY_VERSION = "0.1.5"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -650,6 +650,20 @@ def web_enabled() -> bool:
     return (setting("ALLOY_WEB", "1") or "1").lower() not in ("0", "false", "no")
 
 
+def _retry_statuses() -> "set[str]":
+    # Statuses that earn a panelist exactly ONE re-dispatch (never a loop). The
+    # default `auth` targets the transient token-refresh race -- see _AUTH_FAIL_RE:
+    # the CLI fails one call as its token expires but refreshes it as a side
+    # effect, so the retry lands on a fresh token. Set ALLOY_RETRY=0 (or off/none)
+    # to disable, or "auth,empty" to also re-ask on genuinely blank answers (costs
+    # a second call for that panelist). Comma-separated list of status names.
+    # (An empty string reads as "unset" -> the default, not "disabled".)
+    raw = (setting("ALLOY_RETRY", "auth") or "").strip()
+    if raw.lower() in ("", "0", "off", "false", "no", "none"):
+        return set()
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
 def skill_root() -> str:
     # The repo / skill directory (parent of bin/), used for the update check.
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -685,6 +699,19 @@ def _safe_size(path: str) -> int:
         return os.path.getsize(path)
     except OSError:
         return 0
+
+
+# Markers that mean a panelist's EMPTY answer is actually a recoverable auth
+# failure -- chiefly an OAuth access token expiring exactly at dispatch: the CLI
+# fails that one call (its worker quits with AuthorizationRequired) but often
+# still exits 0 with empty stdout, AND refreshes the token as a side effect, so
+# the very next call succeeds. Scoped to STDERR so a model merely *discussing*
+# auth in its answer is never matched.
+_AUTH_FAIL_RE = re.compile(
+    r"AuthorizationRequired|Unauthorized|\bAuth\(|not (?:logged in|authenticated)"
+    r"|\b401\b|invalid[_ ]?(?:api[_ ]?key|token|credentials)",
+    re.I,
+)
 
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
@@ -849,7 +876,21 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     elif status["exit_code"] != 0:
         status["status"] = "error"
     elif result.strip() == "":
-        status["status"] = "empty"
+        # An empty answer is NOT always "nothing to say": a CLI whose token
+        # expired mid-call can exit 0 with empty stdout. Distinguish that
+        # recoverable auth case (-> retryable, self-heals) from a genuine blank,
+        # and never bury either silently -- surface the stderr tail as the
+        # reason. Use the redacted, de-ANSI'd stderr so nothing secret leaks.
+        clean_err = strip_ansi(red_err).strip()
+        m = _AUTH_FAIL_RE.search(clean_err)
+        if m:
+            status["status"] = "auth"
+            status["error"] = m.group(0)
+        else:
+            status["status"] = "empty"
+            tail = [ln for ln in clean_err.splitlines() if ln.strip()][-3:]
+            if tail:
+                status["error"] = " / ".join(tail)[:500]
     else:
         status["status"] = "ok"
 
@@ -1027,12 +1068,27 @@ def cmd_panel(args: argparse.Namespace) -> int:
     log(f"panel: {', '.join(a.name for a in chosen)} ({len(chosen)} model call(s))")
     results: "dict[str, dict]" = {}
     threads: "list[threading.Thread]" = []
+    retry_set = _retry_statuses()
 
     def worker(ad: Adapter) -> None:
         pdir = os.path.join(run_dir, ad.name)
         try:
-            results[ad.name] = run_panelist(ad, prompt_path, pdir, timeout_s,
-                                             max_chars, args.mode)
+            st = run_panelist(ad, prompt_path, pdir, timeout_s,
+                              max_chars, args.mode)
+            # Self-heal a transient first-attempt failure (default: an `auth`
+            # token-refresh race) with exactly ONE re-dispatch -- not a loop. The
+            # refresh has almost always landed by now, so the retry runs on a
+            # fresh token. The retry's artifacts go in <name>/_retry (the first
+            # attempt's stay in <name>/ for debugging); the manifest reports the
+            # retry result, tagged retried + first_attempt_status.
+            if st.get("status") in retry_set:
+                log(f"{ad.name}: {st['status']} (likely transient) -- retrying once")
+                st2 = run_panelist(ad, prompt_path, os.path.join(pdir, "_retry"),
+                                   timeout_s, max_chars, args.mode)
+                st2["retried"] = True
+                st2["first_attempt_status"] = st.get("status")
+                st = st2
+            results[ad.name] = st
         except Exception as exc:  # pragma: no cover - defensive
             results[ad.name] = {"name": ad.name, "status": "error",
                                  "error": repr(exc)}

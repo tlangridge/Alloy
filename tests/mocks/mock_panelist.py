@@ -13,6 +13,8 @@ MOCK_BEHAVIOR (default ok):
   ok        read stdin, emit a canned answer
   empty     emit nothing
   fail      print to stderr and exit 3
+  auth      emit an AuthorizationRequired error on stderr, empty stdout, exit 0
+  auth_once auth on the first call, ok thereafter (state via $MOCK_AUTH_ONCE_FILE)
   hang      spawn a child `sleep` (pid -> $MOCK_CHILD_PIDFILE), then sleep forever
   huge      emit a large answer (to test output capping)
   secret    emit a fake API key (to test redaction)
@@ -71,6 +73,33 @@ def main():
     if behavior == "fail":
         sys.stderr.write("mock: simulated failure\n")
         return 3
+
+    if behavior == "auth_once":
+        # Stateful: first call fails like an expired-token race, later calls
+        # succeed (mirrors grok refreshing its token as a side effect). Used to
+        # exercise the single retry. State persists across processes via a file.
+        flag = os.environ.get("MOCK_AUTH_ONCE_FILE")
+        if flag and os.path.exists(flag):
+            behavior = "ok"
+        else:
+            if flag:
+                open(flag, "w").close()
+            behavior = "auth"
+
+    if behavior == "auth":
+        # An expired-token failure as grok emits it: auth error on stderr, EMPTY
+        # stdout, and a clean exit 0 (the trap the classifier must catch).
+        sys.stderr.write(
+            "ERROR worker quit with fatal: Transport channel closed, "
+            "when Auth(AuthorizationRequired)\n"
+        )
+        return 0
+
+    if behavior == "empty_noisy":
+        # Genuinely blank answer (empty stdout) but with non-auth stderr noise,
+        # to exercise the stderr-tail surfacing of a real `empty`.
+        sys.stderr.write("mock: a diagnostic line\nmock: the last stderr line\n")
+        return 0
 
     target = output_target(argv)
     if behavior == "empty":

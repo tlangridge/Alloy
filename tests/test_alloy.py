@@ -354,6 +354,64 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "antigravity")["command"])
         self.assertIn("--model gemini-3.1-pro", cmd)
 
+    # -- empty/auth classification + single retry (token-refresh race) -------- #
+    def _grok_env(self, **extra):
+        e = {"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"}
+        e.update(extra)
+        return e
+
+    def test_auth_empty_classified_as_auth(self):
+        # grok exits 0 with empty stdout + an AuthorizationRequired error on
+        # stderr -> must be `auth`, not buried as `empty`. Retry off to observe it.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra=self._grok_env(MOCK_BEHAVIOR="auth",
+                                                  ALLOY_RETRY="0"))
+        p = by_name(m, "grok")
+        self.assertEqual(p["status"], "auth")
+        self.assertIn("Auth", p["error"])
+        self.assertNotIn("retried", p)
+
+    def test_plain_empty_surfaces_stderr_tail(self):
+        # A genuine blank answer stays `empty`, but the stderr tail is recorded
+        # as the reason instead of a silent null.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra=self._grok_env(MOCK_BEHAVIOR="empty_noisy",
+                                                  ALLOY_RETRY="0"))
+        p = by_name(m, "grok")
+        self.assertEqual(p["status"], "empty")
+        self.assertIn("the last stderr line", p["error"])
+
+    def test_retry_recovers_transient_auth(self):
+        # Default ALLOY_RETRY includes `auth`: first call fails auth, the single
+        # retry lands on the (refreshed) token and succeeds.
+        flag = os.path.join(self.tmp, "auth_once.flag")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra=self._grok_env(MOCK_BEHAVIOR="auth_once",
+                                                  MOCK_AUTH_ONCE_FILE=flag))
+        p = by_name(m, "grok")
+        self.assertEqual(p["status"], "ok")
+        self.assertTrue(p["retried"])
+        self.assertEqual(p["first_attempt_status"], "auth")
+
+    def test_plain_empty_not_retried_by_default(self):
+        # The default retry set is `auth` only -> a genuine empty is NOT
+        # re-dispatched (no wasted second call on a blank answer).
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra=self._grok_env(MOCK_BEHAVIOR="empty_noisy"))
+        p = by_name(m, "grok")
+        self.assertEqual(p["status"], "empty")
+        self.assertNotIn("retried", p)
+
+    def test_retry_can_be_disabled(self):
+        flag = os.path.join(self.tmp, "auth_once.flag")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra=self._grok_env(MOCK_BEHAVIOR="auth_once",
+                                                  MOCK_AUTH_ONCE_FILE=flag,
+                                                  ALLOY_RETRY="0"))
+        p = by_name(m, "grok")
+        self.assertEqual(p["status"], "auth")
+        self.assertNotIn("retried", p)
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the

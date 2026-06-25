@@ -3,6 +3,36 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.5] - 2026-06-25
+
+### Fixed
+- **A transient panelist auth-refresh race no longer surfaces as a silent empty
+  voice.** When a CLI's OAuth access token expired exactly at dispatch, it could
+  fail that one call (`worker quit … Auth(AuthorizationRequired)`) yet still exit
+  0 with empty stdout — so the panel silently dropped from 3 voices to 2 with no
+  signal, even though the very next call would have succeeded (the failed call
+  refreshes the token as a side effect). Observed with `grok` 0.2.54; the cause
+  is generic to any OAuth-token CLI.
+
+### Added
+- **`auth` status + legible empties.** The classifier now scans stderr on an
+  empty result: an auth marker (`AuthorizationRequired`, `Unauthorized`, `401`,
+  `invalid api key/token/credentials`, …) is classified `auth` with the reason in
+  `error`; a genuine blank is still `empty` but records the stderr tail in `error`
+  instead of going silent. Scoped to stderr so a model *discussing* auth is never
+  misclassified.
+- **Single self-healing retry (`ALLOY_RETRY`).** A panelist whose first attempt
+  hit a retryable status is re-dispatched exactly **once** (never a loop); the
+  token refresh has almost always landed by then, so the retry runs on a fresh
+  token. Default `auth`; set `ALLOY_RETRY="auth,empty"` to also re-ask blank
+  answers, or `ALLOY_RETRY=0` to disable. The retry result carries `retried: true`
+  and `first_attempt_status`; first-attempt artifacts are kept under
+  `<panelist>/_retry`'s parent for debugging.
+
+### Tests
+- +5 cases: auth classification, stderr-tail surfacing on empty, retry recovers a
+  transient auth failure, blanks aren't retried by default, retry disable. 48 pass.
+
 ## [0.1.4] - 2026-06-19
 
 ### Changed

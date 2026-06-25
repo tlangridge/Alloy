@@ -285,6 +285,7 @@ variables (env wins over the file):
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
+| `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_ANTIGRAVITY_MODEL` | CLI default | model override per adapter (e.g. `ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro`; antigravity is opt-in — only runs with `ALLOY_ALLOW_UNSANDBOXED=1`) |
 | `ALLOY_GROK_MODEL` | grok default | Grok model: `grok-build` or `grok-composer-2.5-fast` |
