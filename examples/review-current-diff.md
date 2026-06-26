@@ -1,8 +1,9 @@
 # Example: `/alloy review` of your current diff
 
 A read-only, multi-model review of the change you have in progress. Claude
-gathers the diff; the panel reviews *text only* (it never touches your repo);
-Claude consolidates into one attributed pass/fail.
+gathers the diff; the panel reviews it with read access to your repo (read-only —
+it reads the surrounding code but never writes to it); Claude consolidates into
+one attributed pass/fail.
 
 ## In Claude Code
 

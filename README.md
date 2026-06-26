@@ -16,9 +16,9 @@ idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/ro
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** of every model you have —
 `codex`, `grok`, and a fresh `claude` instance ("self-fusion") — running
-**in parallel, read-only, and able to search the web**, then Claude acts as the **judge** and
-**synthesizer**: it compares the answers and writes a final one that *surfaces
-the disagreement* rather than averaging it away.
+**in parallel, read-only inside your repo, and able to search the web**, then
+Claude acts as the **judge** and **synthesizer**: it compares the answers and
+writes a final one that *surfaces the disagreement* rather than averaging it away.
 
 > **It does not merge answers into mush.** Its whole job is to show you the
 > consensus, the contradictions, the unique insight only one model had, and the
@@ -199,14 +199,17 @@ Now, inside Claude Code:
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
-In the lifecycle, **Claude writes all the code; the panel only ever reviews,
-read-only.** Alloy never lets a panelist edit your files, run a build, or touch
-a git worktree. That is a deliberate v1 boundary (see *Roadmap*).
+In the lifecycle, **Claude writes all the code; the panel only ever reads and
+reviews, read-only.** By default panelists read your real working tree (so they
+ground answers in your actual code), but their CLI read-only flag stops them
+editing files, running builds, or making any change — best-effort, with a tamper
+tripwire as backstop. Claude does all the writing.
 
-Need the panel to see more than a diff? `alloy panel --attach file1,file2` (or
-`ALLOY_ATTACH=…`) folds whole files into the prompt as read-only reference — handy
-for giving the panel the call sites a diff doesn't include (the panel can't read
-your repo, only what you put in the prompt).
+The panel reads the repo itself, so you rarely need to spoon-feed files. When you
+*do* want to force specific files into the prompt (e.g. something outside the
+repo, or to guarantee a file is seen), `alloy panel --attach file1,file2` (or
+`ALLOY_ATTACH=…`) folds them in as read-only reference. Use `--no-repo` to run
+the panel with no repo access at all (pure web research / maximum caution).
 
 ---
 
@@ -315,7 +318,7 @@ variables (env wins over the file):
 ```
             prompt (on stdin, never argv)
                       |
-        bin/alloy panel  -- parallel, read-only, throwaway cwd, process-group timeouts
+        bin/alloy panel  -- parallel, read-only IN your repo, process-group timeouts
           /        |        \
       codex      grok       (more adapters)
           \        |        /
@@ -340,9 +343,10 @@ template, and the worked `cursor-agent` example (which shows how an adapter with
 
 ## Roadmap
 
-v1 deliberately keeps the panel read-only. Clearly out of scope until the core is
-battle-tested: panelists writing code (opt-in, isolated git worktree),
-auto-running builds, and a `ALLOY_JUDGE=codex|grok` judge-rotation override.
+The panel reads your repo but stays **read-only** — it never writes. Out of scope
+until the core is more battle-tested: panelists *writing* code (opt-in, in an
+isolated git worktree), auto-running builds/tests, and a `ALLOY_JUDGE=codex|grok`
+judge-rotation override.
 
 ## License
 

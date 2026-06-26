@@ -37,10 +37,12 @@ safety properties:
 
 What Alloy does **not** protect against, by design:
 
-- **Provider egress.** Your prompts, any diffs you review, and any web pages a
-  panelist fetches are sent to the model providers behind those CLIs — exactly as
-  if you used the CLIs directly. "Read-only" means no local writes; it is **not**
-  an OS-level data-exfiltration sandbox.
+- **Provider egress.** Your prompts, **any repository files the panel reads**
+  (repo access is on by default — use `--no-repo` to send nothing from your
+  tree), any diffs you review, and any web pages a panelist fetches are sent to
+  the model providers behind those CLIs — exactly as if you used the CLIs
+  directly. "Read-only" means no local writes; it is **not** an OS-level
+  data-exfiltration sandbox.
 - **A binary you point `ALLOY_BIN_<NAME>` at.** Overrides run whatever you specify
   with your environment; that's your responsibility.
 

@@ -13,7 +13,7 @@ but realizes them with local tools:
 
 | Fusion role | What it does | In Alloy |
 |---|---|---|
-| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `grok`, and a fresh `claude` instance), run in parallel, read-only, and web-search-enabled by `bin/alloy`. |
+| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `grok`, and a fresh `claude` instance), run in parallel by `bin/alloy` — read-only, web-search-enabled, and (by default) reading the user's repo so they ground answers in real code. |
 | **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **Claude** (the host), producing `judge.json`. |
 | **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **Claude**, in its synthesis step. |
 
@@ -86,10 +86,11 @@ which model holds the gavel.
 
 ## What Alloy is not
 
-- It is not local inference. Your prompts and diffs are sent to the providers
-  behind each CLI.
+- It is not local inference. Your prompts, your repo files the panel reads, and
+  any diffs are sent to the providers behind each CLI.
 - It is not an answer-merger. It is a disagreement surfacer.
-- It is not a code-writing swarm. The panel is read-only; Claude writes.
+- It is not a code-writing swarm. The panel reads your repo but is read-only
+  (best-effort, via each CLI's flag); Claude does all the writing.
 
 ## On debate rounds (and the "bully effect")
 

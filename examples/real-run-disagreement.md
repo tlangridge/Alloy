@@ -67,9 +67,10 @@ to the wrong CLI) and **grok** on the *write* path (concurrent agents mutating
 shared files can silently corrupt state). Both are real; a single model would
 likely have given you only one.
 
-For Alloy itself, both are designed out: each panelist writes to its **own**
-files (no interleaving, no misattribution) and runs **read-only in a throwaway
-working directory** (no shared-state writes). The judge also flagged a blind spot
+For Alloy itself, both are designed out: each panelist's output is captured to
+its **own** files (no interleaving, no misattribution) and panelists run
+**read-only** — they may read the repo, but their CLI read-only flag blocks
+writes, so there is no shared-state mutation. The judge also flagged a blind spot
 neither model raised — a hung/unauthenticated CLI stalling the panel — which
 Alloy handles with non-TTY stdin and process-group timeouts.
 

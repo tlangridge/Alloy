@@ -104,8 +104,10 @@ class CursorAgentAdapter(Adapter):
         return bool(os.environ.get("CURSOR_API_KEY"))  # + creds-file check
 
     def build_args(self, prompt_path, last_message_path, mode):
-        # NB: even in --print mode this can write files and run bash. It is only
-        # contained by alloy's throwaway cwd. Never pass -f/--force.
+        # NB: even in --print mode this can write files and run bash. Because it
+        # is write-capable, alloy never gives it the real repo -- it runs in a
+        # disposable repo *copy* (and only when ALLOY_ALLOW_UNSANDBOXED=1), so its
+        # writes land off your tree. Never pass -f/--force.
         return ["--print", "--output-format", "text"]
 
     def parse(self, stdout, stderr, last_message):

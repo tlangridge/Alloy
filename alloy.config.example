@@ -77,9 +77,10 @@ ALLOY_CODEX_EFFORT=high
 # OUTSIDE your repo so prompts/diffs and CLI output are never committed.
 # ALLOY_RUN_ROOT=~/.cache/alloy/runs
 
-# DANGER: allow adapters that have no real read-only mode (e.g. cursor-agent).
-# Off by default. Only enable if you understand that such a panelist can write
-# files and run shell, contained only by alloy's throwaway working directory.
+# DANGER: allow adapters that have no real read-only mode (e.g. antigravity,
+# cursor-agent). Off by default. Such a panelist can write files and run shell;
+# alloy never gives it your real repo (it gets a disposable COPY instead), but
+# its writes/shell are otherwise uncontained. Only enable if you accept that.
 # ALLOY_ALLOW_UNSANDBOXED=0
 
 # Disable the throttled, git-based update check (the one optional network call
