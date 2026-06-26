@@ -16,7 +16,7 @@ ALLOY = os.path.join(REPO, "bin", "alloy")
 MOCK = os.path.join(HERE, "mocks", "mock_panelist.py")
 
 
-def run_alloy(args, env_extra=None, timeout=60):
+def run_alloy(args, env_extra=None, timeout=60, cwd=None):
     env = dict(os.environ)
     # Hermetic: the default panel is now "all available" adapters, and a dev
     # machine has real grok/claude/etc. installed. Ignore the user config and pin
@@ -25,6 +25,10 @@ def run_alloy(args, env_extra=None, timeout=60):
     # overrides this env).
     env["ALLOY_CONFIG"] = "/dev/null"
     env["ALLOY_PANELISTS"] = "codex,claude"
+    # Repo access defaults ON (auto-detects the git root) -- but the test process
+    # cwd IS a git repo (alloy's own), so pin it OFF by default to stay hermetic.
+    # Repo tests opt in with --repo / a cwd inside a tmp git repo + ALLOY_REPO="".
+    env["ALLOY_REPO"] = "none"
     # Point both adapters at the mock and make them look authenticated.
     env["ALLOY_BIN_CODEX"] = MOCK
     env["ALLOY_BIN_CLAUDE"] = MOCK
@@ -34,19 +38,19 @@ def run_alloy(args, env_extra=None, timeout=60):
         env.update(env_extra)
     proc = subprocess.run(
         [sys.executable, ALLOY] + args,
-        capture_output=True, text=True, env=env, timeout=timeout,
+        capture_output=True, text=True, env=env, timeout=timeout, cwd=cwd,
     )
     return proc
 
 
-def panel(tmp, env_extra=None, extra_args=None, timeout=60):
+def panel(tmp, env_extra=None, extra_args=None, timeout=60, cwd=None):
     prompt = os.path.join(tmp, "p.txt")
     with open(prompt, "w") as f:
         f.write("Say something useful.")
     args = ["panel", "--prompt-file", prompt, "--run-dir", os.path.join(tmp, "runs")]
     if extra_args:
         args += extra_args
-    proc = run_alloy(args, env_extra=env_extra, timeout=timeout)
+    proc = run_alloy(args, env_extra=env_extra, timeout=timeout, cwd=cwd)
     manifest_path = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
     manifest = None
     if manifest_path and os.path.isfile(manifest_path):
@@ -411,6 +415,65 @@ class AlloyTests(unittest.TestCase):
         p = by_name(m, "grok")
         self.assertEqual(p["status"], "auth")
         self.assertNotIn("retried", p)
+
+    # -- repo access ---------------------------------------------------------- #
+    def _repo_with_file(self, name="hello.txt", body="repo content", git=False):
+        repo = os.path.join(self.tmp, "repo")
+        os.makedirs(repo, exist_ok=True)
+        with open(os.path.join(repo, name), "w") as f:
+            f.write(body)
+        if git:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        return repo
+
+    def test_read_only_adapter_runs_in_real_repo(self):
+        # A read-only adapter's cwd IS the real repo (live read access); the CLI
+        # read-only flag is what prevents writes.
+        repo = self._repo_with_file()
+        _proc, m = panel(self.tmp,
+                         extra_args=["--panelists", "codex", "--repo", repo])
+        p = by_name(m, "codex")
+        self.assertEqual(p["repo_access"], "real")
+        self.assertEqual(p["cwd"], repo)
+        self.assertEqual(m["summary"]["repo"], repo)
+
+    def test_no_repo_flag_overrides_and_isolates(self):
+        # --no-repo wins over ALLOY_REPO -> empty throwaway cwd, no access.
+        repo = self._repo_with_file()
+        _proc, m = panel(self.tmp,
+                         extra_args=["--panelists", "codex", "--no-repo"],
+                         env_extra={"ALLOY_REPO": repo})
+        p = by_name(m, "codex")
+        self.assertEqual(p["repo_access"], "none")
+        self.assertTrue(p["cwd"].endswith(os.path.join("codex", "cwd")))
+        self.assertIsNone(m["summary"]["repo"])
+
+    def test_write_capable_adapter_gets_disposable_copy(self):
+        # antigravity CAN write -> it must NOT see the real tree; it gets a copy
+        # (with .git excluded) so any writes land off your repo.
+        repo = self._repo_with_file(name="code.py", body="x = 1")
+        os.makedirs(os.path.join(repo, ".git"))
+        with open(os.path.join(repo, ".git", "HEAD"), "w") as f:
+            f.write("ref: refs/heads/main")
+        _proc, m = panel(self.tmp,
+                         extra_args=["--panelists", "antigravity", "--repo", repo],
+                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
+                                    "ANTIGRAVITY_API_KEY": "x",
+                                    "ALLOY_ALLOW_UNSANDBOXED": "1"})
+        p = by_name(m, "antigravity")
+        self.assertEqual(p["repo_access"], "copy")
+        self.assertTrue(p["cwd"].endswith("cwd_repo"))
+        self.assertTrue(os.path.isfile(os.path.join(p["cwd"], "code.py")))  # copied
+        self.assertFalse(os.path.exists(os.path.join(p["cwd"], ".git")))    # excluded
+
+    def test_repo_auto_detected_from_git_root(self):
+        # Default (ALLOY_REPO unset): auto-detect the git root of the invoking cwd.
+        repo = self._repo_with_file(git=True)
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "codex"],
+                         env_extra={"ALLOY_REPO": ""}, cwd=repo)
+        p = by_name(m, "codex")
+        self.assertEqual(p["repo_access"], "real")
+        self.assertEqual(os.path.realpath(p["cwd"]), os.path.realpath(repo))
 
 
 class RedactionUnitTests(unittest.TestCase):

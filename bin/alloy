@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.5"
+ALLOY_VERSION = "0.1.6"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -677,6 +677,78 @@ def _git(root: str, *args: str, timeout: int = 20):
         return None
 
 
+def _git_toplevel(path: str) -> "str | None":
+    cp = _git(path, "rev-parse", "--show-toplevel")
+    if cp and cp.returncode == 0:
+        top = cp.stdout.strip()
+        return top or None
+    return None
+
+
+def resolve_repo(args, cwd_now: str) -> "str | None":
+    # Which directory the panel may READ. ON by default: the git root of the
+    # invoking cwd (so coding panels see the real, *uncommitted* working tree).
+    # `--no-repo` / ALLOY_REPO=none -> zero access (empty throwaway cwd, the old
+    # behavior). `--repo PATH` / ALLOY_REPO=PATH pins an explicit directory. When
+    # not pinned and not inside a git repo we return None rather than exposing an
+    # arbitrary cwd like $HOME.
+    raw = getattr(args, "repo", None) or setting("ALLOY_REPO")
+    if getattr(args, "no_repo", False) or (raw and raw.strip().lower() == "none"):
+        return None
+    if raw:
+        p = os.path.abspath(os.path.expanduser(raw.strip()))
+        return p if os.path.isdir(p) else None
+    return _git_toplevel(cwd_now)
+
+
+# Dirs not worth copying into a write-capable adapter's disposable repo: huge,
+# regenerable, or the git object store (history is read via the real repo by the
+# read-only panel, not here).
+_COPY_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__",
+              ".mypy_cache", ".pytest_cache", "dist", "build", "target", ".next"}
+
+
+def _copy_repo(src: str, dst: str) -> None:
+    # A disposable working-tree copy for adapters that CAN write, so their writes
+    # land here, never on the user's repo. Skips heavy/regenerable dirs to stay
+    # bounded; raises on failure so the caller can fall back to no-repo.
+    shutil.copytree(
+        src, dst, symlinks=True, ignore_dangling_symlinks=True,
+        ignore=shutil.ignore_patterns(*_COPY_SKIP),
+    )
+
+
+def _panelist_cwd(adapter: "Adapter", repo: "str | None", pdir: str) -> "tuple[str, str | None]":
+    # Decide the child's working directory. Returns (cwd, note).
+    if repo is None:
+        c = os.path.join(pdir, "cwd")          # zero access: empty throwaway dir
+        os.makedirs(c, exist_ok=True)
+        _chmod(c, 0o700)
+        return c, None
+    if adapter.read_only:
+        return repo, None                      # direct, live; CLI flag blocks writes
+    # Write-capable adapter: NEVER the real tree -- give it a disposable copy.
+    dst = os.path.join(pdir, "cwd_repo")
+    try:
+        _copy_repo(repo, dst)
+        return dst, None
+    except Exception as exc:
+        c = os.path.join(pdir, "cwd")
+        os.makedirs(c, exist_ok=True)
+        _chmod(c, 0o700)
+        return c, f"repo copy failed ({exc!r}); ran without repo access"
+
+
+def _repo_fingerprint(repo: str) -> "str | None":
+    # A cheap tripwire over the real working tree so a "read-only" run that
+    # somehow WRITES is caught. None when not a git repo (tripwire simply off).
+    cp = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    if cp is None or cp.returncode != 0:
+        return None
+    head = _git(repo, "rev-parse", "HEAD")
+    return ((head.stdout if head else "") or "") + "\0" + (cp.stdout or "")
+
+
 # --------------------------------------------------------------------------- #
 # process-group aware execution with a portable timeout
 # --------------------------------------------------------------------------- #
@@ -715,12 +787,15 @@ _AUTH_FAIL_RE = re.compile(
 
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
-                 timeout_s: int, max_chars: int, mode: str) -> dict:
+                 timeout_s: int, max_chars: int, mode: str,
+                 repo: "str | None" = None) -> dict:
     os.makedirs(pdir, exist_ok=True)
-    cwd = os.path.join(pdir, "cwd")           # throwaway dir; never the user repo
-    os.makedirs(cwd, exist_ok=True)
     _chmod(pdir, 0o700)
-    _chmod(cwd, 0o700)
+    # cwd: empty throwaway (no repo) / the real repo (read-only adapter, live) /
+    # a disposable copy (write-capable adapter). See _panelist_cwd.
+    cwd, cwd_note = _panelist_cwd(adapter, repo, pdir)
+    repo_access = ("none" if repo is None
+                   else "real" if adapter.read_only else "copy")
     out_path = os.path.join(pdir, "stdout.txt")
     err_path = os.path.join(pdir, "stderr.txt")
     last_path = os.path.join(pdir, "last_message.txt")
@@ -746,6 +821,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "cli_version": adapter.cli_version(),
         "adapter_version": ALLOY_VERSION,
         "read_only": adapter.read_only,
+        "cwd": cwd,
+        "repo_access": repo_access,   # none | real (live repo) | copy (disposable)
         "status": "error",
         "exit_code": None,
         "timed_out": False,
@@ -761,8 +838,10 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "secrets_redacted": 0,
         "error": None,
     }
+    if cwd_note:
+        status["cwd_note"] = cwd_note
 
-    log(f"{adapter.name}: dispatching (read-only, timeout {timeout_s}s)")
+    log(f"{adapter.name}: dispatching ({repo_access} repo, timeout {timeout_s}s)")
     start = time.monotonic()
     proc = None
     try:
@@ -915,19 +994,26 @@ def _print_matrix(manifest: dict) -> None:
     rows = manifest.get("panelists", [])
     if not rows:
         return
+    summary = manifest.get("summary", {})
     with _STDERR_LOCK:
         w = sys.stderr.write
         w("[alloy] panel matrix:\n")
-        w("[alloy]   %-14s %-8s %8s %8s %8s\n"
-          % ("panelist", "status", "time", "chars", "redacted"))
+        if summary.get("repo"):
+            w(f"[alloy]   repo (read-only): {summary['repo']}\n")
+        w("[alloy]   %-14s %-8s %-6s %8s %8s %8s\n"
+          % ("panelist", "status", "repo", "time", "chars", "redacted"))
         for p in rows:
-            w("[alloy]   %-14s %-8s %7.1fs %8d %8d\n" % (
+            w("[alloy]   %-14s %-8s %-6s %7.1fs %8d %8d\n" % (
                 str(p.get("name", "?"))[:14],
                 str(p.get("status", "?"))[:8],
+                str(p.get("repo_access", "?"))[:6],
                 (p.get("duration_ms") or 0) / 1000.0,
                 p.get("result_chars") or 0,
                 p.get("secrets_redacted") or 0,
             ))
+        if summary.get("repo_tamper"):
+            w("[alloy]   !! WARNING: working tree changed during the run -- "
+              "review `git status` (a read-only panelist may have written)\n")
         sys.stderr.flush()
 
 
@@ -998,6 +1084,23 @@ def cmd_panel(args: argparse.Namespace) -> int:
     names = list(dict.fromkeys(names))   # dedupe, preserve order (avoid same-dir races)
 
     cwd_now = os.path.abspath(os.getcwd())
+
+    # Repo access (ON by default): read-only panelists read the real working tree
+    # so they can actually ground coding answers in your code; their CLI
+    # read-only flag is what prevents writes (best-effort, not a hard sandbox).
+    # `--no-repo` / ALLOY_REPO=none restores zero access.
+    repo = resolve_repo(args, cwd_now)
+    if repo is not None:
+        prompt = (
+            "[alloy] Your current working directory is the user's repository, "
+            "available to you READ-ONLY. Read any files you need (source, tests, "
+            "config) to ground your answer in the real code; cite concrete paths. "
+            "Do NOT modify, create, or delete files, or run commands with side "
+            "effects -- this is a review/consult panel, not an edit session.\n\n"
+        ) + prompt
+        log(f"repo access: {repo} (read-only panelists read it live)")
+    repo_fp_before = _repo_fingerprint(repo) if repo is not None else None
+
     chosen: "list[Adapter]" = []
     skipped: "list[dict]" = []
     for n in names:
@@ -1056,6 +1159,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
         manifest["summary"] = {
             "available": [], "ok": 0, "failed": 0,
             "skipped": skipped,
+            "repo": repo,
+            "repo_tamper": False,
             "note": "No read-only panelists available -- the host should fall "
                     "back to a single-model (Claude-only) answer.",
         }
@@ -1074,7 +1179,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         pdir = os.path.join(run_dir, ad.name)
         try:
             st = run_panelist(ad, prompt_path, pdir, timeout_s,
-                              max_chars, args.mode)
+                              max_chars, args.mode, repo=repo)
             # Self-heal a transient first-attempt failure (default: an `auth`
             # token-refresh race) with exactly ONE re-dispatch -- not a loop. The
             # refresh has almost always landed by now, so the retry runs on a
@@ -1084,7 +1189,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
             if st.get("status") in retry_set:
                 log(f"{ad.name}: {st['status']} (likely transient) -- retrying once")
                 st2 = run_panelist(ad, prompt_path, os.path.join(pdir, "_retry"),
-                                   timeout_s, max_chars, args.mode)
+                                   timeout_s, max_chars, args.mode, repo=repo)
                 st2["retried"] = True
                 st2["first_attempt_status"] = st.get("status")
                 st = st2
@@ -1100,6 +1205,17 @@ def cmd_panel(args: argparse.Namespace) -> int:
     for t in threads:
         t.join()
 
+    # Tripwire: a read-only panelist ran in the real working tree. If its
+    # fingerprint moved, a "read-only" CLI may have written to your repo (or you
+    # edited files mid-run). Surface it loudly rather than trusting the sandbox.
+    repo_tamper = False
+    if repo is not None and repo_fp_before is not None:
+        if _repo_fingerprint(repo) != repo_fp_before:
+            repo_tamper = True
+            log(f"WARNING: working tree at {repo} changed during the run -- a "
+                "read-only panelist may have written to it (or you edited files). "
+                "Review `git status`/`git diff` before trusting the tree.")
+
     manifest["panelists"] = [results[a.name] for a in chosen if a.name in results]
     ok = sum(1 for p in manifest["panelists"] if p.get("status") == "ok")
     manifest["summary"] = {
@@ -1107,6 +1223,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
         "ok": ok,
         "failed": len(manifest["panelists"]) - ok,
         "skipped": skipped,
+        "repo": repo,
+        "repo_tamper": repo_tamper,
     }
     manifest_path = os.path.join(run_dir, "manifest.json")
     write_atomic(manifest_path, json.dumps(manifest, indent=2))
@@ -1287,6 +1405,11 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--run-dir", help="root dir for run output")
     pa.add_argument("--timeout", type=int, help="per-panelist timeout (seconds)")
     pa.add_argument("--max-chars", type=int, help="cap per-panelist output chars")
+    pa.add_argument("--repo", help="repository the panel may READ (default: the git "
+                    "root of the current dir; also ALLOY_REPO). Read-only adapters "
+                    "run in it directly; write-capable ones get a disposable copy")
+    pa.add_argument("--no-repo", action="store_true",
+                    help="give panelists NO repo access (empty throwaway cwd)")
     pa.set_defaults(func=cmd_panel)
 
     do = sub.add_parser("doctor", help="show which panelists are installed/authed")

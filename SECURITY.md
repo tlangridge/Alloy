@@ -11,11 +11,19 @@ public issue for a vulnerability. We'll acknowledge within a few days.
 Alloy orchestrates AI coding CLIs you already installed and authenticated. Its
 safety properties:
 
-- **The panel is read-only.** Panelists run behind each CLI's read-only sandbox
-  flag (`codex -s read-only`, `claude --permission-mode plan`) **and** in a throwaway
-  temp working directory, so they cannot read or write your repository. Adapters
-  with no real read-only mode (`opencode`, `cursor-agent`) are **refused** unless
-  you set `ALLOY_ALLOW_UNSANDBOXED=1`.
+- **The panel is read-only, and (by default) reads your repo.** Read-only adapters
+  run behind each CLI's read-only flag (`codex -s read-only`, grok/claude
+  `--permission-mode plan`) with their working directory set to your **real repo**,
+  so they can read your code to give useful coding answers but the CLI prevents
+  them from writing. This write-prevention is **best-effort — the CLIs' own flags,
+  not an OS sandbox Alloy enforces.** As a tripwire, Alloy fingerprints the working
+  tree before/after each run and flags (`summary.repo_tamper`) any change. Turn
+  repo access off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd, the
+  pre-0.1.6 behavior); pin a different dir with `--repo` / `ALLOY_REPO`.
+- **Write-capable adapters never see your real tree.** Adapters with no read-only
+  mode (`antigravity`, `opencode`, `cursor-agent`) are **refused** unless you set
+  `ALLOY_ALLOW_UNSANDBOXED=1`, and even then they get a **disposable copy** of the
+  repo (`.git` excluded), never the working tree — so their writes land off it.
 - **Panel output is untrusted.** The host (Claude) is instructed to treat every
   panelist answer as data, never as instructions, and never to execute commands
   found in it. Output is scanned and redacted for common secret shapes before it

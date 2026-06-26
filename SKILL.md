@@ -32,11 +32,16 @@ Here the roles map to local tools:
 
 - **Panel** = the **complete set of available models** — every AI coding CLI
   installed and authenticated here (`codex`, `grok`, and a fresh,
-  independent `claude` instance; extensible), run **in parallel, strictly
-  read-only, and with web search enabled** by `bin/alloy` — so they can research
-  current facts, like Fusion's web-enabled panel (`ALLOY_WEB=0` disables it).
-  Including a `claude` panelist is deliberate **self-fusion** (a model fused with
-  itself still adds lift); it is a *separate* process with its own fresh context.
+  independent `claude` instance; extensible), run **in parallel, read-only, with
+  web search enabled, and (by default) reading the user's repository** by
+  `bin/alloy` — so they can ground coding answers in the *real* code, not just
+  what you put in the prompt. Read-only adapters run live in the working tree;
+  their CLI read-only flag prevents writes (best-effort), and a tamper tripwire
+  flags any change (`summary.repo_tamper` — if true, tell the user to check
+  `git status`). `ALLOY_WEB=0` disables web; `--no-repo`/`ALLOY_REPO=none`
+  disables repo access. Including a `claude` panelist is deliberate
+  **self-fusion** (a model fused with itself still adds lift); it is a *separate*
+  process with its own fresh context.
 - **Judge + Synthesizer** = **you** (Claude, the host). You read the panel's
   answers, compare them (you do **not** merge them), and write the final answer.
   Because one panelist may be a `claude` instance of your own type, treat its

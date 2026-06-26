@@ -228,12 +228,16 @@ panel for the *thinking* and leaves the *writing* to Claude.
 
 ## Safety model
 
-- **Read-only panel.** Panelists run behind their CLI's read-only sandbox flag
-  (`codex -s read-only`, `grok --permission-mode plan`, `claude --permission-mode
-  plan`) **and** in a throwaway temporary working directory, so they get no access
-  to your repo. Adapters
-  without a real read-only mode (e.g. `cursor-agent`) are refused unless you
-  explicitly opt in with `ALLOY_ALLOW_UNSANDBOXED=1`.
+- **Read-only panel that can read your repo.** By default the panel runs in your
+  **real working tree** (auto-detected git root) so panelists can ground coding
+  answers in your actual code — including uncommitted edits. Writes are prevented
+  by each CLI's read-only flag (`codex -s read-only`, `grok`/`claude
+  --permission-mode plan`) — **best-effort, the CLIs' own enforcement, not an OS
+  sandbox**; a tamper tripwire fingerprints the tree before/after and shouts if it
+  changed. Turn it off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd),
+  or point elsewhere with `--repo`. Adapters with no read-only mode (`antigravity`,
+  `cursor-agent`, `opencode`) are refused unless you set `ALLOY_ALLOW_UNSANDBOXED=1`
+  — and even then they get a **disposable copy** of the repo, never your real tree.
 - **Web research, on by default.** Panelists can search the web (codex's hosted
   `web_search`; grok and claude search the web in plan mode), matching Fusion's web-enabled
   panel — so they reason over current facts, not just training data. Search is
@@ -282,6 +286,7 @@ variables (env wins over the file):
 | Key | Default | Meaning |
 |---|---|---|
 | `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude). Set it to pin a narrower / cheaper panel. |
+| `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |

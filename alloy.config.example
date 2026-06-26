@@ -39,6 +39,12 @@ ALLOY_MAX_PROMPT_BYTES=4000000
 # claude search the web in plan mode). On by default; set to 0 to disable (codex).
 ALLOY_WEB=1
 
+# Repo access (ON by default): read-only panelists run in your real working tree
+# (auto-detected git root) so they can read your code; their CLI read-only flag
+# prevents writes (best-effort). Set `none` for no access (empty throwaway cwd),
+# or an absolute path to pin a specific repo. Per-run: --repo PATH / --no-repo.
+# ALLOY_REPO=none
+
 # Self-healing retry: re-dispatch a panelist exactly ONCE (never a loop) when its
 # first attempt failed with one of these statuses. Default `auth` catches the
 # transient token-refresh race (an OAuth CLI whose token expires at dispatch

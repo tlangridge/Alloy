@@ -3,6 +3,36 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.6] - 2026-06-26
+
+### Changed
+- **The panel now READS your repository by default.** This is a deliberate change
+  to the safety posture: a read-only panel that can't see your code gives weak
+  coding answers. Read-only adapters (codex, grok, claude) now run with their cwd
+  set to your **real working tree** (live, including uncommitted edits), so they
+  can ground answers in the actual code. Their CLI read-only flag
+  (`codex -s read-only`, grok/claude `--permission-mode plan`) is what prevents
+  writes — **best-effort, not a hard sandbox**. Repo auto-detects the git root of
+  the invoking directory.
+
+### Added
+- **`--repo PATH` / `ALLOY_REPO`** to pin the readable directory; **`--no-repo` /
+  `ALLOY_REPO=none`** restores the old zero-access throwaway cwd (use it for pure
+  web research or maximum caution).
+- **Write-capable adapters never touch your tree.** The opt-in non-read-only
+  adapters (antigravity, cursor-agent, opencode) get a **disposable copy** of the
+  repo (`.git` and heavy/regenerable dirs excluded) instead of the real one, so
+  their writes land off your working tree.
+- **Tamper tripwire.** alloy fingerprints the working tree (`git status` + HEAD)
+  before and after the run; if a "read-only" panelist somehow modified it, the
+  manifest (`summary.repo_tamper`) and the matrix scream about it. Per-panelist
+  `repo_access` (`real`/`copy`/`none`) and `cwd` are recorded in the manifest.
+
+### Tests
+- +4 cases: real-repo access for read-only adapters, `--no-repo` isolation,
+  disposable copy (with `.git` excluded) for write-capable adapters, git-root
+  auto-detection. 52 pass.
+
 ## [0.1.5] - 2026-06-25
 
 ### Fixed
