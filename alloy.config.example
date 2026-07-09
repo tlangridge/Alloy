@@ -59,7 +59,7 @@ ALLOY_WEB=1
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
 # ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro   # antigravity is opt-in (runs only with ALLOY_ALLOW_UNSANDBOXED=1)
-# ALLOY_GROK_MODEL=grok-build          # or grok-composer-2.5-fast (grok's default)
+# ALLOY_GROK_MODEL=grok-composer-2.5-fast  # unset -> grok's default, now grok-4.5 (opus-class)
 # ALLOY_CLAUDE_MODEL=opus              # the `claude` panelist's model (alias or full id)
 
 # Codex reasoning effort for panel runs. Default "high" keeps runs inside the

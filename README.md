@@ -296,7 +296,7 @@ variables (env wins over the file):
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` / `ALLOY_ANTIGRAVITY_MODEL` | CLI default | model override per adapter (e.g. `ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro`; antigravity is opt-in — only runs with `ALLOY_ALLOW_UNSANDBOXED=1`) |
-| `ALLOY_GROK_MODEL` | grok default | Grok model: `grok-build` or `grok-composer-2.5-fast` |
+| `ALLOY_GROK_MODEL` | grok default (`grok-4.5`) | Grok model override, e.g. `grok-composer-2.5-fast` (unset uses the CLI default, now the opus-class `grok-4.5`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
 | `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |

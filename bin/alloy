@@ -51,7 +51,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.6"
+ALLOY_VERSION = "0.1.7"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -384,18 +384,19 @@ class CodexAdapter(Adapter):
 
 
 class AntigravityAdapter(Adapter):
-    # Google's Antigravity CLI (the `agy` binary). IMPORTANT: agy has NO headless
-    # read-only mode. Its only non-interactive entry point is `agy -p` (print
-    # mode), which AUTO-EXECUTES every tool -- file writes AND arbitrary shell --
-    # regardless of `--sandbox`, `toolPermission: strict`, or `permissions.deny`
-    # (all three were verified ignored in print mode against agy 1.0.10: the deny
-    # list loads but run_command still executes). So this is a read_only = False
-    # adapter, in the same bucket as cursor-agent: registered for visibility,
-    # experimental, and REFUSED by default. The engine dispatches to it only when
-    # the user sets ALLOY_ALLOW_UNSANDBOXED=1, and even then it is contained only
-    # by alloy's throwaway cwd -- which does NOT stop agy's run_command from
-    # touching the network or paths outside that cwd. Prefer a real read-only
-    # panelist (codex / grok / claude). See docs/adding-a-panelist.md.
+    # Google's Antigravity CLI (the `agy` binary). It DOES run headless -- `agy -p`
+    # (print mode) answers a single prompt non-interactively -- but it has NO
+    # ENFORCEABLE read-only mode. Print mode AUTO-EXECUTES every tool (file writes
+    # AND arbitrary shell) regardless of `--sandbox`, `--mode plan`, `toolPermission:
+    # strict`, or `permissions.deny`. Verified against agy 1.0.16: `agy -p --mode
+    # plan` asked to write a file still called write_to_file and created it on disk
+    # -- worse, in agy's own project scratch dir (~/.gemini/antigravity-cli/scratch),
+    # ignoring the process cwd entirely. So this stays a read_only = False adapter,
+    # in the same bucket as cursor-agent: registered for visibility, experimental,
+    # and REFUSED by default. The engine dispatches to it only when the user sets
+    # ALLOY_ALLOW_UNSANDBOXED=1, and even then alloy's throwaway/copy cwd does NOT
+    # contain agy (it writes outside cwd and can touch the network). Prefer a real
+    # read-only panelist (codex / grok / claude). See docs/adding-a-panelist.md.
     name = "antigravity"
     bin = "agy"
     read_only = False
@@ -419,13 +420,19 @@ class AntigravityAdapter(Adapter):
         return setting("ALLOY_ANTIGRAVITY_MODEL")
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
-        # `-p` is agy's only headless mode; the real prompt is fed on stdin. This
-        # mode is NOT read-only -- but never add --dangerously-skip-permissions
-        # (it only makes a non-sandboxed tool even more permissive). The engine
-        # reaches this code path only when ALLOY_ALLOW_UNSANDBOXED=1.
+        # `-p` is agy's headless print mode; the real prompt is fed on stdin.
+        # `--mode plan` is a best-effort read-only INTENT hint -- it steers the
+        # model toward analysis over edits (which is what a consult panel wants),
+        # but it is NOT enforced (see the class comment: print mode still executed
+        # write_to_file in testing), which is why read_only stays False. Never add
+        # --dangerously-skip-permissions (it only makes a non-sandboxed tool even
+        # more permissive). The engine reaches this code path only when
+        # ALLOY_ALLOW_UNSANDBOXED=1.
         args = [
             "-p",
             "Follow the instructions provided on standard input and answer them.",
+            "--mode",
+            "plan",
         ]
         m = self.model()
         if m:
@@ -525,8 +532,11 @@ class GrokAdapter(Adapter):
     # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` (like claude's
     # plan mode); headless single-turn reads the prompt from a real file via
     # `--prompt-file` (it does NOT accept '-'/stdin) and prints the answer to
-    # stdout (`--output-format plain`). Verified live. Models: grok-build,
-    # grok-composer-2.5-fast (default).
+    # stdout (`--output-format plain`). Verified live. The CLI default model is
+    # now `grok-4.5` (xAI's opus-class flagship), so leaving model() unset already
+    # dispatches the latest model; `grok-composer-2.5-fast` remains available as a
+    # cheaper/faster option via ALLOY_GROK_MODEL. Run `grok models` to list what
+    # your account can reach.
     name = "grok"
     bin = "grok"
     read_only = True
@@ -539,7 +549,7 @@ class GrokAdapter(Adapter):
         return os.path.isfile(os.path.join(os.path.expanduser("~"), ".grok", "auth.json"))
 
     def model(self) -> "str | None":
-        return setting("ALLOY_GROK_MODEL")  # e.g. grok-build / grok-composer-2.5-fast
+        return setting("ALLOY_GROK_MODEL")  # unset -> CLI default (grok-4.5); e.g. grok-composer-2.5-fast
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
         # plan = read-only (no edits/bash); prompt from a real file; plain stdout.

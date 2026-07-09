@@ -336,8 +336,9 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("read-only", skipped["antigravity"])
 
     def test_antigravity_runs_unsandboxed_print_mode(self):
-        # Opt in: it dispatches headless via `-p`, prompt on stdin, and MUST NOT
-        # carry the auto-approve bypass flag (the adapter never adds it).
+        # Opt in: it dispatches headless via `-p`, prompt on stdin, carries the
+        # best-effort `--mode plan` read-only intent hint, and MUST NOT carry the
+        # auto-approve bypass flag (the adapter never adds it).
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
                          env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
                                     "ANTIGRAVITY_API_KEY": "x",
@@ -347,6 +348,7 @@ class AlloyTests(unittest.TestCase):
         cmdlist = p["command"]
         self.assertIn("-p", cmdlist)
         cmd = " ".join(cmdlist)
+        self.assertIn("--mode plan", cmd)              # read-only intent (best-effort)
         self.assertNotIn("--dangerously-skip-permissions", cmd)
 
     def test_antigravity_model_override(self):

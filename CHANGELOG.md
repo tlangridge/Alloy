@@ -3,6 +3,33 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.7] - 2026-07-09
+
+### Changed
+- **Grok now dispatches `grok-4.5` by default.** xAI shipped `grok-4.5`, their
+  opus-class flagship, and the Grok CLI made it the default model. Alloy uses each
+  CLI's own default, so a panel already picks up `grok-4.5` with no config — this
+  release just corrects the stale docs/comments that still named the old default
+  (`grok-composer-2.5-fast`) and a `grok-build` model that no longer exists.
+  `grok-composer-2.5-fast` remains available as a cheaper option via
+  `ALLOY_GROK_MODEL`; run `grok models` to see what your account can reach.
+- **Antigravity (`agy`) print mode carries a best-effort `--mode plan` hint.**
+  agy 1.0.16 adds a headless `--mode plan`; alloy now passes it to steer the model
+  toward analysis over edits (what a consult panel wants).
+
+### Security
+- **Antigravity stays `read_only = False`, experimental, and refused by default.**
+  Re-verified against agy 1.0.16: `agy -p --mode plan` is **not** an enforced
+  read-only mode — asked to write a file it still called `write_to_file` and
+  created it on disk, in agy's own scratch dir (`~/.gemini/antigravity-cli/scratch`),
+  ignoring the process cwd. So `--mode plan` is an intent hint only; the adapter
+  still runs only under `ALLOY_ALLOW_UNSANDBOXED=1`. Prefer a real read-only
+  panelist (codex / grok / claude).
+
+### Tests
+- `test_antigravity_runs_unsandboxed_print_mode` now asserts the `--mode plan`
+  hint is present (and the bypass flag still absent).
+
 ## [0.1.6] - 2026-06-26
 
 ### Changed
