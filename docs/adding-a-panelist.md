@@ -16,18 +16,31 @@ class in `bin/alloy`:
    heuristic — an env var or a credentials file — so `doctor` does not spend
    money. Return `ready` / `installed_not_authed` / `not_installed`.
 3. **invoke-read-only** — *how do I run it read-only?*
-   (`build_args(prompt_path, last_message_path, mode)`): return the argv **after**
-   the binary, including the CLI's read-only flag. The engine feeds the prompt on
-   **stdin**, so most adapters need nothing for input. If your CLI reads its prompt
-   from a **file** instead (e.g. Grok's `--prompt-file`), pass the `prompt_path`
-   argument. Either way, never put the prompt text in argv.
+   (`build_args(prompt_path, last_message_path, mode, ctx)`): return the argv
+   **after** the binary, including the CLI's read-only flag. The engine feeds the
+   prompt on **stdin**, so most adapters need nothing for input. If your CLI reads
+   its prompt from a **file** instead (e.g. Grok's `--prompt-file`), pass the
+   `prompt_path` argument. Either way, never put the prompt text in argv.
+   `ctx` carries the run's `{repo, pdir, cwd, timeout_s}` for CLIs that need to be
+   *told* which directory they may read (agy's `--add-dir`), that want a scratch
+   file of their own (write it under `pdir`), or that have an internal deadline
+   worth aligning with alloy's.
 4. **parse** — *where is the clean answer?* (`parse(stdout, stderr, last_message)`):
    return the answer text. Never return stderr as the answer (CLIs put banners,
    telemetry, and warnings there). Strip ANSI if needed (`strip_ansi` helper).
 5. **capabilities** — *what can it do?* (`read_only`, `experimental`,
    `model()`): set the class attributes. If the CLI has **no real read-only
    mode**, set `read_only = False`; the engine will refuse to dispatch to it
-   unless the user sets `ALLOY_ALLOW_UNSANDBOXED=1`.
+   unless the user sets `ALLOY_ALLOW_UNSANDBOXED=1`. If read-only-ness depends on
+   the *installed version*, make `read_only` a property that checks
+   `cli_version()` — see `AntigravityAdapter`, which is read-only only on
+   agy >= 1.1.0.
+
+There is also an optional sixth hook: **`prepare_env(ctx)`**, returning env
+overrides for the child process. Use it when a CLI's only real safety control is
+its own config file — point `HOME` at an alloy-owned directory holding settings
+you generated, rather than mutating the user's dotfiles. `AntigravityAdapter` is
+the worked example.
 
 ## Template
 
@@ -49,7 +62,7 @@ class MyToolAdapter(Adapter):
     def model(self):
         return setting("ALLOY_MYTOOL_MODEL")   # optional per-adapter override
 
-    def build_args(self, prompt_path, last_message_path, mode):
+    def build_args(self, prompt_path, last_message_path, mode, ctx=None):
         # The engine feeds the prompt on STDIN, so most adapters return only flags
         # plus the read-only flag. (If your CLI needs a prompt file instead, pass
         # prompt_path, e.g. ["--prompt-file", prompt_path].) Never include
@@ -103,7 +116,7 @@ class CursorAgentAdapter(Adapter):
     def is_authed(self) -> bool:
         return bool(os.environ.get("CURSOR_API_KEY"))  # + creds-file check
 
-    def build_args(self, prompt_path, last_message_path, mode):
+    def build_args(self, prompt_path, last_message_path, mode, ctx=None):
         # NB: even in --print mode this can write files and run bash. Because it
         # is write-capable, alloy never gives it the real repo -- it runs in a
         # disposable repo *copy* (and only when ALLOY_ALLOW_UNSANDBOXED=1), so its

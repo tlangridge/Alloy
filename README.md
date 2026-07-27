@@ -164,7 +164,8 @@ authenticated, and exactly how to add the missing ones:
 ```
   [ready]  codex   codex-cli 0.139.0
   [auth?]  grok               installed but not authenticated -> run `grok login` to log in
-  [ --- ]  antigravity  (experimental, no read-only mode)
+  [ready]  antigravity  1.1.7
+  [no-ro]  opencode  (experimental, no read-only mode)  1.18.3
 ```
 
 Now, inside Claude Code:
@@ -238,9 +239,17 @@ panel for the *thinking* and leaves the *writing* to Claude.
   --permission-mode plan`) — **best-effort, the CLIs' own enforcement, not an OS
   sandbox**; a tamper tripwire fingerprints the tree before/after and shouts if it
   changed. Turn it off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd),
-  or point elsewhere with `--repo`. Adapters with no read-only mode (`antigravity`,
-  `cursor-agent`, `opencode`) are refused unless you set `ALLOY_ALLOW_UNSANDBOXED=1`
-  — and even then they get a **disposable copy** of the repo, never your real tree.
+  or point elsewhere with `--repo`. Adapters with no read-only mode (`cursor-agent`,
+  `opencode`) are refused unless you set `ALLOY_ALLOW_UNSANDBOXED=1` — and even
+  then they get a **disposable copy** of the repo, never your real tree.
+- **Antigravity (`agy`) is read-only by allow-list.** agy ignores the process cwd
+  and has no read-only flag, so it is contained differently: alloy generates a
+  settings file that allow-lists **read tools only** (agy >= 1.1 auto-denies
+  anything unlisted in headless mode — verified: `write_file` and `command` both
+  fail closed), points agy at an **alloy-owned HOME** so those settings are ours
+  and its scratch/conversation state stays out of `~/.gemini`, and grants your
+  repo explicitly with `--add-dir`. On agy < 1.1 the old behavior stands and it is
+  refused unless `ALLOY_ALLOW_UNSANDBOXED=1`.
 - **Web research, on by default.** Panelists can search the web (codex's hosted
   `web_search`; grok and claude search the web in plan mode), matching Fusion's web-enabled
   panel — so they reason over current facts, not just training data. Search is
@@ -288,14 +297,17 @@ variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude). Set it to pin a narrower / cheaper panel. |
+| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, and antigravity on agy >= 1.1). Set it to pin a narrower / cheaper panel. |
 | `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
-| `ALLOY_CODEX_MODEL` / `ALLOY_ANTIGRAVITY_MODEL` | CLI default | model override per adapter (e.g. `ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro`; antigravity is opt-in — only runs with `ALLOY_ALLOW_UNSANDBOXED=1`) |
+| `ALLOY_CODEX_MODEL` | CLI default | codex model override |
+| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.1-pro-high` | agy model — the strongest one it exposes. `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for a cheap, fast seat) |
+| `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
+| `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
 | `ALLOY_GROK_MODEL` | grok default (`grok-4.5`) | Grok model override, e.g. `grok-composer-2.5-fast` (unset uses the CLI default, now the opus-class `grok-4.5`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |

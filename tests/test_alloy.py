@@ -144,11 +144,11 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(by_name(m, "codex")["status"], "not_installed")
 
     def test_no_panelists_fallback(self):
-        # antigravity has no read-only mode -> refused/skipped by default (even
-        # when listed explicitly, unless ALLOY_ALLOW_UNSANDBOXED=1), so this
-        # exercises the 0-panelist Claude-only fallback without invoking any real
-        # CLI (and without spending tokens).
-        proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"])
+        # opencode has no read-only mode -> refused/skipped by default (even when
+        # listed explicitly, unless ALLOY_ALLOW_UNSANDBOXED=1), so this exercises
+        # the 0-panelist Claude-only fallback without invoking any real CLI (and
+        # without spending tokens).
+        proc, m = panel(self.tmp, extra_args=["--panelists", "opencode"])
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(m["panelists"], [])
         self.assertIn("note", m["summary"])
@@ -323,42 +323,111 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertIn("--model opus", cmd)
 
-    def test_antigravity_refused_without_unsandboxed(self):
-        # agy (`antigravity`) has no read-only mode -> read_only=False, so even
-        # when listed explicitly it is skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
+    # -- agy / antigravity: read-only is gated on the installed CLI version ---- #
+    def _agy_env(self, **extra):
+        # MOCK_VERSION >= 1.1.0 => the release whose headless mode auto-DENIES
+        # any tool outside permissions.allow, which is what makes agy read-only.
+        # XDG_STATE_HOME keeps the (shared, alloy-owned) agy HOME inside the test
+        # tmpdir instead of the developer's real ~/.local/state.
+        e = {"ALLOY_BIN_ANTIGRAVITY": MOCK, "ANTIGRAVITY_API_KEY": "x",
+             "MOCK_VERSION": "1.1.7", "XDG_STATE_HOME": os.path.join(self.tmp, "state")}
+        e.update(extra)
+        return e
+
+    def _agy_settings(self, home):
+        with open(os.path.join(home, ".gemini", "antigravity-cli", "settings.json")) as f:
+            return json.load(f)
+
+    def _shared_agy_home(self):
+        return os.path.join(self.tmp, "state", "alloy", "agy-home")
+
+    def test_antigravity_refused_on_old_cli(self):
+        # agy < 1.1.0 auto-EXECUTES tools in headless mode instead of denying
+        # them -> read_only=False, so it is skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
         proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
-                        env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
-                                   "ANTIGRAVITY_API_KEY": "x"})
+                        env_extra=self._agy_env(MOCK_VERSION="1.0.16"))
         self.assertEqual(proc.returncode, 3)  # 0 panelists -> Claude-only fallback
         self.assertIsNone(by_name(m, "antigravity"))  # never dispatched
         skipped = {s["name"]: s["reason"] for s in m["summary"]["skipped"]}
         self.assertIn("antigravity", skipped)
         self.assertIn("read-only", skipped["antigravity"])
 
-    def test_antigravity_runs_unsandboxed_print_mode(self):
-        # Opt in: it dispatches headless via `-p`, prompt on stdin, carries the
-        # best-effort `--mode plan` read-only intent hint, and MUST NOT carry the
-        # auto-approve bypass flag (the adapter never adds it).
+    def test_antigravity_runs_read_only_on_current_cli(self):
+        # On a current agy it joins the panel with no opt-in: headless `-p`, the
+        # `--mode plan` intent hint, and never the auto-approve bypass flag
+        # (which would disable the allow-list that makes it read-only at all).
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
-                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
-                                    "ANTIGRAVITY_API_KEY": "x",
-                                    "ALLOY_ALLOW_UNSANDBOXED": "1"})
+                         env_extra=self._agy_env())
         p = by_name(m, "antigravity")
         self.assertEqual(p["status"], "ok")
-        cmdlist = p["command"]
-        self.assertIn("-p", cmdlist)
-        cmd = " ".join(cmdlist)
-        self.assertIn("--mode plan", cmd)              # read-only intent (best-effort)
+        self.assertTrue(p["read_only"])
+        cmd = " ".join(p["command"])
+        self.assertIn("-p", p["command"])
+        self.assertIn("--mode plan", cmd)
         self.assertNotIn("--dangerously-skip-permissions", cmd)
+        # Default model: the strongest Gemini agy exposes.
+        self.assertIn("--model gemini-3.1-pro-high", cmd)
+        # The engine's deadline is handed to agy so its own 5m print timeout
+        # can't cut a longer run short.
+        self.assertIn("--print-timeout", cmd)
+
+    def test_antigravity_prompt_goes_in_a_file_not_argv(self):
+        # agy ignores stdin in print mode, so the prompt is STAGED AS A FILE and
+        # only a pointer reaches argv (no ARG_MAX, no prompt visible in `ps`).
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                         env_extra=self._agy_env())
+        p = by_name(m, "antigravity")
+        staged = os.path.join(os.path.dirname(p["stdout_path"]), "prompt_in", "prompt.md")
+        with open(staged) as f:
+            self.assertEqual(f.read(), "Say something useful.")
+        cmd = " ".join(p["command"])
+        self.assertNotIn("Say something useful.", cmd)   # never on argv
+        self.assertIn(staged, cmd)                       # pointed at, instead
+        # The grant covers the prompt's own directory, not the whole run dir
+        # (which holds the other panelists' captured answers).
+        self.assertIn("--add-dir " + os.path.dirname(staged), cmd)
+
+    def test_antigravity_isolated_home_with_readonly_allowlist(self):
+        # The CLI is confined to an alloy-owned HOME holding OUR settings.json, so
+        # the user's ~/.gemini is neither read for config nor written to.
+        dump = os.path.join(self.tmp, "child_home.txt")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                         env_extra=self._agy_env(MOCK_ENV_DUMP=dump))
+        with open(dump) as f:
+            self.assertEqual(f.read(), self._shared_agy_home())
+        s = self._agy_settings(self._shared_agy_home())
+        self.assertIn("read_file", s["permissions"]["allow"])
+        self.assertIn("write_file", s["permissions"]["deny"])
+        self.assertIn("command", s["permissions"]["deny"])
+        self.assertNotIn("write_file", s["permissions"]["allow"])
+        self.assertFalse(s["allowNonWorkspaceAccess"])
+        # toolPermission:"strict" would override the allow-list and deny the READ
+        # tools too, leaving a panelist that can never answer. Never set it.
+        self.assertNotIn("toolPermission", s)
+
+    def test_antigravity_home_can_be_per_run(self):
+        # Opt in to a throwaway HOME inside the run dir (max hygiene, at the cost
+        # of agy re-unpacking its ~13MB of binaries every run).
+        dump = os.path.join(self.tmp, "child_home.txt")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                         env_extra=self._agy_env(ALLOY_ANTIGRAVITY_HOME="run",
+                                                 MOCK_ENV_DUMP=dump))
+        pdir = os.path.dirname(by_name(m, "antigravity")["stdout_path"])
+        with open(dump) as f:
+            self.assertEqual(f.read(), os.path.join(pdir, "agy_home"))
+        self.assertFalse(os.path.exists(self._shared_agy_home()))
+
+    def test_antigravity_web_off_denies_web_tools(self):
+        _proc, _m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+                          env_extra=self._agy_env(ALLOY_WEB="0"))
+        deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
+        self.assertIn("search_web", deny)
 
     def test_antigravity_model_override(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
-                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
-                                    "ANTIGRAVITY_API_KEY": "x",
-                                    "ALLOY_ALLOW_UNSANDBOXED": "1",
-                                    "ALLOY_ANTIGRAVITY_MODEL": "gemini-3.1-pro"})
+                         env_extra=self._agy_env(ALLOY_ANTIGRAVITY_MODEL="gemini-3.6-flash-low"))
         cmd = " ".join(by_name(m, "antigravity")["command"])
-        self.assertIn("--model gemini-3.1-pro", cmd)
+        self.assertIn("--model gemini-3.6-flash-low", cmd)
 
     # -- empty/auth classification + single retry (token-refresh race) -------- #
     def _grok_env(self, **extra):
@@ -451,22 +520,33 @@ class AlloyTests(unittest.TestCase):
         self.assertIsNone(m["summary"]["repo"])
 
     def test_write_capable_adapter_gets_disposable_copy(self):
-        # antigravity CAN write -> it must NOT see the real tree; it gets a copy
+        # cursor-agent CAN write -> it must NOT see the real tree; it gets a copy
         # (with .git excluded) so any writes land off your repo.
         repo = self._repo_with_file(name="code.py", body="x = 1")
         os.makedirs(os.path.join(repo, ".git"))
         with open(os.path.join(repo, ".git", "HEAD"), "w") as f:
             f.write("ref: refs/heads/main")
         _proc, m = panel(self.tmp,
-                         extra_args=["--panelists", "antigravity", "--repo", repo],
-                         env_extra={"ALLOY_BIN_ANTIGRAVITY": MOCK,
-                                    "ANTIGRAVITY_API_KEY": "x",
+                         extra_args=["--panelists", "cursor-agent", "--repo", repo],
+                         env_extra={"ALLOY_BIN_CURSOR_AGENT": MOCK,
+                                    "CURSOR_API_KEY": "x",
                                     "ALLOY_ALLOW_UNSANDBOXED": "1"})
-        p = by_name(m, "antigravity")
+        p = by_name(m, "cursor-agent")
         self.assertEqual(p["repo_access"], "copy")
         self.assertTrue(p["cwd"].endswith("cwd_repo"))
         self.assertTrue(os.path.isfile(os.path.join(p["cwd"], "code.py")))  # copied
         self.assertFalse(os.path.exists(os.path.join(p["cwd"], ".git")))    # excluded
+
+    def test_antigravity_reads_the_real_repo_via_add_dir(self):
+        # agy ignores the process cwd, so repo access has to be granted
+        # explicitly: read-only adapter -> the REAL tree, handed over as --add-dir.
+        repo = self._repo_with_file(name="code.py", body="x = 1")
+        _proc, m = panel(self.tmp,
+                         extra_args=["--panelists", "antigravity", "--repo", repo],
+                         env_extra=self._agy_env())
+        p = by_name(m, "antigravity")
+        self.assertEqual(p["repo_access"], "real")
+        self.assertIn("--add-dir " + repo, " ".join(p["command"]))
 
     def test_repo_auto_detected_from_git_root(self):
         # Default (ALLOY_REPO unset): auto-detect the git root of the invoking cwd.

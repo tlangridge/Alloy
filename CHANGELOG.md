@@ -3,6 +3,55 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.8] - 2026-07-25
+
+### Added
+- **Antigravity (`agy`) is a first-class, read-only panelist on agy >= 1.1.0** —
+  Gemini 3.x joins the default panel with no opt-in. agy 1.1 changed its headless
+  permission model: print mode can no longer prompt, so any tool **outside**
+  `permissions.allow` is **auto-denied** instead of auto-executed. Verified live
+  against agy 1.1.7 — asked to write a file, the run fails closed with
+  `write_file` denied; asked to run a shell command, `command` denied; reads still
+  work. Alloy turns that into enforcement with three layers:
+  1. a generated `settings.json` allow-listing **read tools only**
+     (`read_file`, `grep_search`, `list_dir`, …) and explicitly denying the write
+     and shell tools;
+  2. an **alloy-owned HOME** (`$XDG_STATE_HOME/alloy/agy-home`) so those settings
+     are ours and never the user's, and agy's scratch dir, conversations and
+     caches stay out of `~/.gemini`. Auth is **symlinked**, never copied, so no
+     token is duplicated to disk. `ALLOY_ANTIGRAVITY_HOME=run` gives a throwaway
+     HOME per run instead (costs ~13MB and ~6s of re-unpacking each time);
+  3. repo access granted explicitly with `--add-dir <repo>` plus
+     `allowNonWorkspaceAccess: false`, because agy ignores the process cwd.
+  `--dangerously-skip-permissions` is never passed — it would disable layer 1.
+- **`ALLOY_ANTIGRAVITY_EFFORT`** (`low`/`medium`/`high`) and
+  **`ALLOY_ANTIGRAVITY_HOME`** (`run`, or a path).
+- **Adapters can supply child-process env overrides** (`Adapter.prepare_env`) and
+  receive run context in `build_args` (`repo`, `pdir`, `cwd`, `timeout_s`).
+
+### Changed
+- **Default agy model is `gemini-3.1-pro-high`** — the strongest model agy exposes,
+  and fast in practice (~6-14s per panel answer against ~30-120s for the others).
+  `agy models` lists the alternatives; `ALLOY_ANTIGRAVITY_MODEL=gemini-3.6-flash-low`
+  for a cheap/fast panel seat.
+- **agy's prompt is staged as a FILE**, not stdin: agy 1.1.7 ignores stdin in print
+  mode, so the prompt is copied to `<run>/antigravity/prompt_in/prompt.md`, that
+  directory alone is granted with `--add-dir`, and only a pointer to it reaches
+  argv. The "no prompt on argv" invariant (ARG_MAX, `ps` leakage, quoting) holds.
+- Alloy passes its own per-panelist deadline through as `--print-timeout`, so agy's
+  hidden 5-minute default can't cut a longer run short.
+
+### Security
+- **An OLD agy (< 1.1.0) is still refused.** On those releases print mode
+  auto-executes every tool; the adapter reports `read_only = False` +
+  `experimental` and the engine skips it unless `ALLOY_ALLOW_UNSANDBOXED=1`, exactly
+  as before. `read_only` is now derived from the **installed CLI version**, not
+  assumed.
+- Do **not** set `toolPermission: "strict"` in agy's settings: it overrides the
+  allow-list and denies the read tools too, producing a panelist that can never
+  answer. Documented in the adapter so it is not "fixed" later.
+- With `ALLOY_WEB=0`, agy's web tools are added to the deny list.
+
 ## [0.1.7] - 2026-07-09
 
 ### Changed

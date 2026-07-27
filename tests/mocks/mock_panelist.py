@@ -10,6 +10,9 @@ Role is inferred from argv: codex passes `exec` (+ `-o <file>`), the stdin/stdou
 adapters (claude) pass `-p`. Behavior is read from MOCK_BEHAVIOR_<ROLE> then
 MOCK_BEHAVIOR (default ok):
 
+Two env knobs sit outside the behavior switch: MOCK_VERSION overrides what
+`--version` prints, and MOCK_ENV_DUMP names a file to write the child's $HOME to.
+
   ok        read stdin, emit a canned answer
   empty     emit nothing
   fail      print to stderr and exit 3
@@ -47,8 +50,17 @@ def main():
     argv = sys.argv[1:]
 
     if "--version" in argv:
-        sys.stdout.write("mock-panelist 9.9.9\n")
+        # MOCK_VERSION lets a test impersonate a specific CLI release, for
+        # adapters that gate behaviour on the installed version (agy).
+        sys.stdout.write(os.environ.get("MOCK_VERSION", "mock-panelist 9.9.9") + "\n")
         return 0
+
+    # Opt-in env capture, so a test can assert what the dispatcher handed the
+    # child (e.g. the isolated HOME the agy adapter confines it to).
+    dump = os.environ.get("MOCK_ENV_DUMP")
+    if dump:
+        with open(dump, "w") as f:
+            f.write(os.environ.get("HOME", ""))
 
     role = role_from_argv(argv)
     behavior = os.environ.get(

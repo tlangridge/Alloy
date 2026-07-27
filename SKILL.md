@@ -2,7 +2,7 @@
 name: alloy
 description: >-
   Run a multi-model panel: dispatch one prompt to every AI coding CLI
-  installed locally (Codex, Grok, Claude) in parallel as a READ-ONLY panel, then judge
+  installed locally (Codex, Grok, Claude, Gemini/Antigravity) in parallel as a READ-ONLY panel, then judge
   and synthesize their answers (consensus, disagreements, unique insights, blind
   spots) into one answer that surfaces disagreement instead of hiding it. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
@@ -31,12 +31,15 @@ models in parallel, then have a **judge** compare their answers and a
 Here the roles map to local tools:
 
 - **Panel** = the **complete set of available models** — every AI coding CLI
-  installed and authenticated here (`codex`, `grok`, and a fresh,
-  independent `claude` instance; extensible), run **in parallel, read-only, with
-  web search enabled, and (by default) reading the user's repository** by
+  installed and authenticated here (`codex`, `grok`, `antigravity` (Gemini, on
+  agy >= 1.1), and a fresh, independent `claude` instance; extensible), run **in
+  parallel, read-only, with web search enabled, and (by default) reading the
+  user's repository** by
   `bin/alloy` — so they can ground coding answers in the *real* code, not just
   what you put in the prompt. Read-only adapters run live in the working tree;
-  their CLI read-only flag prevents writes (best-effort), and a tamper tripwire
+  their CLI read-only flag prevents writes (best-effort; `antigravity` instead
+  runs against an alloy-generated read-tool allow-list in an alloy-owned HOME,
+  and is granted the repo explicitly), and a tamper tripwire
   flags any change (`summary.repo_tamper` — if true, tell the user to check
   `git status`). `ALLOY_WEB=0` disables web; `--no-repo`/`ALLOY_REPO=none`
   disables repo access. Including a `claude` panelist is deliberate

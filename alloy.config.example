@@ -8,9 +8,10 @@
 # Which adapters form the panel (comma-separated, in order).
 # LEAVE UNSET to use the default: the COMPLETE SET of available models -- every
 # verified read-only CLI that is installed + authenticated (codex, grok,
-# and a fresh `claude` instance). Set this only to pin a narrower/cheaper panel.
-# `llm` is read-only but experimental (opt-in); opencode/cursor-agent/antigravity
-# have no real read-only mode (skipped unless ALLOY_ALLOW_UNSANDBOXED=1).
+# antigravity/Gemini on agy >= 1.1, and a fresh `claude` instance). Set this only
+# to pin a narrower/cheaper panel. `llm` is read-only but experimental (opt-in);
+# opencode/cursor-agent (and an agy older than 1.1) have no real read-only mode
+# and are skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
 # ALLOY_PANELISTS=codex,grok
 
 # Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
@@ -58,7 +59,9 @@ ALLOY_WEB=1
 
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-5.2-codex
-# ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro   # antigravity is opt-in (runs only with ALLOY_ALLOW_UNSANDBOXED=1)
+# ALLOY_ANTIGRAVITY_MODEL=gemini-3.6-flash-low  # unset -> gemini-3.1-pro-high; `agy models` lists the rest
+# ALLOY_ANTIGRAVITY_EFFORT=high        # agy reasoning effort (low|medium|high)
+# ALLOY_ANTIGRAVITY_HOME=run           # throwaway agy HOME per run instead of the shared alloy-owned one
 # ALLOY_GROK_MODEL=grok-composer-2.5-fast  # unset -> grok's default, now grok-4.5 (opus-class)
 # ALLOY_CLAUDE_MODEL=opus              # the `claude` panelist's model (alias or full id)
 
@@ -77,8 +80,9 @@ ALLOY_CODEX_EFFORT=high
 # OUTSIDE your repo so prompts/diffs and CLI output are never committed.
 # ALLOY_RUN_ROOT=~/.cache/alloy/runs
 
-# DANGER: allow adapters that have no real read-only mode (e.g. antigravity,
-# cursor-agent). Off by default. Such a panelist can write files and run shell;
+# DANGER: allow adapters that have no real read-only mode (e.g. cursor-agent,
+# opencode, or an agy older than 1.1). Off by default. Such a panelist can write
+# files and run shell;
 # alloy never gives it your real repo (it gets a disposable COPY instead), but
 # its writes/shell are otherwise uncontained. Only enable if you accept that.
 # ALLOY_ALLOW_UNSANDBOXED=0

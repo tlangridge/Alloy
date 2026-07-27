@@ -19,6 +19,8 @@ Design notes (why it is the way it is):
   * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
   * Prompts are passed on STDIN, never on argv -- avoids ARG_MAX limits,
     quoting/escaping breakage, leaking prompts into `ps`, and shell injection.
+    One CLI (`agy`) ignores stdin in headless mode; it gets the prompt as a
+    FILE it is pointed at, so the prompt still never lands on argv.
   * Each panelist runs in its own process group (start_new_session=True) so a
     hung CLI and all of its children can be killed as a group on timeout.
   * Panelist stdin is the prompt file (not a TTY); a CLI that wants to prompt
@@ -51,7 +53,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.7"
+ALLOY_VERSION = "0.1.8"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -255,9 +257,11 @@ def setting_int(key: str, default: int) -> int:
 # adapters: the 5-function contract
 #   detect()       -> is the binary on PATH?
 #   auth_state()   -> 'ready' | 'installed_not_authed' | 'not_installed'
-#   build_args()   -> argv AFTER the binary (prompt is always on stdin)
+#   build_args()   -> argv AFTER the binary (prompt is on stdin; `ctx` carries
+#                     the run's repo/pdir/timeout for CLIs that need them)
 #   parse()        -> clean answer text from (stdout, stderr, last_message)
 #   capabilities() -> {read_only, supports_json, default_model, ...}
+#   prepare_env()  -> optional env overrides for the child (e.g. an isolated HOME)
 # See docs/adding-a-panelist.md for the full contract and a template.
 # --------------------------------------------------------------------------- #
 class Adapter:
@@ -310,8 +314,15 @@ class Adapter:
         return None
 
     # -- invocation ---------------------------------------------------------- #
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         raise NotImplementedError
+
+    def prepare_env(self, ctx: "dict | None" = None) -> dict:
+        """Env overrides for the child process. Default: none. An adapter that
+        needs to confine a CLI's own state/config (agy) returns them here rather
+        than mutating the user's real dotfiles."""
+        return {}
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         raise NotImplementedError
@@ -342,7 +353,8 @@ class CodexAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CODEX_MODEL")
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         # Prompt is fed on stdin (NOT as an argv prompt): passing both a prompt
         # arg AND stdin makes codex append stdin as a <stdin> block, so we pass
         # neither a prompt arg nor '-'. `-o` captures only the final message.
@@ -383,26 +395,106 @@ class CodexAdapter(Adapter):
         return strip_ansi(stderr).strip()
 
 
+# agy's headless permission model CHANGED at 1.1.x, and the change is what makes
+# it usable as a panelist at all. Verified on 1.0.16: print mode AUTO-EXECUTED
+# every tool (file writes AND shell) regardless of --sandbox / --mode plan /
+# settings. Verified on 1.1.7: print mode instead AUTO-DENIES any tool that is not
+# in `permissions.allow` -- it cannot prompt, so unlisted tools fail closed. That
+# turns a settings.json allow-list into real enforcement, so alloy gates the whole
+# read-only posture on the CLI reporting at least this version.
+_AGY_MIN_ENFORCED = (1, 1, 0)
+_AGY_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+# The prompt is handed to agy as a FILE (it ignores stdin in print mode as of
+# 1.1.7), so this is the only text that ever reaches argv.
+_AGY_ARGV_PROMPT = (
+    "Read the file {path} in full -- it contains your complete instructions -- "
+    "then carry them out and write your answer to me directly. "
+    "This is a read-only consult: analyse and explain, never modify anything."
+)
+
+
 class AntigravityAdapter(Adapter):
-    # Google's Antigravity CLI (the `agy` binary). It DOES run headless -- `agy -p`
-    # (print mode) answers a single prompt non-interactively -- but it has NO
-    # ENFORCEABLE read-only mode. Print mode AUTO-EXECUTES every tool (file writes
-    # AND arbitrary shell) regardless of `--sandbox`, `--mode plan`, `toolPermission:
-    # strict`, or `permissions.deny`. Verified against agy 1.0.16: `agy -p --mode
-    # plan` asked to write a file still called write_to_file and created it on disk
-    # -- worse, in agy's own project scratch dir (~/.gemini/antigravity-cli/scratch),
-    # ignoring the process cwd entirely. So this stays a read_only = False adapter,
-    # in the same bucket as cursor-agent: registered for visibility, experimental,
-    # and REFUSED by default. The engine dispatches to it only when the user sets
-    # ALLOY_ALLOW_UNSANDBOXED=1, and even then alloy's throwaway/copy cwd does NOT
-    # contain agy (it writes outside cwd and can touch the network). Prefer a real
-    # read-only panelist (codex / grok / claude). See docs/adding-a-panelist.md.
+    # Google's Antigravity CLI (the `agy` binary), running Gemini 3.x.
+    #
+    # Read-only is ENFORCED BY THE CLI, not by asking the model nicely, via three
+    # layers -- all verified live against agy 1.1.7:
+    #   1. An allow-list in settings.json naming only read tools. In headless
+    #      print mode any tool outside it is auto-denied (agy exits 0 with an
+    #      empty stdout and a "tool required the X permission" line on stderr, so
+    #      the engine already classifies the run as `empty` with that reason).
+    #      Asking it to write a file yields the write_file denial; asking it to
+    #      run a shell command yields the command denial. NOTE: do NOT also set
+    #      toolPermission:"strict" -- it overrides the allow-list and denies the
+    #      READ tools too, producing a panelist that can never answer.
+    #   2. An isolated HOME per run (prepare_env), so that settings.json is OURS
+    #      and never the user's, and so agy's conversation state, scratch dir and
+    #      caches land in the disposable run dir instead of ~/.gemini. agy ignores
+    #      the process cwd entirely (it writes into its own scratch dir), which is
+    #      why confining HOME -- not cwd -- is what actually contains it.
+    #   3. Repo access via explicit `--add-dir <repo>` plus
+    #      allowNonWorkspaceAccess:false, so reads are scoped to the repo (and the
+    #      prompt file) rather than to all of $HOME.
+    # The auth files are symlinked (never copied) into the isolated HOME, so no
+    # token is duplicated onto disk. Never pass --dangerously-skip-permissions:
+    # it disables layer 1 outright.
+    #
+    # On an older agy (< 1.1.0) none of this holds, so the adapter reports
+    # read_only=False + experimental=True and the engine refuses it unless the
+    # user sets ALLOY_ALLOW_UNSANDBOXED=1 -- the pre-0.1.8 behaviour.
     name = "antigravity"
     bin = "agy"
-    read_only = False
-    experimental = True
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
+
+    # Gemini 3.1 Pro at high reasoning effort: the strongest model agy exposes and
+    # the reason it is worth a panel seat (`agy models` lists the rest, including
+    # gemini-3.6-flash-* for a cheap/fast panel). Override: ALLOY_ANTIGRAVITY_MODEL.
+    default_model = "gemini-3.1-pro-high"
+
+    # Read tools get an allow-rule; everything else fails closed. Bare tool names
+    # (no "(target)" suffix) mean "any target" -- with allowNonWorkspaceAccess
+    # false the reachable targets are the --add-dir workspace roots.
+    READ_TOOLS = (
+        "read_file", "view_file", "view_file_outline", "view_code_item",
+        "list_dir", "grep_search", "find_by_name", "codebase_search",
+    )
+    # Redundant with the default-deny above (belt and braces): if a future agy
+    # ever loosens the headless default, these stay explicitly denied.
+    WRITE_TOOLS = (
+        "command", "run_command", "write_file", "write_to_file", "edit_file",
+        "replace_file_content", "sed_file", "create_file", "delete_file",
+    )
+    # Only denied when the user turns web research off (ALLOY_WEB=0). Hosted
+    # search is read-only and on by default, matching the other panelists.
+    WEB_TOOLS = ("search_web", "read_url_content", "browser_navigate")
+
+    def _agy_version(self) -> "tuple[int, int, int] | None":
+        cached = getattr(self, "_ver_cache", "unset")
+        if cached != "unset":
+            return cached
+        m = _AGY_VERSION_RE.search(self.cli_version())
+        ver = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+        self._ver_cache = ver
+        return ver
+
+    def _enforced(self) -> bool:
+        """True when the installed agy is new enough to fail closed in headless
+        mode (see _AGY_MIN_ENFORCED). Everything read-only hangs off this."""
+        if not self.detect():
+            return False
+        ver = self._agy_version()
+        return bool(ver and ver >= _AGY_MIN_ENFORCED)
+
+    # read_only / experimental are properties, not class constants, because they
+    # depend on the INSTALLED CLI's version. The engine reads them off instances.
+    @property
+    def read_only(self) -> bool:      # type: ignore[override]
+        return self._enforced()
+
+    @property
+    def experimental(self) -> bool:   # type: ignore[override]
+        return not self._enforced()
 
     def is_authed(self) -> bool:
         if (setting("ANTIGRAVITY_API_KEY") or setting("GEMINI_API_KEY")
@@ -414,34 +506,115 @@ class AntigravityAdapter(Adapter):
         for name in ("oauth_creds.json", "google_accounts.json"):
             if os.path.isfile(os.path.join(gdir, name)):
                 return True
-        return False
+        return os.path.isfile(os.path.join(gdir, "antigravity-cli",
+                                           "antigravity-oauth-token"))
 
     def model(self) -> "str | None":
-        return setting("ALLOY_ANTIGRAVITY_MODEL")
+        return setting("ALLOY_ANTIGRAVITY_MODEL", self.default_model)
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
-        # `-p` is agy's headless print mode; the real prompt is fed on stdin.
-        # `--mode plan` is a best-effort read-only INTENT hint -- it steers the
-        # model toward analysis over edits (which is what a consult panel wants),
-        # but it is NOT enforced (see the class comment: print mode still executed
-        # write_to_file in testing), which is why read_only stays False. Never add
-        # --dangerously-skip-permissions (it only makes a non-sandboxed tool even
-        # more permissive). The engine reaches this code path only when
-        # ALLOY_ALLOW_UNSANDBOXED=1.
-        args = [
-            "-p",
-            "Follow the instructions provided on standard input and answer them.",
-            "--mode",
-            "plan",
-        ]
+    # -- sandbox: an isolated HOME holding our settings.json ------------------ #
+    # Files symlinked (not copied) from the real ~/.gemini so agy finds the
+    # existing Google login without duplicating a token onto disk.
+    _AUTH_LINKS = (
+        "oauth_creds.json",
+        "google_accounts.json",
+        os.path.join("antigravity-cli", "antigravity-oauth-token"),
+    )
+
+    def _settings(self) -> dict:
+        deny = list(self.WRITE_TOOLS)
+        if not web_enabled():
+            deny += list(self.WEB_TOOLS)
+        return {
+            # No toolPermission key on purpose -- see the class comment.
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "notifications": False,
+            "showTips": False,
+            "showFeedbackSurvey": False,
+            "permissions": {"allow": list(self.READ_TOOLS), "deny": deny},
+        }
+
+    def _home(self, ctx: "dict | None") -> "str | None":
+        """Build (idempotently) the HOME agy is confined to, and return it.
+
+        Alloy-owned and shared across runs by default (under XDG_STATE_HOME, next
+        to the run dirs): agy unpacks ~13MB of language-server binaries and caches
+        into its HOME on first use, so a fresh one per run would re-pay that in
+        disk and startup latency every time. Sharing is safe -- a print-mode call
+        never resumes prior state unless asked (`--continue`/`--conversation`,
+        which this adapter never passes). Set ALLOY_ANTIGRAVITY_HOME=run for a
+        throwaway one inside the run dir, or to a path of your own."""
+        pdir = (ctx or {}).get("pdir")
+        raw = (setting("ALLOY_ANTIGRAVITY_HOME") or "").strip()
+        if raw and raw.lower() != "run":
+            home = os.path.abspath(os.path.expanduser(raw))
+        elif raw.lower() == "run":
+            if not pdir:
+                return None
+            home = os.path.join(pdir, "agy_home")
+        else:
+            home = os.path.join(os.path.dirname(default_run_root()), "agy-home")
+        cli = os.path.join(home, ".gemini", "antigravity-cli")
+        os.makedirs(cli, exist_ok=True)
+        _chmod(home, 0o700)
+        real = os.path.join(os.path.expanduser("~"), ".gemini")
+        for rel in self._AUTH_LINKS:
+            src, dst = os.path.join(real, rel), os.path.join(home, ".gemini", rel)
+            if os.path.exists(src) and not os.path.lexists(dst):
+                try:
+                    os.symlink(src, dst)
+                except OSError:
+                    pass  # API-key auth still works; is_authed already gated this
+        write_atomic(os.path.join(cli, "settings.json"),
+                     json.dumps(self._settings(), indent=2))
+        return home
+
+    def prepare_env(self, ctx: "dict | None" = None) -> dict:
+        home = self._home(ctx)
+        return {"HOME": home} if home else {}
+
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
+        ctx = ctx or {}
+        # agy ignores stdin in print mode (1.1.7), so the prompt goes in a file it
+        # is pointed at -- never on argv (ARG_MAX, `ps` leakage, quoting). The file
+        # lives in its own directory so the --add-dir grant covers the prompt only,
+        # not the sibling panelists' captured answers in the run dir.
+        pdir = ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path))
+        pin = os.path.join(pdir, "prompt_in")
+        os.makedirs(pin, exist_ok=True)
+        _chmod(pin, 0o700)
+        staged = os.path.join(pin, "prompt.md")
+        try:
+            shutil.copyfile(prompt_path, staged)
+            _chmod(staged, 0o600)
+        except OSError:
+            staged = os.path.abspath(prompt_path)  # fall back to the original
+        # `--mode plan` steers toward analysis over edits. It is an intent hint
+        # only (unenforced); the allow-list is what actually stops writes.
+        args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
+        for d in (os.path.dirname(staged), ctx.get("repo")):
+            if d:
+                args += ["--add-dir", d]
+        # Match agy's own print-mode deadline (default 5m) to alloy's, so the
+        # engine's timeout is the one that decides, not a hidden CLI default.
+        timeout_s = ctx.get("timeout_s")
+        if timeout_s:
+            args += ["--print-timeout", f"{int(timeout_s)}s"]
         m = self.model()
         if m:
             args += ["--model", m]
+        effort = setting("ALLOY_ANTIGRAVITY_EFFORT")   # low|medium|high
+        if effort:
+            args += ["--effort", effort]
         return args
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         # The answer is rendered to stdout; stderr carries noise such as
-        # "Shell cwd was reset to ...". Never parse stderr as the answer.
+        # "Shell cwd was reset to ..." and the tool-denied notice. Never parse
+        # stderr as the answer -- a denial must surface as an empty result (the
+        # engine reports the stderr tail as the reason), not as a fake answer.
         return strip_ansi(stdout).strip()
 
 
@@ -466,7 +639,8 @@ class LlmAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_LLM_MODEL")
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         # `llm` reads the prompt from stdin when none is given as an argument.
         args: "list[str]" = []
         m = self.model()
@@ -492,7 +666,8 @@ class OpenCodeAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_OPENCODE_MODEL")
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         args = ["run"]
         m = self.model()
         if m:
@@ -517,7 +692,8 @@ class CursorAgentAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CURSOR_AGENT_MODEL")
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         args = ["--print", "--output-format", "text"]
         m = self.model()
         if m:
@@ -551,7 +727,8 @@ class GrokAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_GROK_MODEL")  # unset -> CLI default (grok-4.5); e.g. grok-composer-2.5-fast
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         # plan = read-only (no edits/bash); prompt from a real file; plain stdout.
         # Never use --always-approve or --permission-mode bypassPermissions.
         args = ["--permission-mode", "plan", "--output-format", "plain",
@@ -593,7 +770,8 @@ class ClaudeAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CLAUDE_MODEL")
 
-    def build_args(self, prompt_path: str, last_message_path: str, mode: str) -> "list[str]":
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
         args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
@@ -607,10 +785,10 @@ class ClaudeAdapter(Adapter):
 
 
 # The default panel is the COMPLETE SET of available models: every verified,
-# read-only, non-experimental adapter (codex, grok, claude) that is installed +
-# authed -- including a fresh `claude` instance of the host's own type. `llm`
-# (experimental) and the no-read-only adapters (opencode, cursor-agent,
-# antigravity) are opt-in only.
+# read-only, non-experimental adapter (codex, grok, claude, and -- on agy >= 1.1
+# -- antigravity/Gemini) that is installed + authed, including a fresh `claude`
+# instance of the host's own type. `llm` (experimental), the no-read-only adapters
+# (opencode, cursor-agent) and an OLD agy are opt-in only.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
     "grok": GrokAdapter(),
@@ -813,7 +991,11 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     status_path = os.path.join(pdir, "status.json")
 
     binp = adapter.resolved_bin()
-    argv = [binp] + adapter.build_args(prompt_path, last_path, mode)
+    # Everything an adapter may need beyond the prompt: the repo it may read, its
+    # own scratch dir (for adapter-private sidecar files), and the deadline the
+    # engine will enforce, so a CLI with its own internal timeout can match it.
+    ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s}
+    argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
 
     # quiet down ANSI / interactive behaviour in the child
     env = dict(os.environ)
@@ -822,6 +1004,9 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("CI", "1")
+    # Adapter-supplied overrides win over the inherited environment (they exist
+    # precisely to redirect a CLI away from the user's real state -- see agy).
+    env.update(adapter.prepare_env(ctx))
 
     status = {
         "name": adapter.name,

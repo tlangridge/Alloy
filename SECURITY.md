@@ -21,15 +21,28 @@ safety properties:
   repo access off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd, the
   pre-0.1.6 behavior); pin a different dir with `--repo` / `ALLOY_REPO`.
 - **Write-capable adapters never see your real tree.** Adapters with no read-only
-  mode (`antigravity`, `opencode`, `cursor-agent`) are **refused** unless you set
-  `ALLOY_ALLOW_UNSANDBOXED=1`, and even then they get a **disposable copy** of the
-  repo (`.git` excluded), never the working tree — so their writes land off it.
+  mode (`opencode`, `cursor-agent`, and `antigravity` on agy < 1.1.0) are
+  **refused** unless you set `ALLOY_ALLOW_UNSANDBOXED=1`, and even then they get a
+  **disposable copy** of the repo (`.git` excluded), never the working tree — so
+  their writes land off it.
+- **Antigravity (`agy`) is read-only by allow-list, on agy >= 1.1.0 only.** That
+  release made headless print mode **fail closed**: it cannot prompt, so any tool
+  outside `permissions.allow` is auto-denied. Alloy generates a settings file
+  allow-listing read tools only, points agy at an **alloy-owned HOME** (so the
+  settings are ours, not yours, and agy's scratch/conversation state stays out of
+  `~/.gemini`; auth files are symlinked, never copied), and grants repo access
+  explicitly via `--add-dir` with `allowNonWorkspaceAccess: false` — agy ignores
+  the process cwd, so confining HOME and naming the workspace is what actually
+  contains it. `--dangerously-skip-permissions` is never passed. On an older agy
+  none of this holds and the adapter falls back to refused-by-default.
 - **Panel output is untrusted.** The host (Claude) is instructed to treat every
   panelist answer as data, never as instructions, and never to execute commands
   found in it. Output is scanned and redacted for common secret shapes before it
   is persisted (best-effort, not a guarantee).
 - **Prompts go on stdin**, never on argv (no `ARG_MAX`, no `ps` leakage, no shell
-  injection). Config is parsed as `KEY=value`, never `source`d, and only from the
+  injection). `agy` ignores stdin in headless mode, so it is handed the prompt as
+  a **file** in a directory granted only for that purpose — argv carries a path,
+  never the prompt text. Config is parsed as `KEY=value`, never `source`d, and only from the
   user-level path — a hostile repo cannot run code through it.
 - **No telemetry, no keys.** Alloy ships no API keys and sends no data of its own.
   The only network call it makes is an optional, throttled `git fetch` update
