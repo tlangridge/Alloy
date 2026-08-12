@@ -42,14 +42,15 @@ Here the roles map to local tools:
   and is granted the repo explicitly), and a tamper tripwire
   flags any change (`summary.repo_tamper` — if true, tell the user to check
   `git status`). `ALLOY_WEB=0` disables web; `--no-repo`/`ALLOY_REPO=none`
-  disables repo access. Including a `claude` panelist is deliberate
-  **self-fusion** (a model fused with itself still adds lift); it is a *separate*
-  process with its own fresh context.
-- **Judge + Synthesizer** = **you** (Claude, the host). You read the panel's
-  answers, compare them (you do **not** merge them), and write the final answer.
-  Because one panelist may be a `claude` instance of your own type, treat its
-  answer as just one anonymized voice — weigh it on merit, never favor it for
-  being Claude (see rule 6).
+  disables repo access. Including a panelist of the host's own family is
+  deliberate **self-fusion** (a model fused with itself still adds lift); that
+  instance is a *separate* process with its own fresh context.
+- **Judge + Synthesizer** = **you** (the host — Claude, Grok, Codex, or
+  whichever agent invoked this skill). You read the panel's answers, compare
+  them (you do **not** merge them), and write the final answer. Because one
+  panelist may be an instance of your own family, treat its answer as just one
+  anonymized voice — weigh it on merit, never favor it for sharing your family
+  (see rule 6).
 
 Alloy ships no API keys and makes no network calls of its own. It orchestrates
 CLIs the user already installed and authenticated; their prompts, the repo files
@@ -94,11 +95,12 @@ panelist fetches go to those CLIs' own model providers.
    not a free no-op. See *Plan mode* below.
 
 6. **You may be a panelist too — do not self-prefer.** The panel usually includes
-   a `claude` instance. It is independent of you (separate process, fresh
-   context), so judge its answer exactly like any other: on evidence and
-   reasoning, anonymized. Never rank it higher just because it is Claude, and
-   never count "the claude panelist agrees with me" as consensus — that is
-   self-agreement, and your independent check comes from the non-Claude panelists.
+   a panelist of your own family (`claude` if you are Claude, `grok` if you are
+   Grok, `codex` if you are Codex). That instance is independent of you (separate
+   process, fresh context). Judge it like any other: on evidence and reasoning,
+   anonymized. Never rank it higher for sharing your family, and never count
+   "the same-family panelist agrees with me" as consensus — that is
+   self-agreement. The independent check comes from the other families.
 
 ---
 
@@ -115,8 +117,8 @@ Run `doctor` first:
 ```
 
 - If **0 panelists are ready**: tell the user alloy will fall back to a
-  single-model (Claude-only) answer, show the `doctor` install/auth hints, and
-  ask whether to proceed Claude-only or stop so they can install a panelist.
+  single-model (host-only) answer, show the `doctor` install/auth hints, and
+  ask whether to proceed host-only or stop so they can install a panelist.
   With zero panelists there is no "alloy" — say so honestly.
 - If **1 panelist is ready**: it still works (a 1-model panel + your synthesis
   still adds a real check), but note the panel is thin.
@@ -191,7 +193,7 @@ else `--mode consult`.
 
 The command streams progress to stderr and prints the path to `manifest.json` on
 stdout. It exits `0` if at least one panelist answered, `3` if none did (your
-cue to fall back to Claude-only).
+cue to fall back to a host-only answer).
 
 ### b) Read the manifest, then the answers
 
@@ -231,9 +233,9 @@ around it — so the file parses.
 Anti-sycophancy rule: **agreement is not proof of correctness.** Panelists share
 training data and can be confidently wrong together. When all panelists agree but
 the reasoning is thin or you have contrary evidence, say so explicitly and lower
-the confidence. And if the `claude` panelist agrees with your own view, that is
-**self-agreement, not consensus** — discount it, and lean on the non-Claude
-panelists for the independent check.
+the confidence. And if the same-family panelist agrees with your own view, that
+is **self-agreement, not consensus** — discount it, and lean on the other
+families for the independent check.
 
 ### d) Synthesize
 
@@ -257,11 +259,11 @@ stages, it feeds the next stage.
 
 Three different "plan" concepts can collide — keep them straight:
 
-1. **Claude Code plan mode** (the host harness state): you may not make changes
-   until the user approves. Because dispatching the panel **spends tokens and
-   spawns subprocesses**, treat it as a side-effecting action: in plan mode, ask
-   for approval before dispatching (it is not a read-only no-op). Reading
-   `doctor` output is fine.
+1. **Host plan mode** (the host harness state — Claude Code plan mode, Grok
+   plan mode, etc.): you may not make changes until the user approves. Because
+   dispatching the panel **spends tokens and spawns subprocesses**, treat it as a
+   side-effecting action: in plan mode, ask for approval before dispatching (it
+   is not a read-only no-op). Reading `doctor` output is fine.
 2. **The skill's `plan` mode** (panel proposes plans → you synthesize one →
    present it for approval). This is a deliverable, not host plan mode.
 3. **`claude --permission-mode plan`** — a panelist's own read-only flag that
@@ -372,7 +374,7 @@ it met the bar. (Evidence + citations: see `docs/methodology.md`.)
 
 ## Failure handling (write these into your behavior)
 
-- **No panelists ready / exit 3** → say there is no panel; offer a Claude-only
+- **No panelists ready / exit 3** → say there is no panel; offer a host-only
   answer or to stop. Never silently pretend a single-model answer is a panel.
 - **Partial panel** (M of N ok) → proceed with M; explicitly name who dropped and
   why. Missing ≠ agreeing.
@@ -404,4 +406,4 @@ For a one-off question, `ask` is the cheap path; reserve the lifecycle for real
 build tasks.
 
 See `docs/methodology.md` for the mapping to OpenRouter Fusion and the
-Claude-as-judge bias disclosure, and `docs/adding-a-panelist.md` to add a CLI.
+host-as-judge bias disclosure, and `docs/adding-a-panelist.md` to add a CLI.

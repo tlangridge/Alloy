@@ -146,12 +146,13 @@ class AlloyTests(unittest.TestCase):
     def test_no_panelists_fallback(self):
         # opencode has no read-only mode -> refused/skipped by default (even when
         # listed explicitly, unless ALLOY_ALLOW_UNSANDBOXED=1), so this exercises
-        # the 0-panelist Claude-only fallback without invoking any real CLI (and
+        # the 0-panelist host-only fallback without invoking any real CLI (and
         # without spending tokens).
         proc, m = panel(self.tmp, extra_args=["--panelists", "opencode"])
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(m["panelists"], [])
         self.assertIn("note", m["summary"])
+        self.assertIn("host-only", m["summary"]["note"])
         self.assertTrue(m["summary"]["skipped"])
 
     def test_doctor_json(self):
@@ -304,6 +305,21 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "grok")["command"])
         self.assertIn("--disable-web-search", cmd)
 
+    def test_grok_uses_cli_default_model(self):
+        # Unset ALLOY_GROK_MODEL -> no -m flag; the CLI default (currently
+        # grok-4.6) is what actually runs.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        cmdlist = by_name(m, "grok")["command"]
+        self.assertNotIn("-m", cmdlist)
+
+    def test_grok_model_override(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x",
+                                    "ALLOY_GROK_MODEL": "grok-4.5"})
+        cmd = " ".join(by_name(m, "grok")["command"])
+        self.assertIn("-m grok-4.5", cmd)
+
     def test_claude_uses_plan_and_print(self):
         # The host's own model as a panelist: headless (-p), read-only (plan),
         # never a bypass flag.
@@ -346,7 +362,7 @@ class AlloyTests(unittest.TestCase):
         # them -> read_only=False, so it is skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
         proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
                         env_extra=self._agy_env(MOCK_VERSION="1.0.16"))
-        self.assertEqual(proc.returncode, 3)  # 0 panelists -> Claude-only fallback
+        self.assertEqual(proc.returncode, 3)  # 0 panelists -> host-only fallback
         self.assertIsNone(by_name(m, "antigravity"))  # never dispatched
         skipped = {s["name"]: s["reason"] for s in m["summary"]["skipped"]}
         self.assertIn("antigravity", skipped)
