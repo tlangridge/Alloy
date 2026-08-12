@@ -11,14 +11,16 @@
 get an honest map of where they agree, disagree, and are collectively blind —
 instead of one confident answer from one model.**
 
-Alloy is a [Claude Code](https://claude.com/claude-code) skill that brings the
+Alloy is a skill for [Claude Code](https://claude.com/claude-code),
+[Grok](https://grok.com), and any host that can run a local skill. It brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** of every model you have —
-`codex`, `grok`, and a fresh `claude` instance ("self-fusion") — running
+`codex`, `grok`, a fresh `claude` instance, and Antigravity/Gemini — running
 **in parallel, read-only inside your repo, and able to search the web**, then
-Claude acts as the **judge** and **synthesizer**: it compares the answers and
-writes a final one that *surfaces the disagreement* rather than averaging it away.
+the **host** (whoever invoked `/alloy`) acts as the **judge** and
+**synthesizer**: it compares the answers and writes a final one that *surfaces
+the disagreement* rather than averaging it away.
 
 > **It does not merge answers into mush.** Its whole job is to show you the
 > consensus, the contradictions, the unique insight only one model had, and the
@@ -55,7 +57,7 @@ $ alloy panel --prompt-file prompt.txt
 - **grok:** "…race conditions where agents modify the same shared files, leading
   to silent code corruption."
 
-Claude then judges (*they answered different questions — codex is about reading
+The host then judges (*they answered different questions — codex is about reading
 output, grok about writing files; both are real, they are not in conflict*) and
 synthesizes one answer that keeps both, attributed. One model would have given
 you only half the picture, confidently.
@@ -99,10 +101,10 @@ flowchart LR
   P --> C["codex"]
   P --> K["grok"]
   P --> CL["claude<br/>(self-fusion)"]
-  C --> J["Claude: JUDGE<br/>(compare, don't merge)"]
+  C --> J["host: JUDGE<br/>(compare, don't merge)"]
   K --> J
   CL --> J
-  J --> S["Claude: SYNTHESIZE<br/>(surface disagreement)"]
+  J --> S["host: SYNTHESIZE<br/>(surface disagreement)"]
   S --> A["one answer + a map of<br/>agreement · conflict · blind spots"]
 ```
 
@@ -112,15 +114,16 @@ factuality) and can *hurt* on subjective work — or when a confident-but-wrong 
 drags the panel into agreement (a measured 10–40% accuracy drop in the multi-agent
 debate literature). So Alloy **surfaces disagreement instead of averaging it away**,
 keeps you as the decider, and gates its `debate` round on genuine, checkable
-disagreement. Evidence, sources, and the Claude-as-judge bias discussion are in
+disagreement. Evidence, sources, and the host-as-judge bias discussion are in
 [`docs/methodology.md`](docs/methodology.md).
 
 ---
 
 ## Install
 
-Alloy is a Claude Code skill that lives in `~/.claude/skills/alloy/` and runs on
-Python 3 (standard library only — no `pip install`). macOS / Linux (Windows via WSL).
+Alloy is a skill that lives in `~/.claude/skills/alloy/` (and, after `install.sh`,
+also `~/.grok/skills/alloy/` when Grok is installed) and runs on Python 3
+(standard library only — no `pip install`). macOS / Linux (Windows via WSL).
 
 **1. Install at least one panelist CLI** — Alloy orchestrates CLIs you already
 have; it ships none of its own. Two or more is where it earns its keep:
@@ -157,9 +160,9 @@ git clone https://github.com/tlangridge/Alloy.git ~/.claude/skills/alloy
 
 Pick one of these, not several.
 
-**3. Restart Claude Code** (or open a new session) so it discovers the skill.
-Then run `doctor` first — it tells you which panelists are installed, which are
-authenticated, and exactly how to add the missing ones:
+**3. Restart Claude Code or Grok** (or open a new session) so it discovers the
+skill. Then run `doctor` first — it tells you which panelists are installed,
+which are authenticated, and exactly how to add the missing ones:
 
 ```
   [ready]  codex   codex-cli 0.139.0
@@ -183,9 +186,9 @@ Now, inside Claude Code:
 > `ln -s ~/.claude/skills/alloy/bin/alloy /usr/local/bin/alloy`.
 
 > **The prerequisite cliff, stated honestly:** Alloy is only useful if you have
-> **2+** of {`codex`, `grok`, …} installed *and authenticated*. With only Claude
-> it degrades to a normal single-model answer and tells you so. Run `doctor`
-> first; it will not surprise you.
+> **2+** of {`codex`, `grok`, `claude`, …} installed *and authenticated*. With
+> only the host it degrades to a normal single-model answer and tells you so.
+> Run `doctor` first; it will not surprise you.
 
 ---
 
@@ -200,11 +203,11 @@ Now, inside Claude Code:
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
-In the lifecycle, **Claude writes all the code; the panel only ever reads and
+In the lifecycle, **the host writes all the code; the panel only ever reads and
 reviews, read-only.** By default panelists read your real working tree (so they
 ground answers in your actual code), but their CLI read-only flag stops them
 editing files, running builds, or making any change — best-effort, with a tamper
-tripwire as backstop. Claude does all the writing.
+tripwire as backstop. The host does all the writing.
 
 The panel reads the repo itself, so you rarely need to spoon-feed files. When you
 *do* want to force specific files into the prompt (e.g. something outside the
@@ -228,7 +231,7 @@ research, planning, debugging triage, security/correctness review — *"if the c
 of being wrong is higher than the cost of asking three models, fuse."* They are a
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
 distinctive voice and just adds latency and cost). That is why Alloy uses the
-panel for the *thinking* and leaves the *writing* to Claude.
+panel for the *thinking* and leaves the *writing* to the host.
 
 ## Safety model
 
@@ -304,14 +307,14 @@ variables (env wins over the file):
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
-| `ALLOY_CODEX_MODEL` | CLI default | codex model override |
-| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.1-pro-high` | agy model — the strongest one it exposes. `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for a cheap, fast seat) |
+| `ALLOY_CODEX_MODEL` | CLI default | codex model override (e.g. `gpt-5.6-sol`) |
+| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.1-pro-high` | agy model — the strongest Gemini it exposes (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for a cheap, fast seat) |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
 | `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
-| `ALLOY_GROK_MODEL` | grok default (`grok-4.5`) | Grok model override, e.g. `grok-composer-2.5-fast` (unset uses the CLI default, now the opus-class `grok-4.5`) |
-| `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`, or a full id) |
+| `ALLOY_GROK_MODEL` | grok default (`grok-4.6`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, now `grok-4.6`) |
+| `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
-| `ALLOY_JUDGE` | `claude` | who judges (Claude is host default; see methodology) |
+| `ALLOY_JUDGE` | `host` | who judges (the invoking agent; see methodology). Rotation to a CLI is on the roadmap. |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
 | `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |
 | `ALLOY_MAX_PROMPT_BYTES` | `4000000` | cap on total prompt size, including attachments |
@@ -336,14 +339,14 @@ variables (env wins over the file):
           \        |        /
        run dir + manifest.json  (per-panelist status, paths, caps, redactions)
                       |
-   Claude: JUDGE (compare, do not merge) -> judge.json
+   host: JUDGE (compare, do not merge) -> judge.json
                       |
-   Claude: SYNTHESIZE (attributed, disagreements surfaced) -> you decide
+   host: SYNTHESIZE (attributed, disagreements surfaced) -> you decide
 ```
 
 `bin/alloy` is the hardened, tested mechanical core (dispatch + capture).
-Claude does the judging and synthesis — the parts that need intelligence and your
-repo context. See [`docs/methodology.md`](docs/methodology.md).
+The host does the judging and synthesis — the parts that need intelligence and
+your repo context. See [`docs/methodology.md`](docs/methodology.md).
 
 ## Extending it
 

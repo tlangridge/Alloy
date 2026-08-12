@@ -53,7 +53,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.8"
+ALLOY_VERSION = "0.1.9"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -447,9 +447,10 @@ class AntigravityAdapter(Adapter):
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
-    # Gemini 3.1 Pro at high reasoning effort: the strongest model agy exposes and
-    # the reason it is worth a panel seat (`agy models` lists the rest, including
-    # gemini-3.6-flash-* for a cheap/fast panel). Override: ALLOY_ANTIGRAVITY_MODEL.
+    # Gemini 3.1 Pro at high reasoning effort: the strongest *Gemini* agy exposes
+    # (agy also lists Claude 4.6 / GPT-OSS; those would duplicate the claude /
+    # codex seats). `agy models` lists the rest, including gemini-3.6-flash-* for
+    # a cheap/fast panel. Override: ALLOY_ANTIGRAVITY_MODEL.
     default_model = "gemini-3.1-pro-high"
 
     # Read tools get an allow-rule; everything else fails closed. Bare tool names
@@ -709,10 +710,10 @@ class GrokAdapter(Adapter):
     # plan mode); headless single-turn reads the prompt from a real file via
     # `--prompt-file` (it does NOT accept '-'/stdin) and prints the answer to
     # stdout (`--output-format plain`). Verified live. The CLI default model is
-    # now `grok-4.5` (xAI's opus-class flagship), so leaving model() unset already
-    # dispatches the latest model; `grok-composer-2.5-fast` remains available as a
-    # cheaper/faster option via ALLOY_GROK_MODEL. Run `grok models` to list what
-    # your account can reach.
+    # now `grok-4.6` (xAI's current flagship; 500k context, agent/coding focus),
+    # so leaving model() unset already dispatches the latest model. `grok-4.5`
+    # remains available as the previous generation via ALLOY_GROK_MODEL. Run
+    # `grok models` to list what your account can reach.
     name = "grok"
     bin = "grok"
     read_only = True
@@ -725,7 +726,7 @@ class GrokAdapter(Adapter):
         return os.path.isfile(os.path.join(os.path.expanduser("~"), ".grok", "auth.json"))
 
     def model(self) -> "str | None":
-        return setting("ALLOY_GROK_MODEL")  # unset -> CLI default (grok-4.5); e.g. grok-composer-2.5-fast
+        return setting("ALLOY_GROK_MODEL")  # unset -> CLI default (grok-4.6); e.g. grok-4.5
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
@@ -748,12 +749,13 @@ class GrokAdapter(Adapter):
 
 
 class ClaudeAdapter(Adapter):
-    # The host's own model, as a panelist: a FRESH `claude` (Claude Code) instance
-    # run headless and read-only (`--permission-mode plan`; `-p` skips the trust
-    # dialog). Including it makes the panel a complete set of available models and
-    # adds the "self-fusion" lift (a model fused with itself still helps). The host
-    # Claude that JUDGES is a *separate* instance and must treat this panelist's
-    # answer as one anonymized voice -- never favor it for being Claude.
+    # A FRESH `claude` (Claude Code) instance run headless and read-only
+    # (`--permission-mode plan`; `-p` skips the trust dialog). Including it makes
+    # the panel a complete set of available models and adds the "self-fusion" lift
+    # when the host is also Claude (a model fused with itself still helps). The
+    # host that JUDGES -- Claude, Grok, or another -- is a *separate* instance and
+    # must treat this panelist as one anonymized voice. If the host is Claude, it
+    # must not favor this seat for being Claude (see SKILL.md rule 6).
     name = "claude"
     bin = "claude"
     read_only = True
@@ -1357,12 +1359,12 @@ def cmd_panel(args: argparse.Namespace) -> int:
             "repo": repo,
             "repo_tamper": False,
             "note": "No read-only panelists available -- the host should fall "
-                    "back to a single-model (Claude-only) answer.",
+                    "back to a single-model (host-only) answer.",
         }
         write_atomic(os.path.join(run_dir, "manifest.json"),
                      json.dumps(manifest, indent=2))
         print(os.path.join(run_dir, "manifest.json"))
-        log("no panelists available; wrote Claude-only-fallback manifest")
+        log("no panelists available; wrote host-only-fallback manifest")
         return 3
 
     log(f"panel: {', '.join(a.name for a in chosen)} ({len(chosen)} model call(s))")
@@ -1489,7 +1491,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print()
     if ready_default == 0:
         print("  No default panelists are ready. Alloy will fall back to a single-model")
-        print("  (Claude-only) answer until you install and authenticate at least one")
+        print("  (host-only) answer until you install and authenticate at least one")
         print("  panelist above. Alloy is most useful with 2+ panelists.")
     else:
         print(f"  {ready_default} panelist(s) in the default panel. An Alloy round makes")

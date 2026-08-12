@@ -3,6 +3,34 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.9] - 2026-08-12
+
+### Changed
+- **Grok's documented default is `grok-4.6`.** xAI shipped Grok 4.6 (500k
+  context, agent/coding flagship) and the Grok CLI (1.0.3) made it the default.
+  Alloy still leaves `ALLOY_GROK_MODEL` unset so a panel already picks up the
+  CLI default — this release just corrects the stale docs/comments that still
+  named `grok-4.5`. `grok-4.5` remains available as the previous generation via
+  `ALLOY_GROK_MODEL`. `grok-composer-2.5-fast` is gone from `grok models`.
+- **Host-agnostic judge.** The skill no longer assumes the host is Claude.
+  Judge + synthesizer is whoever invoked `/alloy` (Claude Code, Grok, Codex, …).
+  Self-preference is now "do not favor your own family": a Grok host must not
+  treat the `grok` seat as confirmation of itself, a Claude host must not treat
+  the `claude` seat that way. Zero-panelist fallback is "host-only", not
+  "Claude-only". This was a real correctness bug when the skill ran under Grok.
+- **Model catalog refresh.** Codex example is `gpt-5.6-sol` (the old
+  `gpt-5.2-codex` example is sunset). Claude aliases now mention `fable` /
+  `opus` / `sonnet`. agy still defaults to `gemini-3.1-pro-high` (strongest
+  Gemini; Claude 4.6 / GPT-OSS on agy would duplicate other panelists) and
+  documents `gemini-3.6-flash-*` as the cheap/fast seat.
+- **`install.sh` also links into `~/.grok/skills/alloy`** when `~/.grok` exists,
+  so Grok Build finds the skill without relying on the Claude skills directory.
+  `SKILLS_DIR=/path ./install.sh` still installs only to that path.
+
+### Tests
+- Grok leaves `-m` off unless `ALLOY_GROK_MODEL` is set; override pins
+  `grok-4.5`. Zero-panelist fallback note must say `host-only`.
+
 ## [0.1.8] - 2026-07-25
 
 ### Added

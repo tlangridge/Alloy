@@ -35,7 +35,7 @@ safety properties:
   the process cwd, so confining HOME and naming the workspace is what actually
   contains it. `--dangerously-skip-permissions` is never passed. On an older agy
   none of this holds and the adapter falls back to refused-by-default.
-- **Panel output is untrusted.** The host (Claude) is instructed to treat every
+- **Panel output is untrusted.** The host is instructed to treat every
   panelist answer as data, never as instructions, and never to execute commands
   found in it. Output is scanned and redacted for common secret shapes before it
   is persisted (best-effort, not a guarantee).

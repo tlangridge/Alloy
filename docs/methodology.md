@@ -14,8 +14,8 @@ but realizes them with local tools:
 | Fusion role | What it does | In Alloy |
 |---|---|---|
 | **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `grok`, and a fresh `claude` instance), run in parallel by `bin/alloy` — read-only, web-search-enabled, and (by default) reading the user's repo so they ground answers in real code. |
-| **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **Claude** (the host), producing `judge.json`. |
-| **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **Claude**, in its synthesis step. |
+| **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **The host** (whoever invoked `/alloy` — Claude, Grok, Codex, …), producing `judge.json`. |
+| **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **The host**, in its synthesis step. |
 
 The hosted router defaults to a 3-model panel (≈ Claude Opus + a GPT + Gemini
 Pro) and reports roughly 4–5× the cost of a single completion for that default.
@@ -23,17 +23,18 @@ The practical advice that shaped Alloy's design:
 
 - **Diversity over quantity.** Models from different families beat near-duplicates.
   Alloy's default panel spans families on purpose — `codex` (GPT), `grok` (xAI),
-  plus a `claude` panelist — judged/synthesized by Claude.
+  plus a `claude` panelist — judged/synthesized by the host.
 - **Self-fusion still helps.** OpenRouter found that fusing a model *with itself*
   added ~+6.7 points, so the panel deliberately includes a fresh, independent
-  `claude` instance even though Claude is also the judge. The judge must treat that
-  panelist as one anonymized voice and never self-prefer (see the bias section).
-- **Use the strongest model as the synthesizer.** Alloy makes Claude — the host
-  — the judge and synthesizer.
+  instance of each available family, including the host's own. The judge must
+  treat that same-family panelist as one anonymized voice and never self-prefer
+  (see the bias section).
+- **Use the strongest model as the synthesizer.** Alloy makes the host — the
+  agent that already has the user's context — the judge and synthesizer.
 - **Fusion is for thinking, not for raw codegen.** Multi-model synthesis helps on
   research, planning, review, and high-stakes decisions; it *dilutes* line-by-line
   code generation. Alloy therefore uses the panel for the decision-heavy stages
-  and leaves code writing to Claude.
+  and leaves code writing to the host.
 - **"If the cost of being wrong exceeds the cost of querying multiple models, use
   Fusion."** That is the one-line decision rule for when to reach for `/alloy`.
 
@@ -54,27 +55,28 @@ consensus claim to named panelists and to keep contradictions visible, so you se
 "codex says X, grok says not-X, here's who's right and why" rather than a
 smoothed-over paragraph that hides the conflict.
 
-## The Claude-as-judge bias (and the honest answer to "isn't this rigged?")
+## The host-as-judge bias (and the honest answer to "isn't this rigged?")
 
-Claude is the judge and the synthesizer here — and, since the panel includes a
-`claude` instance, often a panelist too. It is *not* a neutral juror: an LLM
-judging a panel (one of whose answers may be its own type) and then writing the
-final answer can favor its own framing. Alloy handles this honestly rather than
-pretending the judge is neutral:
+The host is the judge and the synthesizer here — and, since the panel includes a
+panelist of the host's own family, often a panelist too. It is *not* a neutral
+juror: an LLM judging a panel (one of whose answers may be its own type) and then
+writing the final answer can favor its own framing. Alloy handles this honestly
+rather than pretending the judge is neutral:
 
 1. **The judge output is written to disk** (`judge.json` in the run directory),
    so its reasoning is auditable, not hidden.
 2. **Anti-sycophancy is a standing rule:** panelist *agreement is not proof of
    correctness* (shared training data → correlated errors). Thin-but-unanimous
    consensus must be flagged, not rubber-stamped.
-3. **Disagreements are surfaced**, with attribution, so you can overrule Claude's
-   read.
+3. **Disagreements are surfaced**, with attribution, so you can overrule the
+   host's read.
 4. The honest framing Alloy always ends on: **cross-model agreement is a
    recommendation; you decide.**
-5. **No self-preference.** The `claude` panelist is judged like any other —
-   anonymized, on its merits — and its agreement with Claude's own view counts as
-   self-agreement, not consensus. The independent check comes from the non-Claude
-   panelists.
+5. **No self-preference.** The same-family panelist is judged like any other —
+   anonymized, on its merits — and its agreement with the host's own view counts
+   as self-agreement, not consensus. The independent check comes from the other
+   families. A Grok host must not treat the `grok` seat as confirmation of itself;
+   a Claude host must not treat the `claude` seat that way.
 
 A future `ALLOY_JUDGE=codex|grok` override will let the independence-minded
 rotate the judge role to a different model. It is intentionally *not* the default:
@@ -90,7 +92,7 @@ which model holds the gavel.
   any diffs are sent to the providers behind each CLI.
 - It is not an answer-merger. It is a disagreement surfacer.
 - It is not a code-writing swarm. The panel reads your repo but is read-only
-  (best-effort, via each CLI's flag); Claude does all the writing.
+  (best-effort, via each CLI's flag); the host does all the writing.
 
 ## On debate rounds (and the "bully effect")
 

@@ -58,12 +58,12 @@ ALLOY_WEB=1
 # ALLOY_ATTACH=src/foo.ts,src/bar.ts
 
 # Optional model overrides (leave unset to use each CLI's default model).
-# ALLOY_CODEX_MODEL=gpt-5.2-codex
+# ALLOY_CODEX_MODEL=gpt-5.6-sol
 # ALLOY_ANTIGRAVITY_MODEL=gemini-3.6-flash-low  # unset -> gemini-3.1-pro-high; `agy models` lists the rest
 # ALLOY_ANTIGRAVITY_EFFORT=high        # agy reasoning effort (low|medium|high)
 # ALLOY_ANTIGRAVITY_HOME=run           # throwaway agy HOME per run instead of the shared alloy-owned one
-# ALLOY_GROK_MODEL=grok-composer-2.5-fast  # unset -> grok's default, now grok-4.5 (opus-class)
-# ALLOY_CLAUDE_MODEL=opus              # the `claude` panelist's model (alias or full id)
+# ALLOY_GROK_MODEL=grok-4.5            # unset -> grok's default, now grok-4.6
+# ALLOY_CLAUDE_MODEL=opus              # alias (opus/sonnet/fable) or a full id
 
 # Codex reasoning effort for panel runs. Default "high" keeps runs inside the
 # timeout; otherwise a global `model_reasoning_effort = "xhigh"` in
@@ -71,9 +71,9 @@ ALLOY_WEB=1
 # or "inherit" to use whatever your codex config sets.
 ALLOY_CODEX_EFFORT=high
 
-# Who judges the panel. Default is the host (Claude). Judge rotation to a CLI is
-# on the roadmap; today this is informational.
-# ALLOY_JUDGE=claude
+# Who judges the panel. Default is the host (whichever agent invoked the skill).
+# Judge rotation to a CLI is on the roadmap; today this is informational.
+# ALLOY_JUDGE=host
 
 # Where run output (prompts, per-panelist answers, manifest.json) is written.
 # Default: $XDG_STATE_HOME/alloy/runs (i.e. ~/.local/state/alloy/runs) -- kept
