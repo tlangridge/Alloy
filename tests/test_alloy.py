@@ -381,8 +381,8 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("-p", p["command"])
         self.assertIn("--mode plan", cmd)
         self.assertNotIn("--dangerously-skip-permissions", cmd)
-        # Default model: the strongest Gemini agy exposes.
-        self.assertIn("--model gemini-3.1-pro-high", cmd)
+        # Default model: the latest Gemini family seat (currently 3.6 Flash High).
+        self.assertIn("--model gemini-3.6-flash-high", cmd)
         # The engine's deadline is handed to agy so its own 5m print timeout
         # can't cut a longer run short.
         self.assertIn("--print-timeout", cmd)

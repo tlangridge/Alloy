@@ -3,6 +3,14 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.10] - 2026-08-12
+
+### Changed
+- **Default agy model is `gemini-3.6-flash-high`** — the latest Gemini family
+  seat, so the panel gets that family's current perspective rather than the
+  older 3.1 Pro. `ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro-high` restores the
+  previous default; `gemini-3.6-flash-low` remains the cheap/fast option.
+
 ## [0.1.9] - 2026-08-12
 
 ### Changed
