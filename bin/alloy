@@ -53,7 +53,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.9"
+ALLOY_VERSION = "0.1.10"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -447,11 +447,11 @@ class AntigravityAdapter(Adapter):
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
-    # Gemini 3.1 Pro at high reasoning effort: the strongest *Gemini* agy exposes
-    # (agy also lists Claude 4.6 / GPT-OSS; those would duplicate the claude /
-    # codex seats). `agy models` lists the rest, including gemini-3.6-flash-* for
-    # a cheap/fast panel. Override: ALLOY_ANTIGRAVITY_MODEL.
-    default_model = "gemini-3.1-pro-high"
+    # Latest Gemini family seat at high effort (currently 3.6 Flash High). agy
+    # also lists Claude 4.6 / GPT-OSS; those would duplicate the claude / codex
+    # seats. `agy models` lists the rest (gemini-3.6-flash-low for cheap/fast,
+    # gemini-3.1-pro-high for the previous Pro). Override: ALLOY_ANTIGRAVITY_MODEL.
+    default_model = "gemini-3.6-flash-high"
 
     # Read tools get an allow-rule; everything else fails closed. Bare tool names
     # (no "(target)" suffix) mean "any target" -- with allowNonWorkspaceAccess

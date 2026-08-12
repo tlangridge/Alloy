@@ -308,7 +308,7 @@ variables (env wins over the file):
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` | CLI default | codex model override (e.g. `gpt-5.6-sol`) |
-| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.1-pro-high` | agy model — the strongest Gemini it exposes (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for a cheap, fast seat) |
+| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.6-flash-high` | agy model — the latest Gemini family seat (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for cheap/fast, `gemini-3.1-pro-high` for the previous Pro) |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
 | `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
 | `ALLOY_GROK_MODEL` | grok default (`grok-4.6`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, now `grok-4.6`) |
