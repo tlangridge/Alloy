@@ -417,6 +417,15 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("command", s["permissions"]["deny"])
         self.assertNotIn("write_file", s["permissions"]["allow"])
         self.assertFalse(s["allowNonWorkspaceAccess"])
+        # Containment invariant the macOS keychain config leans on: the agy
+        # HOME itself (where the generated com.apple.security.plist lives) is
+        # never granted as a workspace root, so read tools can't reach it.
+        args = by_name(m, "antigravity")["command"]
+        add_dirs = [args[i + 1] for i, a in enumerate(args[:-1])
+                    if a == "--add-dir"]
+        self.assertTrue(add_dirs)
+        for d in add_dirs:
+            self.assertFalse(d.startswith(self._shared_agy_home()))
         # toolPermission:"strict" would override the allow-list and deny the READ
         # tools too, leaving a panelist that can never answer. Never set it.
         self.assertNotIn("toolPermission", s)
@@ -574,19 +583,183 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(os.path.realpath(p["cwd"]), os.path.realpath(repo))
 
 
+def _import_alloy_module():
+    import importlib.util
+    import importlib.machinery
+    # bin/alloy has no .py extension, so give importlib an explicit loader.
+    loader = importlib.machinery.SourceFileLoader("alloy_mod", ALLOY)
+    spec = importlib.util.spec_from_loader("alloy_mod", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class AntigravityKeychainAuthUnitTests(unittest.TestCase):
+    """The keychain fallback in AntigravityAdapter.is_authed: a fresh agy login
+    stores the token ONLY in the login keychain (the token file is written just
+    when a keyring save fails), so file checks alone report a healthy install
+    as unauthenticated. Hermetic on every platform: HOME points at a fixture
+    dir, config/env auth is cleared, sys.platform and the `security` subprocess
+    are faked."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = _import_alloy_module()
+
+    def _is_authed_with(self, fake_run, platform="darwin", token_file=False):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as home:
+            if token_file:
+                d = os.path.join(home, ".gemini", "antigravity-cli")
+                os.makedirs(d)
+                open(os.path.join(d, "antigravity-oauth-token"), "w").close()
+            env = {"HOME": home, "ANTIGRAVITY_API_KEY": "", "GEMINI_API_KEY": "",
+                   "GOOGLE_API_KEY": ""}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(self.f, "_CONFIG", {}), \
+                 mock.patch.object(self.f.sys, "platform", platform), \
+                 mock.patch.object(self.f.subprocess, "run", fake_run):
+                return self.f.AntigravityAdapter().is_authed()
+
+    def test_keychain_item_present_counts_as_authed(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        self.assertTrue(self._is_authed_with(fake_run))
+        # Metadata-only existence check: never -w, so the secret is never read
+        # and no keychain ACL dialog can appear. stdin is detached so an
+        # interactive-capable `security` can never consume the caller's input.
+        self.assertEqual(len(calls), 1)
+        cmd, kw = calls[0]
+        self.assertIn("find-generic-password", cmd)
+        self.assertNotIn("-w", cmd)
+        self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
+
+    def test_no_keychain_item_means_not_authed(self):
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 44)  # errSecItemNotFound
+
+        self.assertFalse(self._is_authed_with(fake_run))
+
+    def test_security_timeout_means_not_authed(self):
+        def fake_run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 5)
+
+        self.assertFalse(self._is_authed_with(fake_run))
+
+    def test_security_oserror_means_not_authed(self):
+        def fake_run(cmd, **kw):
+            raise FileNotFoundError("/usr/bin/security")
+
+        self.assertFalse(self._is_authed_with(fake_run))
+
+    def test_non_darwin_never_probes_keychain(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        self.assertFalse(self._is_authed_with(fake_run, platform="linux"))
+        self.assertEqual(calls, [])
+
+    def test_file_auth_short_circuits_keychain_probe(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        self.assertTrue(self._is_authed_with(fake_run, token_file=True))
+        self.assertEqual(calls, [])  # no subprocess when a token file exists
+
+
+@unittest.skipUnless(sys.platform == "darwin", "generated config is macOS-only")
+class AntigravityKeychainHomeUnitTests(unittest.TestCase):
+    """_home()'s generated keychain config: macOS resolves both the keychain
+    search list and the DEFAULT keychain through $HOME, so the isolated HOME
+    gets a synthesized com.apple.security.plist with ABSOLUTE paths to the
+    real login keychain. It must be a generated file, never a symlink into
+    ~/Library -- the state/run dirs get zipped and shared for debugging, and
+    archivers dereference symlinks. Hermetic: HOME is a fixture dir."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = _import_alloy_module()
+
+    def _build_home(self, tmp, login_keychain=True, api_key=""):
+        from unittest import mock
+        fixture = os.path.join(tmp, "real-home")
+        os.makedirs(os.path.join(fixture, "Library", "Keychains"),
+                    exist_ok=True)
+        if login_keychain:
+            open(os.path.join(fixture, "Library", "Keychains",
+                              "login.keychain-db"), "w").close()
+        rundir = os.path.join(tmp, "run")
+        os.makedirs(rundir, exist_ok=True)
+        env = {"HOME": fixture, "ALLOY_ANTIGRAVITY_HOME": "run",
+               "ANTIGRAVITY_API_KEY": api_key, "GEMINI_API_KEY": "",
+               "GOOGLE_API_KEY": ""}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(self.f, "_CONFIG", {}):
+            home = self.f.AntigravityAdapter()._home({"pdir": rundir})
+        return fixture, home
+
+    def test_plist_generated_with_absolute_paths_and_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture, home = self._build_home(tmp)
+            plist = os.path.join(home, "Library", "Preferences",
+                                 "com.apple.security.plist")
+            self.assertTrue(os.path.isfile(plist))
+            self.assertFalse(os.path.islink(plist))  # a copy, never a link
+            with open(plist) as fh:
+                content = fh.read()
+            # Absolute DbName (tilde-relative re-breaks under isolated HOME)
+            # and an explicit DefaultKeychain (without it, keychain WRITES
+            # still raise the "Keychain Not Found" dialog).
+            self.assertIn(os.path.join(fixture, "Library", "Keychains",
+                                       "login.keychain"), content)
+            self.assertIn("DefaultKeychain", content)
+            # THE regression this design exists for: nothing under the agy
+            # HOME may link into ~/Library, or archiving the state dir copies
+            # the user's credential store.
+            self.assertFalse(os.path.lexists(
+                os.path.join(home, "Library", "Keychains")))
+
+    def test_api_key_skips_keychain_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, home = self._build_home(tmp, api_key="x")
+            self.assertFalse(os.path.exists(os.path.join(
+                home, "Library", "Preferences", "com.apple.security.plist")))
+
+    def test_no_login_keychain_skips_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, home = self._build_home(tmp, login_keychain=False)
+            self.assertFalse(os.path.exists(os.path.join(
+                home, "Library", "Preferences", "com.apple.security.plist")))
+
+    def test_repeat_build_repairs_legacy_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture, home = self._build_home(tmp)
+            legacy = os.path.join(home, "Library", "Keychains")
+            os.symlink(os.path.join(fixture, "Library", "Keychains"), legacy)
+            _fixture2, home2 = self._build_home(tmp)
+            self.assertEqual(home, home2)  # idempotent shared home
+            self.assertFalse(os.path.lexists(legacy))  # dev-build link removed
+            self.assertTrue(os.path.isfile(os.path.join(
+                home, "Library", "Preferences", "com.apple.security.plist")))
+
+
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the
     dispatcher as a module."""
 
     @classmethod
     def setUpClass(cls):
-        import importlib.util
-        import importlib.machinery
-        # bin/alloy has no .py extension, so give importlib an explicit loader.
-        loader = importlib.machinery.SourceFileLoader("alloy_mod", ALLOY)
-        spec = importlib.util.spec_from_loader("alloy_mod", loader)
-        cls.f = importlib.util.module_from_spec(spec)
-        loader.exec_module(cls.f)
+        cls.f = _import_alloy_module()
 
     def test_named_secret_with_suffix(self):
         # the bug the review found: names whose suffix runs past the keyword
