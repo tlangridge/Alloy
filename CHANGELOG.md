@@ -3,6 +3,46 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.2.0] - 2026-09-09
+
+### Added
+- **`/alloy execute <task>` (alias `/alloy-execute <task>`): a light
+  maker≠checker execute mode.** Alloy was review-and-advise only — the host
+  still wrote every line. Execute keeps the host as Lead (it writes an 8-line
+  SPEC from the prompt, gates, classifies, and is still the only thing that
+  writes the tree) but moves the implementation *thinking* to a cheap **Maker**
+  of a different model family, invoked read-only through the existing
+  dispatcher (`panel --panelists <maker>`), which returns the change as a
+  unified diff. The host applies it and runs the repo's tests, then dispatches
+  a **Checker** round (`--mode review`, every ready family except the Maker's)
+  that returns at most five labeled finding cards (`CONFIRMED` / `PLAUSIBLE` /
+  `REFUTED` / `OUT-OF-SCOPE`). Only `CONFIRMED` findings of severity high+
+  inside the diff's blast paths go back to the Maker; everything else is
+  parked; at most two fix→review loops. No tickets, no workstream folders, no
+  research/plan rounds — the full lifecycle stays as the long path. Routing is
+  by token only: a bare `/alloy <task>` still means the lifecycle.
+- **`alloy-execute/` alias skill.** A shim that defers to the main skill's
+  execute runbook (no second copy of the rules), so `/alloy-execute` resolves
+  on hosts that map slash commands to skill directories.
+- **`install.sh` links every host present** — Claude Code, Codex
+  (`~/.codex/skills`), Grok, Gemini CLI (`~/.gemini/skills`) and Antigravity
+  (`~/.gemini/config/skills`) — for both `alloy` and `alloy-execute`. Codex
+  gets an `agents/openai.yaml` display card. SKILL.md's dispatcher-path wording
+  is now host-neutral.
+
+### Unchanged (deliberately)
+- `ask` / `debate` / `review` / `plan` / `doctor` / the lifecycle, and standing
+  rules 1–6. `alloy panel` stays read-only; the Maker never writes the tree,
+  and no CLI is ever given a write, auto-approve, or bypass flag. A
+  write-capable `alloy make` worktree adapter is a possible later PR, not part
+  of this one.
+
+### Tests
+- `validate_skill.py` now asserts the execute row, the alias, the "host does
+  not implement the feature" rule, the five-card cap, the label taxonomy, the
+  two-loop cap, and that the `alloy-execute` shim exists, is named correctly,
+  and carries no duplicate runbook.
+
 ## [0.1.11] - 2026-08-19
 
 ### Fixed
