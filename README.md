@@ -12,7 +12,8 @@ get an honest map of where they agree, disagree, and are collectively blind —
 instead of one confident answer from one model.**
 
 Alloy is a skill for [Claude Code](https://claude.com/claude-code),
-[Grok](https://grok.com), and any host that can run a local skill. It brings the
+[Codex](https://github.com/openai/codex), [Grok](https://grok.com), Gemini CLI,
+Antigravity (`agy`), and any host that can run a local skill. It brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** of every model you have —
@@ -121,9 +122,12 @@ disagreement. Evidence, sources, and the host-as-judge bias discussion are in
 
 ## Install
 
-Alloy is a skill that lives in `~/.claude/skills/alloy/` (and, after `install.sh`,
-also `~/.grok/skills/alloy/` when Grok is installed) and runs on Python 3
-(standard library only — no `pip install`). macOS / Linux (Windows via WSL).
+Alloy is a skill that lives in `~/.claude/skills/alloy/` — and, after
+`install.sh`, in the skill directory of every other host it finds:
+`~/.codex/skills/` (Codex), `~/.grok/skills/` (Grok), `~/.gemini/skills/`
+(Gemini CLI) and `~/.gemini/config/skills/` (Antigravity / `agy`) — as two links
+per host, `alloy` and the `alloy-execute` alias. It runs on Python 3 (standard
+library only — no `pip install`). macOS / Linux (Windows via WSL).
 
 **1. Install at least one panelist CLI** — Alloy orchestrates CLIs you already
 have; it ships none of its own. Two or more is where it earns its keep:
@@ -160,8 +164,8 @@ git clone https://github.com/tlangridge/Alloy.git ~/.claude/skills/alloy
 
 Pick one of these, not several.
 
-**3. Restart Claude Code or Grok** (or open a new session) so it discovers the
-skill. Then run `doctor` first — it tells you which panelists are installed,
+**3. Restart your host CLI** (Claude Code, Codex, Grok, Gemini CLI, or `agy` —
+or open a new session) so it discovers the skill. Then run `doctor` first — it tells you which panelists are installed,
 which are authenticated, and exactly how to add the missing ones:
 
 ```
@@ -178,6 +182,8 @@ Now, inside Claude Code:
 /alloy ask Should we migrate this service to event sourcing or keep CRUD? Trade-offs.
 /alloy review            # panel reviews your current git diff
 /alloy plan add rate limiting to the public API
+/alloy execute fix the login redirect so expired sessions land on /signin
+/alloy-execute the auth cookie is ignored on safari     # same as `/alloy execute`
 /alloy <a full build task>   # research -> plan -> implement -> test
 ```
 
@@ -201,10 +207,12 @@ Now, inside Claude Code:
 | `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
+| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Light maker≠checker loop.** The host writes an 8-line SPEC from your sentence; a cheap **Maker** of a *different* model family (read-only, in your repo) returns the change as a unified diff; the host applies it and runs your tests; the panel — every ready family *except* the Maker's — checks it with ≤5 labeled finding cards; only `CONFIRMED` high-severity findings go back to the Maker; at most two fix loops. No tickets, no plan theater. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
 In the lifecycle, **the host writes all the code; the panel only ever reads and
-reviews, read-only.** By default panelists read your real working tree (so they
+reviews, read-only.** In `execute`, the Maker is invoked read-only too — it
+*returns a diff*, and the host is still the only thing that writes the tree. By default panelists read your real working tree (so they
 ground answers in your actual code), but their CLI read-only flag stops them
 editing files, running builds, or making any change — best-effort, with a tamper
 tripwire as backstop. The host does all the writing.
@@ -231,7 +239,10 @@ research, planning, debugging triage, security/correctness review — *"if the c
 of being wrong is higher than the cost of asking three models, fuse."* They are a
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
 distinctive voice and just adds latency and cost). That is why Alloy uses the
-panel for the *thinking* and leaves the *writing* to the host.
+panel for the *thinking* and leaves the *writing* to the host — and why
+`execute` does **not** fuse the implementation: one cheap Maker drafts the diff,
+and the panel is used for what it is good at, proving a concrete diff fails a
+concrete spec.
 
 ## Safety model
 
@@ -266,6 +277,12 @@ panel for the *thinking* and leaves the *writing* to the host.
   quoting bugs, no shell injection, no leaking prompts into `ps`).
 - **No auto-approve.** Alloy never passes `--yolo` / `-y` /
   `--dangerously-bypass-approvals-and-sandbox`.
+- **Execute mode does not change who writes.** The Maker is a normal read-only
+  panelist run (`panel --panelists <maker>`) that returns a unified diff; the
+  host applies it with `git apply` (or by hand) under its normal approval flow,
+  and the Checker panel excludes the Maker's model family so the check is
+  independent. Only `CONFIRMED` high-severity findings inside the diff may
+  change the tree; the loop is capped at two rounds.
 - **Secret scanning.** Panelist output (both the saved answer and the raw
   stdout/stderr files) is scanned and redacted for common secret shapes before it
   is saved. This is a best-effort heuristic, not a guarantee.
@@ -358,10 +375,12 @@ template, and the worked `cursor-agent` example (which shows how an adapter with
 
 ## Roadmap
 
-The panel reads your repo but stays **read-only** — it never writes. Out of scope
-until the core is more battle-tested: panelists *writing* code (opt-in, in an
-isolated git worktree), auto-running builds/tests, and a `ALLOY_JUDGE=codex|grok`
-judge-rotation override.
+The panel reads your repo but stays **read-only** — it never writes; in
+`execute` the Maker returns a diff and the host applies it. Possible later
+PRs: an opt-in `alloy make` adapter that lets the Maker edit an isolated git
+worktree directly (explicit flag, never the real tree, no bypass flags),
+auto-running builds/tests, and a `ALLOY_JUDGE=codex|grok` judge-rotation
+override.
 
 ## License
 

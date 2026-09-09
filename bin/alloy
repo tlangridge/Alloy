@@ -53,7 +53,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.11"
+ALLOY_VERSION = "0.2.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum

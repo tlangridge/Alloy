@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alloy"
+  short_description: "Run a local multi-model CLI panel"
+  default_prompt: "Use $alloy to ask a multi-model panel for a second opinion on this decision."

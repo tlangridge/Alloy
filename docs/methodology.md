@@ -92,7 +92,8 @@ which model holds the gavel.
   any diffs are sent to the providers behind each CLI.
 - It is not an answer-merger. It is a disagreement surfacer.
 - It is not a code-writing swarm. The panel reads your repo but is read-only
-  (best-effort, via each CLI's flag); the host does all the writing.
+  (best-effort, via each CLI's flag); the host does all the writing. Execute
+  mode does not change this: the Maker returns a diff, the host applies it.
 
 ## On debate rounds (and the "bully effect")
 
@@ -107,6 +108,31 @@ weighting evidence over assertiveness, keeping the host judge as the arbiter,
 triggering only on a genuine objective disagreement, and running a single round —
 come straight from that literature. That is why debate is off by default and used
 rarely.
+
+## On execute mode (maker ≠ checker)
+
+`/alloy execute` is not Fusion. Fusion is *N answers → judge → synthesis*;
+execute is *one Maker → host gate → other-family Checker → host classification*.
+They share the thing that makes Alloy worth running: the independent check
+comes from a **different model family** than the one that did the work, and the
+host weighs evidence rather than merging opinions. What execute borrows from the
+evidence above:
+
+- **Same-family review is self-agreement** (bias section). So the Checker panel
+  always excludes the Maker's family, and a checker of the host's own family is
+  a voice, not the independent check.
+- **Fusion is for thinking, not raw codegen** (roles section). So execute does
+  *not* fuse the implementation: one cheap Maker writes the diff. The panel is
+  used for what it is good at — proving a concrete diff fails a concrete spec —
+  and is asked for at most five labeled finding cards, not a rewrite.
+- **A confident wrong voice can drag a group** (debate section). So Checker
+  cards are classified by the host against a fixed rule (`CONFIRMED` + high
+  severity + locus inside the diff + fix fits the blast radius), not by how
+  forcefully they are worded, and the loop is capped at two rounds.
+
+The Maker runs read-only through the same dispatcher as every panelist and
+returns a diff; the host applies it. That keeps the "panel reads, host writes"
+boundary intact while still moving the implementation work off the host.
 
 ## Sources
 

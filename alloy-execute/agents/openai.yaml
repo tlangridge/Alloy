@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alloy Execute"
+  short_description: "Maker/checker execute loop across local AI CLIs"
+  default_prompt: "Use $alloy-execute to implement this change with a cheap other-family Maker and a read-only panel check."
