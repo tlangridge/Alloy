@@ -3,6 +3,48 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.1.11] - 2026-08-19
+
+### Fixed
+- **No more macOS Keychain popup from the agy panelist.** agy keeps its OAuth
+  token in the login keychain, and macOS resolves both the keychain search
+  list and the *default* keychain through `$HOME` — so inside alloy's
+  isolated agy HOME only the System keychain was in scope, and agy's token
+  save asked for admin auth (the popup) on every refresh while the keychain
+  copy of the token went permanently stale. The isolated HOME now gets a
+  **generated** `com.apple.security.plist` pointing (by absolute path) at the
+  user's real login keychain, so keyring reads and token-refresh saves work
+  exactly as a normal `agy` run would — silently. Deliberately a generated
+  file, never a symlink into `~/Library`: state/run dirs get zipped up and
+  shared for debugging, and archivers dereference symlinks. Skipped entirely
+  under API-key auth (agy never touches the keyring then) or when no login
+  keychain exists. Auth state was always deliberately shared (same rationale
+  as the existing `~/.gemini` links).
+- **Keychain-only agy logins now count as authenticated.** The token *file*
+  alloy checked for is a fallback agy writes only when a keyring save fails,
+  so a healthy fresh install could look unauthenticated to `doctor`.
+  `is_authed` now also does a metadata-only
+  `security find-generic-password` existence check (service `gemini`,
+  account `antigravity`) — it never reads the secret, so it can never
+  trigger a keychain dialog itself.
+
+- **Stale auth symlinks self-heal.** The `~/.gemini` auth links into the
+  isolated agy HOME are now repaired when broken or pointing at an old path
+  (home moved, state dir restored on another machine) instead of silently
+  shadowing the real files forever.
+- **Concurrent runs can no longer tear shared state files.** `write_atomic`
+  uses a unique temp file per writer; two alloy processes sharing the agy
+  HOME (panel + doctor, or two panels) previously raced on the same
+  `.tmp` path and could corrupt `settings.json`.
+
+### Tests
+- macOS: generated-keychain-config unit tests (absolute paths +
+  `DefaultKeychain` present, API-key and no-login-keychain skips, legacy
+  dev-build symlink removal, and the no-symlinks-into-`~/Library`
+  regression); keychain-auth unit tests (item present/absent, `security`
+  timeout and OSError, Linux never probes, file-auth short-circuit) — all
+  hermetic with fixture HOMEs and a faked subprocess, on every platform.
+
 ## [0.1.10] - 2026-08-12
 
 ### Changed

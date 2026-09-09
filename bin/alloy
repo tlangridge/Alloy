@@ -53,7 +53,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.1.10"
+ALLOY_VERSION = "0.1.11"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -95,11 +95,36 @@ def _chmod(path: str, mode: int) -> None:
 
 
 def write_atomic(path: str, data: str) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(data)
-    _chmod(tmp, 0o600)  # run artifacts may hold prompt/diff text; replace preserves mode
-    os.replace(tmp, path)
+    # mkstemp, not a fixed path+".tmp": two alloy processes sharing a state dir
+    # (panel + doctor, or two concurrent panels) would otherwise open the SAME
+    # tmp file and the loser writes through the renamed inode -- a torn file.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
+                               prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        _chmod(tmp, 0o600)  # run artifacts may hold prompt/diff text; replace preserves mode
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _relink(src: str, dst: str) -> None:
+    """Idempotently point symlink dst at src, repairing a stale or broken link
+    (e.g. the user's home moved, or the state dir was restored on another
+    machine). Failures are swallowed -- callers treat the link as optional."""
+    try:
+        if os.path.islink(dst) and os.readlink(dst) != src:
+            os.unlink(dst)
+        if not os.path.lexists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(src, dst)
+    except OSError:
+        pass
 
 
 def _is_within(path: str, base: str) -> bool:
@@ -436,8 +461,12 @@ class AntigravityAdapter(Adapter):
     #      allowNonWorkspaceAccess:false, so reads are scoped to the repo (and the
     #      prompt file) rather than to all of $HOME.
     # The auth files are symlinked (never copied) into the isolated HOME, so no
-    # token is duplicated onto disk. Never pass --dangerously-skip-permissions:
-    # it disables layer 1 outright.
+    # token is duplicated onto disk. On macOS a keychain search-list plist is
+    # GENERATED in the isolated HOME too (see _keychain_plist) -- agy stores
+    # its OAuth token in the login keychain, and without that config its token
+    # save falls through to the System keychain and raises an admin-auth
+    # Keychain dialog on every refresh. Never pass
+    # --dangerously-skip-permissions: it disables layer 1 outright.
     #
     # On an older agy (< 1.1.0) none of this holds, so the adapter reports
     # read_only=False + experimental=True and the engine refuses it unless the
@@ -507,8 +536,32 @@ class AntigravityAdapter(Adapter):
         for name in ("oauth_creds.json", "google_accounts.json"):
             if os.path.isfile(os.path.join(gdir, name)):
                 return True
-        return os.path.isfile(os.path.join(gdir, "antigravity-cli",
-                                           "antigravity-oauth-token"))
+        if os.path.isfile(os.path.join(gdir, "antigravity-cli",
+                                       "antigravity-oauth-token")):
+            return True
+        # macOS: a fresh agy login stores the token in the login keychain
+        # (service "gemini", account "antigravity"); the token *file* above is
+        # a fallback agy writes only when a keyring save fails, so a healthy
+        # fresh install may have no auth file at all. Metadata-only existence
+        # check: no -w, so the secret is never read and no ACL dialog can
+        # appear. (Existence can't prove the secret is *readable*; a stale
+        # item costs one failed dispatch reported honestly as `auth`.) Cached
+        # per instance -- a wedged securityd would otherwise cost 5s per call.
+        if sys.platform == "darwin":
+            cached = getattr(self, "_kc_authed", None)
+            if cached is not None:
+                return cached
+            try:
+                ok = subprocess.run(
+                    ["/usr/bin/security", "find-generic-password",
+                     "-s", "gemini", "-a", "antigravity"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            self._kc_authed = ok
+            return ok
+        return False
 
     def model(self) -> "str | None":
         return setting("ALLOY_ANTIGRAVITY_MODEL", self.default_model)
@@ -521,6 +574,58 @@ class AntigravityAdapter(Adapter):
         "google_accounts.json",
         os.path.join("antigravity-cli", "antigravity-oauth-token"),
     )
+
+    # macOS only: agy also keeps its OAuth token in the login keychain (it
+    # shells out to /usr/bin/security). Both the keychain search list AND the
+    # default keychain resolve through $HOME/Library/Preferences/
+    # com.apple.security.plist, so inside the isolated HOME only the *System*
+    # keychain is in scope -- and agy's token save then needs admin auth,
+    # raising a Keychain dialog on every token refresh (while the keychain
+    # copy of the token goes permanently stale). Fix: GENERATE that plist
+    # inside the isolated HOME with ABSOLUTE DbName paths to the user's real
+    # login keychain. All verified live: the real plist's tilde-relative
+    # DbNames re-break under an isolated HOME, and without the DefaultKeychain
+    # key writes still raise the dialog ("Keychain Not Found") even when the
+    # search list resolves. A generated file, deliberately NOT a symlink into
+    # ~/Library: users zip up and share the alloy state dir (and, under
+    # ALLOY_ANTIGRAVITY_HOME=run, the run dir itself) for debugging, and
+    # `zip -r`/`cp -RL`/backup agents dereference symlinks -- a Keychains link
+    # would copy the whole credential store into the archive. With a copy, agy
+    # can also only ever corrupt its own sandbox config, never the user's
+    # global one. Auth state is deliberately shared, not isolated -- same
+    # rationale as _AUTH_LINKS above. Regenerated on every run, so it
+    # self-heals if the user's home moves.
+    _KC_GUID = "{87191ca3-0fc9-11d4-849a-000502b52122}"  # Apple CSP/DL module (fixed)
+
+    def _keychain_plist(self) -> "str | None":
+        """com.apple.security.plist XML for the isolated HOME, or None when
+        agy will never touch the keyring (API-key auth) or there is no login
+        keychain to point at (headless account)."""
+        if (setting("ANTIGRAVITY_API_KEY") or setting("GEMINI_API_KEY")
+                or setting("GOOGLE_API_KEY")):
+            return None  # least privilege: with a key, agy skips OAuth entirely
+        db = os.path.join(os.path.expanduser("~"), "Library", "Keychains",
+                          "login.keychain")
+        if not os.path.isfile(db + "-db"):  # the modern on-disk suffix
+            return None
+        esc = db.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        entry = ("\t\t<dict>\n"
+                 "\t\t\t<key>DbName</key>\n"
+                 "\t\t\t<string>%s</string>\n"
+                 "\t\t\t<key>GUID</key>\n"
+                 "\t\t\t<string>%s</string>\n"
+                 "\t\t\t<key>SubserviceType</key>\n"
+                 "\t\t\t<integer>6</integer>\n"
+                 "\t\t</dict>\n") % (esc, self._KC_GUID)
+        return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+                ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                '<plist version="1.0">\n<dict>\n'
+                "\t<key>DLDBSearchList</key>\n\t<array>\n" + entry +
+                "\t</array>\n"
+                "\t<key>DefaultKeychain</key>\n\t<array>\n" + entry +
+                "\t</array>\n"
+                "</dict>\n</plist>\n")
 
     def _settings(self) -> dict:
         deny = list(self.WRITE_TOOLS)
@@ -562,11 +667,26 @@ class AntigravityAdapter(Adapter):
         real = os.path.join(os.path.expanduser("~"), ".gemini")
         for rel in self._AUTH_LINKS:
             src, dst = os.path.join(real, rel), os.path.join(home, ".gemini", rel)
-            if os.path.exists(src) and not os.path.lexists(dst):
+            if os.path.exists(src):
+                _relink(src, dst)  # API-key auth still works; is_authed gated this
+        if sys.platform == "darwin":
+            # 0.1.11 dev builds briefly symlinked ~/Library/Keychains here;
+            # remove any such link before the generated-plist config below.
+            legacy = os.path.join(home, "Library", "Keychains")
+            if os.path.islink(legacy):
                 try:
-                    os.symlink(src, dst)
+                    os.unlink(legacy)
                 except OSError:
-                    pass  # API-key auth still works; is_authed already gated this
+                    pass
+            plist = self._keychain_plist()
+            if plist is not None:
+                prefs = os.path.join(home, "Library", "Preferences")
+                try:
+                    os.makedirs(prefs, exist_ok=True)
+                    write_atomic(os.path.join(
+                        prefs, "com.apple.security.plist"), plist)
+                except OSError:
+                    pass  # agy falls back to file token storage
         write_atomic(os.path.join(cli, "settings.json"),
                      json.dumps(self._settings(), indent=2))
         return home
