@@ -64,6 +64,11 @@ def main():
          "the finding-card label taxonomy"),
         ("stop after two fix" in low, "the <=2 fix->review loop cap"),
         ("--panelists <maker>" in body, "the Maker dispatched via `--panelists`"),
+        ("--mode make --panelists <maker>" in body,
+         "the Maker dispatched with `--mode make` (its own timeout)"),
+        ('"$alloy_bin" status' in low, "the `alloy status` from-disk progress check"),
+        ("lost work, not a partial panel" in low,
+         "the 'a Maker timeout is lost work' guidance"),
     ]
     for ok, label in execute_checks:
         if not ok:

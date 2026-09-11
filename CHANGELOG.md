@@ -3,6 +3,63 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.2.1] - 2026-09-11
+
+Field report from the first `/alloy-execute` runs: a healthy Maker was killed at
+the consult panel's 300 s ceiling while still reading the repo, the guidance
+then pointed at the wrong fix (lower the effort), and a host that never got the
+dispatcher's completion signal had no way to find out what had happened.
+
+### Added
+- **`panel --mode make` with its own default timeout (1800 s).** A Maker is one
+  model that must explore an unfamiliar repo before it can emit a diff — a
+  different workload from N consult panelists answering in parallel — and a
+  timeout there is lost work, not a partial panel. `ALLOY_MAKER_TIMEOUT`
+  overrides the default; `--timeout` overrides everything. The execute runbook
+  now dispatches the Maker with `--mode make`.
+- **Resumable panelists.** grok and claude now get a caller-chosen session id
+  (`--session-id`, recorded as `session_id` in the manifest), so the CLI's
+  saved session is known *before* dispatch. When alloy has to kill a panelist
+  (timeout / stall) the manifest entry carries a ready-to-run `resume_hint`
+  (read-only flags kept, `cd` to the cwd the session is keyed by) and the
+  timeout log line prints it — the minutes of exploration are no longer thrown
+  away. codex gets a "most recent session" hint (it assigns its own ids); agy
+  none. Verified live: both CLIs save the session under the given id.
+- **`alloy status [run-dir]`** — a run's progress read purely from disk: per-
+  panelist state (`running` / `ok` / `timeout` / `abandoned` …), bytes produced,
+  last-output age, and any resume hint. Defaults to the newest run; accepts a
+  run dir or a manifest path; `--json` for machines. Exit `0` when the manifest
+  exists, `4` while still running (or abandoned — it tells you which, by
+  checking the dispatcher's pid recorded in the new `run.json`), `2` if no run.
+  A host that never got the completion signal can now answer "is it done?"
+  with one cheap call instead of trusting the harness.
+- **The run dir is announced at dispatch start** (`run: <dir>` on stderr), the
+  panel line shows the deadline (`timeout Ns each, mode X`), and `estimate`
+  reports `timeout_s` / `maker_timeout_s` next to the call count, so the
+  ceiling is visible before the burn, not after.
+- Per-panelist `status.json` is now written at dispatch start (`running`, pid,
+  `started_utc`) as well as at the end.
+
+### Changed
+- **SKILL.md timeout remedy reordered.** Read `stalled` and `output_bytes`
+  first: still producing → raise `--timeout` or resume; genuinely stuck → lower
+  the effort. The old text led with "make the model dumber".
+- **SKILL.md long-dispatch guidance.** The dispatch blocks until done; if the
+  host's tool-call timeout is shorter, run it in the background, wait for the
+  notification, and confirm with `alloy status` — never delegate the wait to
+  subagents, never poll in a loop. Execute mode gets its own "a Maker timeout
+  is lost work" paragraph with the resume path, and the cost preflight now
+  carries the deadlines.
+- Adapter comments note that grok, codex exec, and claude -p have no headless
+  deadline flag to mirror alloy's timeout (agy's `--print-timeout` remains the
+  only one).
+
+### Tests
+- make-mode default / env / flag precedence; run dir announced and `run.json`
+  written; `estimate` deadlines; grok+claude `--session-id` is a real UUID and
+  recorded; a timeout records a read-only `resume_hint`; `status` on a finished
+  run, newest-run default, an abandoned run (exit 4), and no runs (exit 2).
+
 ## [0.2.0] - 2026-09-09
 
 ### Added

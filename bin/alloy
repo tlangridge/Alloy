@@ -51,12 +51,18 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.2.0"
+ALLOY_VERSION = "0.2.1"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
+# A Maker (`--mode make`, the execute mode's implementer) is a different workload
+# from a consult panelist: ONE model that has to explore an unfamiliar repo
+# before it can emit a diff, and a timeout there is lost work, not a partial
+# panel. It gets its own, much larger default (ALLOY_MAKER_TIMEOUT / --timeout).
+DEFAULT_MAKER_TIMEOUT_S = 1800
 DEFAULT_HEARTBEAT_S = 30           # how often a long-running panelist logs progress
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_MAX_PROMPT_BYTES = 4_000_000  # cap prompt ingestion so a huge file/stdin can't OOM
@@ -352,6 +358,13 @@ class Adapter:
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         raise NotImplementedError
 
+    def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
+        # A ready-to-run command that continues THIS panelist's CLI session with
+        # its full context after alloy killed it (timeout/stall). Only adapters
+        # whose CLI accepts a caller-chosen session id can offer an exact one.
+        # None = the CLI keeps no resumable session alloy can name.
+        return None
+
     def capabilities(self) -> dict:
         return {
             "read_only": self.read_only,
@@ -407,6 +420,14 @@ class CodexAdapter(Adapter):
         if m:
             args += ["-m", m]
         return args
+
+    def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
+        # codex assigns its own session id (no way to choose one up front), so
+        # the best exact-ish handle is "the most recent codex session".
+        # (codex exec has no headless deadline flag to mirror alloy's timeout.)
+        return ("codex exec resume --last -s read-only --skip-git-repo-check "
+                "'<continue prompt>'   # --last = codex's most recent session; "
+                "confirm it is this run's")
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         lm = strip_ansi(last_message).strip()
@@ -854,6 +875,13 @@ class GrokAdapter(Adapter):
         # Never use --always-approve or --permission-mode bypassPermissions.
         args = ["--permission-mode", "plan", "--output-format", "plain",
                 "--prompt-file", prompt_path]
+        # Name the session up front so a killed (timed-out) Maker can be
+        # resumed with its full context instead of restarted from zero. (grok
+        # has no headless deadline flag to mirror alloy's timeout; --max-turns
+        # is a different knob.)
+        sid = (ctx or {}).get("session_id")
+        if sid:
+            args += ["--session-id", sid]
         if not web_enabled():
             args += ["--disable-web-search"]
         effort = setting("ALLOY_GROK_EFFORT")
@@ -863,6 +891,16 @@ class GrokAdapter(Adapter):
         if m:
             args += ["-m", m]
         return args
+
+    def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
+        sid = (ctx or {}).get("session_id")
+        if not sid:
+            return None
+        # grok keys saved sessions by cwd, so the resume must run from the
+        # same directory the panelist ran in (the repo, or the run's cwd dir).
+        return (f"cd '{(ctx or {}).get('cwd') or '.'}' && grok --resume {sid} "
+                "--permission-mode plan --output-format plain "
+                "--prompt-file <continue prompt file>")
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         return strip_ansi(stdout).strip()
@@ -897,10 +935,23 @@ class ClaudeAdapter(Adapter):
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
         args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
+        # Name the session up front (resumable after a timeout kill; see grok).
+        # claude -p has no headless deadline flag to mirror alloy's timeout.
+        sid = (ctx or {}).get("session_id")
+        if sid:
+            args += ["--session-id", sid]
         m = self.model()
         if m:
             args += ["--model", m]
         return args
+
+    def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
+        sid = (ctx or {}).get("session_id")
+        if not sid:
+            return None
+        # claude keys saved sessions by project dir: resume from the same cwd.
+        return (f"cd '{(ctx or {}).get('cwd') or '.'}' && claude -p --resume {sid} "
+                "--permission-mode plan --output-format text < <continue prompt file>")
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         return strip_ansi(stdout).strip()
@@ -1116,7 +1167,10 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     # Everything an adapter may need beyond the prompt: the repo it may read, its
     # own scratch dir (for adapter-private sidecar files), and the deadline the
     # engine will enforce, so a CLI with its own internal timeout can match it.
-    ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s}
+    ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s,
+           # A caller-chosen session id, so the CLI's saved session is known
+           # BEFORE dispatch and can be resumed if alloy has to kill it.
+           "session_id": str(uuid.uuid4())}
     argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
 
     # quiet down ANSI / interactive behaviour in the child
@@ -1154,6 +1208,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "truncated": False,
         "secrets_redacted": 0,
         "error": None,
+        "session_id": ctx["session_id"],
     }
     if cwd_note:
         status["cwd_note"] = cwd_note
@@ -1172,6 +1227,12 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             pgid = os.getpgid(proc.pid)
             with _LIVE_LOCK:
                 _LIVE_PGIDS.add(pgid)
+            # Record "running" + the pid NOW, so `alloy status` can report a run
+            # in flight from disk (no wake-up from the dispatcher required).
+            status["status"] = "running"
+            status["pid"] = proc.pid
+            status["started_utc"] = now_utc_iso()
+            write_atomic(status_path, json.dumps(status, indent=2))
             try:
                 hb = max(2, setting_int("ALLOY_HEARTBEAT", DEFAULT_HEARTBEAT_S))
                 stall_s = max(0, setting_int("ALLOY_STALL_TIMEOUT", 0))  # 0 = off
@@ -1290,13 +1351,25 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     else:
         status["status"] = "ok"
 
+    # A killed panelist's CLI session usually survives on disk: hand the host a
+    # ready-to-run resume command so the work already done is not thrown away.
+    if status["timed_out"] or status["stalled"]:
+        hint = adapter.resume_hint(ctx)
+        if hint:
+            status["resume_hint"] = hint
     write_atomic(status_path, json.dumps(status, indent=2))
     dur = status["duration_ms"] / 1000.0
     if status["timed_out"]:
         log(f"{adapter.name}: timeout after {dur:.1f}s "
             f"(killed; {status['output_bytes']} bytes produced)")
+        if status.get("resume_hint"):
+            log(f"{adapter.name}: its CLI session survived the kill -- continue it "
+                f"with full context (read-only flags kept) instead of restarting "
+                f"from zero: {status['resume_hint']}")
     elif status["stalled"]:
         log(f"{adapter.name}: stalled after {dur:.1f}s (no new output; killed)")
+        if status.get("resume_hint"):
+            log(f"{adapter.name}: resume with: {status['resume_hint']}")
     else:
         log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
     return status
@@ -1383,8 +1456,12 @@ def cmd_panel(args: argparse.Namespace) -> int:
 
     # `is not None` so an explicit --timeout 0 is caught by validation below,
     # not silently swallowed by `or` and replaced with the default.
-    timeout_s = (args.timeout if args.timeout is not None
-                 else setting_int("ALLOY_TIMEOUT", DEFAULT_TIMEOUT_S))
+    if args.timeout is not None:
+        timeout_s = args.timeout
+    elif args.mode == "make":
+        timeout_s = setting_int("ALLOY_MAKER_TIMEOUT", DEFAULT_MAKER_TIMEOUT_S)
+    else:
+        timeout_s = setting_int("ALLOY_TIMEOUT", DEFAULT_TIMEOUT_S)
     max_chars = (args.max_chars if args.max_chars is not None
                  else setting_int("ALLOY_MAX_CHARS", DEFAULT_MAX_CHARS))
     if timeout_s < 1:
@@ -1457,6 +1534,16 @@ def cmd_panel(args: argparse.Namespace) -> int:
     _chmod(run_dir, 0o700)
     prompt_path = os.path.join(run_dir, "prompt.txt")
     write_atomic(prompt_path, prompt)
+    # Announce the run dir FIRST, so a host that loses this process's completion
+    # (tool timeout, missed background notification) can still find the run and
+    # ask `alloy status <run dir>` -- the manifest path alone only prints at the end.
+    log(f"run: {run_dir}")
+    write_atomic(os.path.join(run_dir, "run.json"), json.dumps({
+        "dispatcher_pid": os.getpid(),
+        "started_utc": now_utc_iso(),
+        "mode": args.mode,
+        "timeout_s": timeout_s,
+    }, indent=2))
 
     manifest = {
         "alloy_version": ALLOY_VERSION,
@@ -1487,7 +1574,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
         log("no panelists available; wrote host-only-fallback manifest")
         return 3
 
-    log(f"panel: {', '.join(a.name for a in chosen)} ({len(chosen)} model call(s))")
+    log(f"panel: {', '.join(a.name for a in chosen)} ({len(chosen)} model call(s), "
+        f"timeout {timeout_s}s each, mode {args.mode})")
     results: "dict[str, dict]" = {}
     threads: "list[threading.Thread]" = []
     retry_set = _retry_statuses()
@@ -1632,11 +1720,148 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         "ready_panelists": [r["name"] for r in ready],
         "rounds": rounds,
         "model_calls": calls,
+        "timeout_s": setting_int("ALLOY_TIMEOUT", DEFAULT_TIMEOUT_S),
+        "maker_timeout_s": setting_int("ALLOY_MAKER_TIMEOUT", DEFAULT_MAKER_TIMEOUT_S),
         "note": "Each call runs on your already-authenticated CLI and bills to "
                 "your provider account. Alloy ships no API keys and sends no "
                 "telemetry.",
     }, indent=2))
     return 0
+
+
+def _newest_run_dir(run_root: str) -> "str | None":
+    try:
+        names = os.listdir(run_root)
+    except OSError:
+        return None
+    dirs = [os.path.join(run_root, n) for n in names
+            if not n.startswith(".") and os.path.isdir(os.path.join(run_root, n))]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda d: os.stat(d).st_mtime)
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def run_status(run_dir: str) -> dict:
+    """A run's progress, read purely from disk: no dispatcher process needed.
+    Lets a host that never got the completion signal answer "is it done?"."""
+    run_dir = os.path.abspath(os.path.expanduser(run_dir))
+    if os.path.isfile(run_dir):          # a manifest.json path was given
+        run_dir = os.path.dirname(run_dir)
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    finished = os.path.isfile(manifest_path)
+    run_meta = {}
+    try:
+        with open(os.path.join(run_dir, "run.json"), encoding="utf-8") as f:
+            run_meta = json.load(f)
+    except (OSError, ValueError):
+        pass
+    dispatcher_alive = (_pid_alive(run_meta.get("dispatcher_pid"))
+                        if run_meta.get("dispatcher_pid") else None)
+    now = time.time()
+    rows = []
+    try:
+        names = sorted(os.listdir(run_dir))
+    except OSError:
+        names = []
+    for n in names:
+        pdir = os.path.join(run_dir, n)
+        if n.startswith((".", "_")) or not os.path.isdir(pdir):
+            continue
+        st = {}
+        sp = os.path.join(pdir, "status.json")
+        try:
+            with open(sp, encoding="utf-8") as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            pass
+        out = os.path.join(pdir, "stdout.txt")
+        err = os.path.join(pdir, "stderr.txt")
+        mtimes = [os.stat(x).st_mtime for x in (out, err, sp) if os.path.exists(x)]
+        state = st.get("status") or "starting"
+        note = ""
+        if state == "running":
+            if not finished and dispatcher_alive is False:
+                state = "abandoned"
+                note = ("the dispatcher is gone; no manifest will appear "
+                        "(re-dispatch, or resume the CLI session)")
+            elif _pid_alive(st.get("pid")):
+                note = "CLI process alive"
+            else:
+                state = "abandoned"
+                note = "CLI process gone before it finished"
+        dur_ms = st.get("duration_ms") or 0
+        rows.append({
+            "name": n,
+            "status": state,
+            "note": note,
+            "duration_s": (dur_ms / 1000.0) if dur_ms else None,
+            "output_bytes": _safe_size(out) + _safe_size(err),
+            "last_output_age_s": int(now - max(mtimes)) if mtimes else None,
+            "pid": st.get("pid"),
+            "session_id": st.get("session_id"),
+            "resume_hint": st.get("resume_hint"),
+        })
+    return {
+        "run_dir": run_dir,
+        "finished": finished,
+        "manifest_path": manifest_path if finished else None,
+        "mode": run_meta.get("mode"),
+        "timeout_s": run_meta.get("timeout_s"),
+        "dispatcher_alive": dispatcher_alive,
+        "panelists": rows,
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    run_dir = args.run
+    if not run_dir:
+        root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
+        root = os.path.abspath(os.path.expanduser(root))
+        run_dir = _newest_run_dir(root)
+        if not run_dir:
+            log(f"no runs under {root}")
+            return 2
+    if not os.path.exists(run_dir):
+        log(f"no such run: {run_dir}")
+        return 2
+    info = run_status(run_dir)
+    if args.json:
+        print(json.dumps(info, indent=2))
+    else:
+        print(f"run: {info['run_dir']}")
+        if info.get("mode"):
+            print(f"mode: {info['mode']}  timeout: {info['timeout_s']}s each")
+        if info["finished"]:
+            print(f"manifest: present -> {info['manifest_path']}")
+        elif info["dispatcher_alive"] is False:
+            print("manifest: absent -- and the dispatcher process is gone, so it never "
+                  "will appear (re-dispatch, or resume a session below)")
+        else:
+            print("manifest: absent (still running; it is written when the last "
+                  "panelist finishes)")
+        for r in info["panelists"]:
+            dur = f"{r['duration_s']:.1f}s" if r["duration_s"] is not None else "-"
+            age = (f"last output {r['last_output_age_s']}s ago"
+                   if r["last_output_age_s"] is not None else "no output yet")
+            line = (f"  {r['name']:<14} {r['status']:<10} {dur:>8} "
+                    f"{r['output_bytes']:>9}B  {age}")
+            if r["note"]:
+                line += f"  ({r['note']})"
+            print(line)
+            if r.get("resume_hint"):
+                print(f"      resume: {r['resume_hint']}")
+    # 0 = finished (manifest present); 4 = not finished; 2 = no run found.
+    return 0 if info["finished"] else 4
 
 
 def cmd_update_check(args: argparse.Namespace) -> int:
@@ -1714,13 +1939,18 @@ def build_parser() -> argparse.ArgumentParser:
     pa = sub.add_parser("panel", help="dispatch a prompt to all ready panelists")
     pa.add_argument("--prompt-file", help="file with the prompt (default: stdin)")
     pa.add_argument("--mode", default="consult",
-                    choices=["consult", "review", "debate"],
-                    help="framing hint recorded in the manifest")
+                    choices=["consult", "review", "debate", "make"],
+                    help="framing hint recorded in the manifest. `make` = the "
+                         "execute mode's Maker (one panelist that explores the repo "
+                         "and returns a diff); it gets its own larger default "
+                         f"timeout ({DEFAULT_MAKER_TIMEOUT_S}s, ALLOY_MAKER_TIMEOUT)")
     pa.add_argument("--panelists", help="comma list overriding ALLOY_PANELISTS")
     pa.add_argument("--attach", help="comma list of files to fold into the prompt "
                     "as read-only reference context (also ALLOY_ATTACH)")
     pa.add_argument("--run-dir", help="root dir for run output")
-    pa.add_argument("--timeout", type=int, help="per-panelist timeout (seconds)")
+    pa.add_argument("--timeout", type=int,
+                    help=f"per-panelist timeout in seconds (default {DEFAULT_TIMEOUT_S}, "
+                         f"or {DEFAULT_MAKER_TIMEOUT_S} for --mode make)")
     pa.add_argument("--max-chars", type=int, help="cap per-panelist output chars")
     pa.add_argument("--repo", help="repository the panel may READ (default: the git "
                     "root of the current dir; also ALLOY_REPO). Read-only adapters "
@@ -1736,6 +1966,14 @@ def build_parser() -> argparse.ArgumentParser:
     es = sub.add_parser("estimate", help="print the model-call count for a run")
     es.add_argument("--rounds", type=int, default=1)
     es.set_defaults(func=cmd_estimate)
+
+    st = sub.add_parser("status", help="progress of a run, read from disk -- works "
+                        "even if the dispatcher's completion was missed (default: newest run)")
+    st.add_argument("run", nargs="?",
+                    help="run dir or manifest.json path (default: the newest run under the run root)")
+    st.add_argument("--run-dir", help="run root to search for the newest run (also ALLOY_RUN_ROOT)")
+    st.add_argument("--json", action="store_true")
+    st.set_defaults(func=cmd_status)
 
     uc = sub.add_parser("update-check",
                         help="check (throttled, git-based) if the skill repo has updates")
