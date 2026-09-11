@@ -3,6 +3,18 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.2.2] - 2026-09-11
+
+### Changed
+- **SKILL.md: never detach a dispatch yourself.** The "Makers finished without
+  waking the host" report turned out to be self-inflicted: the host had run
+  `alloy panel` under `nohup … & disown` inside foreground tool calls, so the
+  harness never held a handle on the process and nothing could report its
+  completion. The long-dispatch guidance now forbids that explicitly — use the
+  host's own background facility, never `nohup` / `disown` / `setsid` / a bare
+  trailing `&` — and points at `alloy status` (0.2.1) as the recovery path
+  when it has already happened. No dispatcher changes.
+
 ## [0.2.1] - 2026-09-11
 
 Field report from the first `/alloy-execute` runs: a healthy Maker was killed at
