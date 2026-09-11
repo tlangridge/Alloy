@@ -289,7 +289,12 @@ concrete spec.
 - **Run artifacts live outside your repo.** Prompts, redacted output, and the
   manifest are written under `$XDG_STATE_HOME/alloy/runs` by default (override
   with `ALLOY_RUN_ROOT`), and the run root gets a `.gitignore` so artifacts are
-  never committed even if you point it inside a repo.
+  never committed even if you point it inside a repo. The run dir is announced
+  on stderr the moment a run starts, and `alloy status [run-dir]` reads a run's
+  progress back from disk (per-panelist state, bytes, last-output age, and — for
+  a killed grok/claude panelist — a ready-to-run resume command), so a host
+  that missed the dispatcher's completion signal can still find out what
+  happened instead of guessing.
 - **No project-level config execution.** Config is read from `~/.config/alloy/`
   as `KEY=value` (never `source`d), so a hostile repo cannot run code.
 - **Override binaries inherit your environment.** `ALLOY_BIN_<NAME>` runs
@@ -320,6 +325,7 @@ variables (env wins over the file):
 | `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, and antigravity on agy >= 1.1). Set it to pin a narrower / cheaper panel. |
 | `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
+| `ALLOY_MAKER_TIMEOUT` | `1800` | timeout for `panel --mode make` (the execute mode's Maker: one model that reads the repo before it writes a diff, where a timeout is lost work rather than a partial panel). `--timeout` overrides both |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |

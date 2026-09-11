@@ -120,6 +120,112 @@ class AlloyTests(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertIn(by_name(m, "codex")["status"], ("ok", "empty"))
 
+    # -- 0.2.1: mode-aware timeouts, run announce, session ids, status ------- #
+
+    def test_consult_default_timeout_unchanged(self):
+        _proc, m = panel(self.tmp)
+        self.assertEqual(m["timeout_s"], 300)
+
+    def test_make_mode_gets_its_own_larger_default_timeout(self):
+        # A Maker explores the repo before it can emit a diff; the consult
+        # default (300s) was cutting healthy Makers off mid-read.
+        _proc, m = panel(self.tmp, extra_args=["--mode", "make"])
+        self.assertEqual(m["mode"], "make")
+        self.assertEqual(m["timeout_s"], 1800)
+
+    def test_make_mode_timeout_env_and_flag_precedence(self):
+        _proc, m = panel(self.tmp, extra_args=["--mode", "make"],
+                         env_extra={"ALLOY_MAKER_TIMEOUT": "77", "ALLOY_TIMEOUT": "5"})
+        self.assertEqual(m["timeout_s"], 77)      # maker env beats the consult env
+        _proc, m = panel(self.tmp, extra_args=["--mode", "make", "--timeout", "9"],
+                         env_extra={"ALLOY_MAKER_TIMEOUT": "77"})
+        self.assertEqual(m["timeout_s"], 9)       # explicit flag beats everything
+
+    def test_run_dir_announced_at_dispatch_start(self):
+        # So a host that misses the completion can still find the run.
+        proc, m = panel(self.tmp)
+        self.assertIn("run: " + m["run_dir"], proc.stderr)
+        self.assertIn("timeout 300s each", proc.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(m["run_dir"], "run.json")))
+
+    def test_estimate_reports_deadlines(self):
+        proc = run_alloy(["estimate", "--rounds", "2"])
+        est = json.loads(proc.stdout)
+        self.assertEqual(est["timeout_s"], 300)
+        self.assertEqual(est["maker_timeout_s"], 1800)
+
+    def test_grok_and_claude_get_a_named_session(self):
+        # A caller-chosen UUID is passed so the saved CLI session is known before
+        # dispatch and can be resumed if alloy has to kill it.
+        import uuid as _uuid
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok,claude"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        for name in ("grok", "claude"):
+            p = by_name(m, name)
+            cmd = p["command"]
+            self.assertIn("--session-id", cmd)
+            sid = cmd[cmd.index("--session-id") + 1]
+            self.assertEqual(str(_uuid.UUID(sid)), sid)   # a real UUID
+            self.assertEqual(p["session_id"], sid)
+            self.assertNotIn("resume_hint", p)            # only offered on a kill
+
+    def test_timeout_records_resume_hint_with_read_only_flags(self):
+        _proc, m = panel(
+            self.tmp,
+            env_extra={"MOCK_BEHAVIOR": "hang"},
+            extra_args=["--timeout", "2", "--panelists", "claude"],
+        )
+        p = by_name(m, "claude")
+        self.assertEqual(p["status"], "timeout")
+        self.assertIn(p["session_id"], p["resume_hint"])
+        self.assertIn("--resume", p["resume_hint"])
+        self.assertIn("--permission-mode plan", p["resume_hint"])   # still read-only
+        self.assertIn("resume", _proc.stderr)
+
+    def test_status_reads_a_finished_run_from_disk(self):
+        _proc, m = panel(self.tmp)
+        proc = run_alloy(["status", m["run_dir"]])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("manifest: present", proc.stdout)
+        self.assertIn("codex", proc.stdout)
+        # a manifest path works too, and --json is machine-readable
+        proc = run_alloy(["status", "--json", os.path.join(m["run_dir"], "manifest.json")])
+        info = json.loads(proc.stdout)
+        self.assertTrue(info["finished"])
+        self.assertEqual({r["name"] for r in info["panelists"]}, {"codex", "claude"})
+        self.assertEqual({r["status"] for r in info["panelists"]}, {"ok"})
+
+    def test_status_defaults_to_newest_run_under_root(self):
+        _proc, m1 = panel(self.tmp)
+        time.sleep(0.05)
+        _proc, m2 = panel(self.tmp)
+        proc = run_alloy(["status", "--run-dir", os.path.join(self.tmp, "runs")])
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(m2["run_dir"], proc.stdout)
+        self.assertNotIn(m1["run_dir"], proc.stdout)
+
+    def test_status_reports_an_abandoned_run(self):
+        # Dispatcher killed before finishing: no manifest, a panelist left
+        # "running" with a dead pid -> exit 4 and say so, don't hang or lie.
+        rd = os.path.join(self.tmp, "runs", "20260101T000000Z-abc123")
+        os.makedirs(os.path.join(rd, "grok"))
+        with open(os.path.join(rd, "run.json"), "w") as f:
+            json.dump({"dispatcher_pid": 2**22 - 1, "mode": "make", "timeout_s": 1800}, f)
+        with open(os.path.join(rd, "grok", "status.json"), "w") as f:
+            json.dump({"status": "running", "pid": 2**22 - 1, "session_id": "abc",
+                       "name": "grok"}, f)
+        with open(os.path.join(rd, "grok", "stdout.txt"), "w") as f:
+            f.write("x" * 358)
+        proc = run_alloy(["status", rd])
+        self.assertEqual(proc.returncode, 4, proc.stdout + proc.stderr)
+        self.assertIn("manifest: absent", proc.stdout)
+        self.assertIn("abandoned", proc.stdout)
+        self.assertIn("mode: make", proc.stdout)
+
+    def test_status_no_runs(self):
+        proc = run_alloy(["status", "--run-dir", os.path.join(self.tmp, "nothing-here")])
+        self.assertEqual(proc.returncode, 2)
+
     def test_timeout_kills_process_group(self):
         pidfile = os.path.join(self.tmp, "child.pid")
         proc, m = panel(
