@@ -223,11 +223,16 @@ cue to fall back to a host-only answer).
 **It blocks until the panel finishes** — up to the per-panelist timeout (300 s
 by default; 1800 s for `--mode make`, the execute mode's Maker) — and logs
 `run: <dir>` on stderr the moment it starts. If your host's tool-call timeout
-is shorter than that, run it with the host's **background** facility and wait
-for the completion notification. Do **not** hand the wait to a subagent (an
-extra layer that can fail to report back, and where rule 1 gets lost), and do
-not poll in a loop. When the notification arrives — or if you are not sure it
-ever will — ask the dispatcher itself, from disk:
+is shorter than that, run it with the host's **own background facility** (the
+one that reports completion back to you) and wait for that notification. Do
+**not** detach the process yourself — no `nohup … &`, `disown`, `setsid`, or
+a bare trailing `&` inside a foreground call: a process the harness holds no
+handle on can never wake you, and the shell forgets it the moment the call
+returns, so that is the one way to guarantee you never hear back. Do **not**
+hand the wait to a subagent (an extra layer that can fail to report back, and
+where rule 1 gets lost), and do not poll in a loop. When the notification
+arrives — or if you are not sure it ever will — ask the dispatcher itself,
+from disk:
 
 ```bash
 "$ALLOY_BIN" status              # the newest run
@@ -452,9 +457,11 @@ repo before it can write a diff**, so it gets its own default timeout of
 1800 s (`ALLOY_MAKER_TIMEOUT`, or `--timeout`) instead of the consult panel's
 300 s — a careful Maker spends minutes reading, and cutting it off there
 throws all of that away. That is longer than most hosts' tool-call limit, so
-**run this dispatch in the background**, note the `run: <dir>` line, wait for
-the completion notification, and confirm with `"$ALLOY_BIN" status <run dir>`
-(see *The Alloy round → Dispatch*). Do not spawn subagents to babysit it.
+**run this dispatch with the host's own background facility** (never
+`nohup`/`disown`/a bare `&` — the harness must hold the handle, or nothing
+can wake you), note the `run: <dir>` line, wait for the completion
+notification, and confirm with `"$ALLOY_BIN" status <run dir>` (see *The
+Alloy round → Dispatch*). Do not spawn subagents to babysit it.
 
 The Maker runs read-only inside the repo (it can read the real code), so the
 diff is grounded in the tree. Read `manifest.json`, then the Maker's

@@ -67,6 +67,8 @@ def main():
         ("--mode make --panelists <maker>" in body,
          "the Maker dispatched with `--mode make` (its own timeout)"),
         ('"$alloy_bin" status' in low, "the `alloy status` from-disk progress check"),
+        ("nohup" in low and "disown" in low,
+         "the 'never detach a dispatch yourself (nohup/disown)' rule"),
         ("lost work, not a partial panel" in low,
          "the 'a Maker timeout is lost work' guidance"),
     ]
