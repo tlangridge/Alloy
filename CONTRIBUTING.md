@@ -5,7 +5,7 @@ Thanks for considering a contribution. Alloy is small on purpose; the bar is
 
 ## Setup
 
-No build, no dependencies — `bin/alloy` is a single stdlib Python 3.8+ script.
+No build, no dependencies — `bin/alloy` and its companion modules use only the Python 3.8+ standard library.
 
 ```bash
 git clone https://github.com/tlangridge/Alloy.git

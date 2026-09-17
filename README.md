@@ -5,7 +5,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
 [![Install with skills.sh](https://img.shields.io/badge/skills.sh-npx%20skills%20add-000000)](https://www.skills.sh/)
 
-> **The local, CLI-agent way to run [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router) methodology** — no hosted router, no API keys, just the AI CLIs you already have.
+> **The local, CLI-agent way to run [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router) methodology** — using the AI CLIs you already have, with optional Jev task routing.
 
 **Ask several frontier AI coding CLIs the same hard question, in parallel, and
 get an honest map of where they agree, disagree, and are collectively blind —
@@ -27,14 +27,32 @@ the disagreement* rather than averaging it away.
 > consensus, the contradictions, the unique insight only one model had, and the
 > blind spot none of them saw — then let you decide.
 
-Alloy ships **no API keys** and sends **no telemetry** — your prompts go only to
-the CLIs you already installed and authenticated. (Its one optional network call
-is a throttled `git fetch` update check; `ALLOY_NO_UPDATE_CHECK=1` disables it.)
+Alloy sends **no telemetry**. Regular panels use your authenticated CLIs.
+Optional **Jev routing** sends task text to TypeSafe using your key; model discovery
+queries CLI providers. The git update check can be disabled with
+`ALLOY_NO_UPDATE_CHECK=1`. See [routing setup and cost controls](docs/routing.md).
 
 > Not affiliated with OpenRouter. "Fusion" is OpenRouter's term for the
 > methodology; this is an independent local reimplementation. See [`NOTICE`](NOTICE).
 
 ---
+
+## Route a task with Jev
+
+```sh
+./install.sh --setup
+alloy route --prompt-file task.txt         # choose a model; JSON output
+alloy panel --route --prompt-file task.txt # choose and run one read-only model
+alloy models refresh                      # discover available models
+alloy usage                               # subscription capacity meters
+```
+
+The guided setup detects Codex, Claude, Grok and Antigravity (`agy`), accepts your
+Jev key and records how each CLI is billed. Profiles are configurable as models
+change. Existing model pins remain binding. See [the routing guide](docs/routing.md)
+for setup, catalog updates, cost assumptions and independent Maker/Checker use.
+[Subscription meters](docs/usage.md) show fresh remaining capacity and reset times,
+and feed quota reserves and headroom into routing.
 
 ## See it in 15 seconds
 
@@ -124,8 +142,8 @@ disagreement. Evidence, sources, and the host-as-judge bias discussion are in
 
 Alloy is a skill that lives in `~/.claude/skills/alloy/` — and, after
 `install.sh`, in the skill directory of every other host it finds:
-`~/.codex/skills/` (Codex), `~/.grok/skills/` (Grok), `~/.gemini/skills/`
-(Gemini CLI) and `~/.gemini/config/skills/` (Antigravity / `agy`) — as two links
+`~/.codex/skills/` (Codex), `~/.grok/skills/` (Grok), and
+`~/.gemini/config/skills/` (Antigravity / `agy`) — as two links
 per host, `alloy` and the `alloy-execute` alias. It runs on Python 3 (standard
 library only — no `pip install`). macOS / Linux (Windows via WSL).
 
@@ -307,7 +325,10 @@ concrete spec.
 
 ## Privacy & cost
 
-Alloy makes no network calls itself and stores no keys. Each Alloy round makes
+Opt-in Jev routing sends task text (including explicit attachments on routed
+panels) to TypeSafe. Setup can store its key in an owner-only user file outside
+the repository. Model refresh queries providers and the optional update check
+uses git. Each regular Alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider
 accounts through your CLIs — your prompts and diffs are sent to those providers.
 A panel of 3 is roughly 3–5× the cost of one call; the full lifecycle is several

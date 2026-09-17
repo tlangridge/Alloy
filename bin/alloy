@@ -32,10 +32,11 @@ Design notes (why it is the way it is):
     KEY=value file at ~/.config/alloy/config. It NEVER `source`s a file from
     the project directory (that would let a hostile repo run code).
 
-No API keys live here and Alloy sends no telemetry. Your prompts/diffs go only to
-the model providers behind the CLIs you invoke. The one optional network call
-Alloy itself makes is a throttled `git fetch` update check against this repo's own
-remote (no data sent); disable it with ALLOY_NO_UPDATE_CHECK=1.
+No API keys live here and Alloy sends no telemetry. Opt-in Jev routing sends
+the task to TypeSafe; panel prompts go to the selected CLI providers. Explicit
+model refreshes query CLI providers. Cached subscription reads use native provider
+usage interfaces; ALLOY_USAGE=off disables them. The optional git update check can be
+disabled with ALLOY_NO_UPDATE_CHECK=1.
 """
 
 from __future__ import annotations
@@ -52,9 +53,13 @@ import tempfile
 import threading
 import time
 import uuid
+
+# Resolve the companion module even when invoked through an installed symlink.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import alloy_routing as routing
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.2.2"
+ALLOY_VERSION = "0.3.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -335,6 +340,7 @@ class Adapter:
                 text=True,
                 timeout=15,
                 stdin=subprocess.DEVNULL,
+                env=routing.clean_env(),
             )
             lines = strip_ansi((out.stdout or out.stderr or "").strip()).splitlines()
             return lines[0] if lines else ""
@@ -577,7 +583,7 @@ class AntigravityAdapter(Adapter):
                     ["/usr/bin/security", "find-generic-password",
                      "-s", "gemini", "-a", "antigravity"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+                    stderr=subprocess.DEVNULL, timeout=5, env=routing.clean_env()).returncode == 0
             except (OSError, subprocess.TimeoutExpired):
                 ok = False
             self._kc_authed = ok
@@ -1183,6 +1189,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     # Adapter-supplied overrides win over the inherited environment (they exist
     # precisely to redirect a CLI away from the user's real state -- see agy).
     env.update(adapter.prepare_env(ctx))
+    env.pop("TYPESAFE_API_KEY", None)  # router-only credential
 
     status = {
         "name": adapter.name,
@@ -1476,6 +1483,14 @@ def cmd_panel(args: argparse.Namespace) -> int:
     else:
         names = selected_panelists()
     names = list(dict.fromkeys(names))   # dedupe, preserve order (avoid same-dir races)
+    route_decision = None
+    subscription_usage = routing.usage.get(sys.modules[__name__])
+    if subscription_usage.get("enabled"):
+        sys.stderr.write(routing.usage.render(subscription_usage))
+    if getattr(args, "route", False):
+        route_decision = routing.route(sys.modules[__name__], prompt, args, usage_snapshot=subscription_usage)
+        names = [route_decision["cli"]]
+        log("route: " + route_decision["profile"] + " — " + route_decision["reason"])
 
     cwd_now = os.path.abspath(os.getcwd())
 
@@ -1515,6 +1530,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
         if not ad.read_only and not allow_unsandboxed():
             skipped.append({"name": n, "reason": "no read-only mode (set ALLOY_ALLOW_UNSANDBOXED=1 to permit)"})
             continue
+        if route_decision is not None:
+            ad = routing.routed_adapter(sys.modules[__name__], route_decision)
         chosen.append(ad)
 
     run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
@@ -1558,6 +1575,10 @@ def cmd_panel(args: argparse.Namespace) -> int:
         "panelists": [],
         "summary": {},
     }
+
+    manifest["subscription_usage"] = routing.usage.public(subscription_usage)
+    if route_decision is not None:
+        manifest["routing"] = route_decision
 
     if not chosen:
         manifest["summary"] = {
@@ -1957,6 +1978,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "run in it directly; write-capable ones get a disposable copy")
     pa.add_argument("--no-repo", action="store_true",
                     help="give panelists NO repo access (empty throwaway cwd)")
+    pa.add_argument("--route", action="store_true", help="opt in to Jev model selection before dispatch")
+    routing.add_route_options(pa)
     pa.set_defaults(func=cmd_panel)
 
     do = sub.add_parser("doctor", help="show which panelists are installed/authed")
@@ -1982,6 +2005,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ve = sub.add_parser("version", help="print version and adapters")
     ve.set_defaults(func=cmd_version)
+    routing.register(sub, sys.modules[__name__])
     return p
 
 
@@ -1989,7 +2013,11 @@ def main(argv: "list[str] | None" = None) -> int:
     _install_signal_handlers()
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (routing.RoutingError, OSError, UnicodeError) as exc:
+        log(str(exc))
+        return 2
 
 
 if __name__ == "__main__":

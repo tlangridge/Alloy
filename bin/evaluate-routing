@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Explicit, billable Jev-only evaluation; never launches a coding task."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import statistics
+import sys
+import time
+
+HERE = Path(__file__).resolve().parent
+loader = importlib.machinery.SourceFileLoader('alloy_eval_core', str(HERE / 'alloy'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+core = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = core
+loader.exec_module(core)
+r = core.routing
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--tasks', default=str(HERE.parent / 'tests/fixtures/routing_tasks.json'))
+parser.add_argument('--output', required=True)
+parser.add_argument('--limit', type=int, default=50)
+args = parser.parse_args()
+config = r.load()
+rows = []
+for task in json.loads(Path(args.tasks).read_text())[:max(0, args.limit)]:
+    payload = dict(model=config.get('jev_model', 'jev-1.13.0'), state={'task': task['task']}, questions=r.questions())
+    try:
+        response, latency = r.request(payload)
+        answers = r.checked_answers(response)
+        c = answers['complexity']
+        tier = c['choice']
+        if tier == 'unknown' or c['confidence'] < config['policy'].get('confidence_floor', .75) or answers['ambiguous']['noul'] >= .5 or answers['risk']['noul'] >= config['policy'].get('risk_threshold', .5):
+            tier = 'large'
+        rows.append(dict(id=task['id'], split=task['split'], required_tier=tier,
+            acceptable=tier in task['acceptable_tiers'], latency_ms=latency,
+            model=response['model'], usage=response['usage'], answers=answers))
+    except r.RoutingError as exc:
+        rows.append(dict(id=task['id'], error=str(exc), acceptable=False, split=task['split']))
+    if len(rows) % 10 == 0:
+        print('Evaluated %s/%s' % (len(rows), min(args.limit, 50)), file=sys.stderr)
+latencies = sorted(row['latency_ms'] for row in rows if 'latency_ms' in row)
+report = dict(created_at=time.time(), rubric_version=r.RUBRIC_VERSION, rows=rows,
+    total=len(rows), acceptable=sum(row['acceptable'] for row in rows),
+    input_tokens=sum(row.get('usage', {}).get('input_tokens', 0) for row in rows),
+    latency_p50_ms=statistics.median(latencies) if latencies else None,
+    latency_p95_ms=latencies[min(len(latencies)-1, int(len(latencies)*.95))] if latencies else None,
+    note='Synthetic policy checks, not downstream coding success or savings evidence.')
+r.save(Path(args.output), report)
+print(json.dumps({k:v for k,v in report.items() if k!='rows'}, indent=2))

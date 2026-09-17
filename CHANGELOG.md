@@ -3,6 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.3.0] - 2026-09-17
+
+### Added
+- Route tasks with TypeSafe Jev using `alloy route` or `panel --route`. Task complexity, uncertainty, provider independence, model pins and configured cost limits determine the eligible model profiles.
+- Configure credentials and billing modes with `alloy setup`; maintain model profiles with `alloy models`, including discovery for Grok and Antigravity.
+- View subscription capacity with `alloy usage`: Markdown meters for Codex, Claude and Antigravity, cached provider observations and session-scoped suppression of unchanged reports. Grok capacity remains explicitly unknown.
+- Include fresh subscription headroom in routing decisions, with shared quota pools and a configurable reserve (10% by default). Stale or unavailable readings never become invented capacity.
+- Record prompt-free routing decisions and normalized usage context in run artifacts. Add an explicit synthetic Jev evaluation command and routing/usage documentation.
+
+### Changed
+- Install the CLI into the user bin directory alongside agent skills; add optional setup and safe uninstall without deleting credentials or configuration.
+- Request usage snapshots at session and turn checkpoints through the Alloy skill, and show meters when panels start.
+- Keep Jev credentials out of downstream CLI environments and preserve read-only execution and independent Maker/Checker constraints.
+
+### Validation
+- 129 automated tests cover dispatch, routing, usage, installation and failure paths. Live validation includes 50 synthetic Jev cases and routed smoke tests across all four CLIs; these are not general quality or savings benchmarks.
+
 ## [0.2.2] - 2026-09-11
 
 ### Changed
