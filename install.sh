@@ -83,4 +83,5 @@ if [ "$SETUP" = 1 ]; then
 else
   printf 'Next: %s/alloy setup\n' "$BIN_DIR"
 fi
+echo 'Skill startup auto-updates clean official release checkouts; set ALLOY_AUTO_UPDATE=0 for check-only.'
 echo 'Open a new host session to discover the Alloy skills.'

@@ -56,10 +56,25 @@ import uuid
 
 # Resolve the companion module even when invoked through an installed symlink.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import alloy_update as updater
+# Lock before loading companion modules, and keep it until process exit. Checks
+# never replace code while an Alloy invocation is running in this installation.
+_INSTALL_LOCK = None
+if __name__ == '__main__':
+    try:
+        _INSTALL_LOCK = updater.acquire(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                                        exclusive=len(sys.argv) > 1 and sys.argv[1] == 'update-check')
+    except BlockingIOError:
+        print('UPDATE_CHECK_SKIPPED (another Alloy invocation is active)')
+        sys.exit(0)
+    except OSError:
+        if len(sys.argv) > 1 and sys.argv[1] == 'update-check':
+            print('UPDATE_SKIPPED (installation lock unavailable)')
+            sys.exit(0)
 import alloy_routing as routing
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.4.0"
+ALLOY_VERSION = "0.5.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -1886,40 +1901,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_update_check(args: argparse.Namespace) -> int:
-    # Best-effort, throttled (once / 24h), git-based update check against this
-    # repo's own remote. Prints UPDATE_AVAILABLE / UP_TO_DATE / UNKNOWN /
-    # UPDATE_CHECK_*. Sends no data; disable with ALLOY_NO_UPDATE_CHECK=1.
     if (setting("ALLOY_NO_UPDATE_CHECK", "0") or "0").lower() in ("1", "true", "yes"):
         print("UPDATE_CHECK_DISABLED")
         return 0
-    root = skill_root()
-    if not os.path.isdir(os.path.join(root, ".git")):
-        print("UNKNOWN (not a git checkout)")
-        return 0
-    stamp = os.path.join(default_run_root(), ".last-update-check")
-    now = int(time.time())
-    if not args.force:
-        try:
-            if now - int((read_text(stamp).strip() or "0")) < 86400:
-                print("UPDATE_CHECK_SKIPPED (checked < 24h ago; --force to recheck)")
-                return 0
-        except ValueError:
-            pass
-    fetch = _git(root, "fetch", "--quiet")
-    try:
-        os.makedirs(default_run_root(), exist_ok=True)
-        write_atomic(stamp, str(now))
-    except OSError:
-        pass
-    if fetch is None or fetch.returncode != 0:
-        print("UNKNOWN (git fetch failed; offline?)")
-        return 0
-    cp = _git(root, "rev-list", "--count", "HEAD..@{u}")
-    behind = cp.stdout.strip() if cp and cp.returncode == 0 else ""
-    if behind.isdigit() and int(behind) > 0:
-        print(f"UPDATE_AVAILABLE {behind} commit(s) behind. Update: git -C {root} pull")
-    else:
-        print("UP_TO_DATE")
+    install = (setting('ALLOY_AUTO_UPDATE', '1') or '1').lower() not in ('0', 'false', 'no', 'off')
+    print(updater.check(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                        ALLOY_VERSION, force=args.force,
+                        install=install and not args.check_only))
     return 0
 
 
@@ -1999,8 +1987,9 @@ def build_parser() -> argparse.ArgumentParser:
     st.set_defaults(func=cmd_status)
 
     uc = sub.add_parser("update-check",
-                        help="check (throttled, git-based) if the skill repo has updates")
+                        help="check daily and install stable releases on clean official Git installs")
     uc.add_argument("--force", action="store_true", help="ignore the 24h throttle")
+    uc.add_argument("--check-only", action="store_true", help="report updates without installing")
     uc.set_defaults(func=cmd_update_check)
 
     ve = sub.add_parser("version", help="print version and adapters")

@@ -29,7 +29,7 @@ the disagreement* rather than averaging it away.
 
 Alloy sends **no telemetry**. Regular panels use your authenticated CLIs.
 Optional **Jev routing** sends task text to TypeSafe using your key; model discovery
-queries CLI providers. The git update check can be disabled with
+queries CLI providers. The stable-release auto-updater can be disabled with
 `ALLOY_NO_UPDATE_CHECK=1`. See [routing setup and cost controls](docs/routing.md).
 
 > Not affiliated with OpenRouter. "Fusion" is OpenRouter's term for the
@@ -332,7 +332,7 @@ concrete spec.
 Opt-in Jev routing sends task text (including explicit attachments on routed
 panels) to TypeSafe. Setup can store its key in an owner-only user file outside
 the repository. Model refresh queries providers and the optional update check
-uses git. Each regular Alloy round makes
+contacts GitHub for release metadata and uses Git to install updates. Each regular Alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider
 accounts through your CLIs — your prompts and diffs are sent to those providers.
 A panel of 3 is roughly 3–5× the cost of one call; the full lifecycle is several
@@ -367,7 +367,8 @@ variables (env wins over the file):
 | `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |
 | `ALLOY_MAX_PROMPT_BYTES` | `4000000` | cap on total prompt size, including attachments |
 | `ALLOY_ATTACH` | _(unset)_ | comma list of files to fold into the prompt (also `--attach`) |
-| `ALLOY_NO_UPDATE_CHECK` | `0` | set to `1` to disable the throttled git update check |
+| `ALLOY_NO_UPDATE_CHECK` | `0` | set to `1` to disable update checks and installation |
+| `ALLOY_AUTO_UPDATE` | `1` | set to `0` to check for releases without installing |
 
 ## Requirements
 
@@ -416,3 +417,31 @@ override.
 ## License
 
 [MIT](LICENSE). Built to be published and forked.
+
+## Automatic skill updates
+
+At skill startup, the agent runs `alloy update-check`. Once per 24 hours it checks
+GitHub's latest published stable release and installs it automatically. The CLI
+and all linked agent skills update together; the agent rereads SKILL.md before
+continuing. Direct CLI users can invoke the same command explicitly.
+
+Automatic installation requires a clean checkout of the official Alloy repository
+on `main` or `master`, with HEAD at its installed release tag. Local edits,
+untracked files, developer branches, unpublished commits, forks and concurrent
+Alloy runs prevent updates. Installation is fast-forward-only, never resets or
+stashes local work, and never runs the installer or Git hooks from a release.
+Configuration, credentials and run history live outside the checkout and remain
+unchanged. Updating fetches executable code from the official project; it does not
+provide independent cryptographic release verification.
+
+Copied skills.sh installations and Git worktrees cannot be auto-updated; use the
+original installer (`npx skills update` for skills.sh), or use the source install
+above for automatic updates. An already-open host must reread skill instructions;
+updating cannot replace instructions already loaded in its context automatically.
+
+- `ALLOY_AUTO_UPDATE=0`: check and report, without installing.
+- `ALLOY_NO_UPDATE_CHECK=1`: no update network requests or installation.
+- `alloy update-check --check-only`: one check without installation.
+- `alloy update-check --force`: bypass the daily timer, keeping every safety check.
+
+Offline or failed checks are cached for 24 hours and do not block skill use.
