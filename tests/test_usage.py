@@ -36,6 +36,67 @@ class UsageTests(unittest.TestCase):
             binding=u.binding(core, provider), source='test', windows=[
             u.window(pool or provider, '5h', remaining, time.time()+3600)])
 
+    def test_grok_percentage_period_and_zero(self):
+        now = time.time()
+        for used in (0, 49, 100):
+            windows = u.parse_grok({'config': {'creditUsagePercent': used,
+                'currentPeriod': {'start': now-100, 'end': now-100+7*86400}}})
+            self.assertEqual(windows[0]['window'], 'weekly')
+            self.assertAlmostEqual(windows[0]['remaining_fraction'], 1-used/100)
+        result = u.parse_grok({'config': {'used': {'val': 25}, 'monthlyLimit': {'val': 100},
+            'billingPeriodStart': now-100, 'billingPeriodEnd': now-100+30*86400}})
+        self.assertEqual(result[0]['window'], 'monthly')
+        self.assertEqual(result[0]['remaining_fraction'], .75)
+
+    def test_grok_missing_invalid_and_ondemand_are_not_capacity(self):
+        base = {'billingPeriodEnd': time.time()+1000}
+        for extra in ({}, {'creditUsagePercent': None}, {'creditUsagePercent': -1},
+                      {'creditUsagePercent': 101}, {'creditUsagePercent': float('nan')},
+                      {'creditUsagePercent': True}, {'creditUsagePercent': '49'},
+                      {'onDemandUsed': {'val': 0}, 'onDemandCap': {'val': 100}},
+                      {'used': {'val': 0}, 'monthlyLimit': {'val': 0}}):
+            with self.subTest(extra=extra), self.assertRaises(u.UsageError):
+                u.parse_grok({'config': dict(base, **extra)})
+        with self.assertRaises(u.UsageError):
+            u.parse_grok({'config': {'creditUsagePercent': 0}})
+
+    def test_grok_fetch_is_bounded_private_and_auth_bound(self):
+        auth = Path(self.tmp.name)/'auth.json'
+        entry = {'key': 'test-secret', 'expires_at': time.time()+1000}
+        auth.write_text(json.dumps({'https://auth.x.ai::test': entry}))
+        payload = {'config': {'creditUsagePercent': 49, 'billingPeriodEnd': time.time()+1000}}
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=io.BytesIO(json.dumps(payload).encode()))
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch.dict(os.environ, {'GROK_HOME': self.tmp.name, 'XAI_API_KEY': '', 'GROK_API_KEY': ''}), \
+             patch.object(u.urllib.request, 'build_opener', return_value=opener):
+            before = u.binding(core, 'grok')
+            source, windows = u.fetch_grok(core)
+            self.assertEqual(source, 'grok-cli-billing')
+            self.assertEqual(windows[0]['remaining_fraction'], .51)
+            request = opener.open.call_args[0][0]
+            self.assertEqual(request.full_url, 'https://cli-chat-proxy.grok.com/v1/billing?format=credits')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer test-secret')
+            self.assertEqual(opener.open.call_args[1]['timeout'], 8)
+            self.assertNotIn('test-secret', json.dumps(windows))
+            for changes in ({'expires_at': 1}, {'principal_type': 'team'}):
+                auth.write_text(json.dumps({'https://auth.x.ai::test': dict(entry, **changes)}))
+                with self.assertRaises(u.UsageError): u.fetch_grok(core)
+            self.assertNotEqual(before, u.binding(core, 'grok'))
+            self.assertEqual(opener.open.call_count, 1)
+
+    def test_grok_http_error_never_exposes_response(self):
+        auth = Path(self.tmp.name)/'auth.json'
+        auth.write_text(json.dumps({'https://auth.x.ai::test':
+            {'key': 'test-secret', 'expires_at': time.time()+1000}}))
+        opener = Mock()
+        opener.open.side_effect = u.urllib.error.HTTPError('url', 401, 'secret-body', {}, io.BytesIO(b'secret'))
+        with patch.dict(os.environ, {'GROK_HOME': self.tmp.name, 'XAI_API_KEY': '', 'GROK_API_KEY': ''}), \
+             patch.object(u.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaisesRegex(u.UsageError, 'HTTP 401') as caught: u.fetch_grok(core)
+            self.assertNotIn('secret', str(caught.exception))
+            self.assertEqual(opener.open.call_count, 1)
+
     def test_codex_duration_and_zero_are_not_missing(self):
         data = dict(rateLimitsByLimitId={'codex': dict(primary=dict(usedPercent=100,
             windowDurationMins=10080, resetsAt=time.time()+100), secondary=None)})

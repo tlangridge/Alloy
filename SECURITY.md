@@ -55,8 +55,10 @@ safety properties:
   optional git update check contacts this repo's remote; disable it with
   `ALLOY_NO_UPDATE_CHECK=1`. That flag does not disable explicit Jev routing.
 - **Subscription usage.** Automatic, cached provider reads use Codex's local
-  app-server, Antigravity's version-gated built-in `/usage`, and Claude's OAuth
-  usage endpoint. Claude may read its native macOS Keychain credential; disable
+  app-server, Antigravity's version-gated built-in `/usage`, Claude's OAuth
+  usage endpoint, and Grok's fixed HTTPS CLI billing endpoint using its existing
+  unexpired login. Grok redirects are rejected; browser cookies and token refresh
+  are not used. Claude may read its native macOS Keychain credential; disable
   this with `usage.keychain=false`. Tokens are used only for their provider's
   request and never persisted by Alloy. Raw responses, account identities and
   reset-credit IDs are excluded from usage cache/context. Stale observations are

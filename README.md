@@ -45,6 +45,7 @@ alloy route --prompt-file task.txt         # choose a model; JSON output
 alloy panel --route --prompt-file task.txt # choose and run one read-only model
 alloy models refresh                      # discover available models
 alloy usage                               # subscription capacity meters
+# In your agent: /alloy-usage
 ```
 
 The guided setup detects Codex, Claude, Grok and Antigravity (`agy`), accepts your
@@ -143,8 +144,8 @@ disagreement. Evidence, sources, and the host-as-judge bias discussion are in
 Alloy is a skill that lives in `~/.claude/skills/alloy/` — and, after
 `install.sh`, in the skill directory of every other host it finds:
 `~/.codex/skills/` (Codex), `~/.grok/skills/` (Grok), and
-`~/.gemini/config/skills/` (Antigravity / `agy`) — as two links
-per host, `alloy` and the `alloy-execute` alias. It runs on Python 3 (standard
+`~/.gemini/config/skills/` (Antigravity / `agy`) — as three links
+per host: `alloy`, `alloy-execute`, and `alloy-usage`. It runs on Python 3 (standard
 library only — no `pip install`). macOS / Linux (Windows via WSL).
 
 **1. Install at least one panelist CLI** — Alloy orchestrates CLIs you already
