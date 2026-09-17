@@ -2,13 +2,13 @@
 name: alloy
 description: >-
   Run a multi-model panel: dispatch one prompt to every AI coding CLI
-  installed locally (Codex, Grok, Claude, Gemini/Antigravity) in parallel as a READ-ONLY panel, then judge
+  installed locally (Codex, Grok, Claude, Antigravity/agy) in parallel as a READ-ONLY panel, then judge
   and synthesize their answers (consensus, disagreements, unique insights, blind
   spots) into one answer that surfaces disagreement instead of hiding it. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
   cross-model consult, a second/third opinion from other AI CLIs, or types
   /alloy (sub-modes: ask, debate, review, plan, execute, doctor, or a full
-  research->plan->implement->test task) or /alloy-execute (the execute
+  research, plan, implement and test task) or /alloy-execute (the execute
   sub-mode: a cheap other-family Maker returns the change as a diff, the host
   applies it, the read-only panel checks it). Do NOT trigger for ordinary
   single-model coding, planning, or review requests.
@@ -59,7 +59,8 @@ Here the roles map to local tools:
   panel (minus the Maker's family) then checks it. The Maker never writes the
   tree and never sits on its own review. See *Execute mode*.
 
-Alloy ships no API keys and makes no network calls of its own. It orchestrates
+Alloy ships no API keys. Opt-in Jev routing sends task text to TypeSafe; model
+refresh queries providers and the optional update check uses git. It orchestrates
 CLIs the user already installed and authenticated; their prompts, the repo files
 the panel reads (repo access is on by default), diffs, and any web pages a
 panelist fetches go to those CLIs' own model providers.
@@ -136,6 +137,28 @@ Run `doctor` first:
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
 
+At session start, surface the subscription meter:
+
+```bash
+"$ALLOY_BIN" usage --if-changed --session <stable-session-id>
+```
+
+Use the same session ID throughout the task. Render the returned Markdown in
+chat rather than leaving it buried in tool output; if output is empty, omit the
+meter. Repeat this lightweight check at a new user turn while Alloy work is
+active, before delegation, and after a long run or quota failure. Provider reads
+are cached for two minutes; `--if-changed` suppresses repeated displays until
+capacity crosses a 5-point band, a reset changes, or freshness changes. Use
+`--refresh` after a quota error and `--cached` for offline context. Each panel
+also includes its startup snapshot in the manifest and stderr.
+
+Treat only fresh quota as evidence. Provider windows are shared subscription
+capacity, not this task's token count. Keep Antigravity's Gemini and Claude/GPT
+pools separate, and preserve Codex/Claude model-specific windows. Grok currently
+reports unknown. The router uses this snapshot itself; do not override its
+family/tier constraints or treat unknown capacity as unlimited. Never redeem
+reset credits or change subscriptions as part of displaying usage.
+
 Then run the throttled update check (it does a `git fetch` against the skill's own
 remote at most once per day and sends no data):
 
@@ -169,6 +192,10 @@ Parse the **first token** of the skill arguments:
 
 | First token | Mode | What you do |
 |---|---|---|
+| `usage` | Usage meter | run `bin/alloy usage` with the supplied options and render its Markdown. Stop. |
+| `route` | Route decision | run `bin/alloy route` with task input and show the selected model and quota context. No downstream execution. |
+| `setup` | Setup | run `bin/alloy setup`; use noninteractive flags when no terminal is available. |
+| `models` | Model catalog | run the corresponding `bin/alloy models` subcommand. |
 | `doctor` | Doctor | run `bin/alloy doctor` and explain the result. Stop. |
 | `ask` | One-shot consult | one Alloy round on the rest of the args. Stop. |
 | `debate` | Gated debate | a second, evidence-gated rebuttal round — see "Debate round". Used rarely. Stop. |
@@ -416,6 +443,30 @@ gates:   <the repo's test / lint command if you know it, else "repo tests for to
 Fill `success` and `blast` from the repo — read the code; you have it. If you
 genuinely cannot fill `success` or `blast`, ask **one** question. Do not start a
 planning workshop.
+
+### Optional Jev routing
+
+When the user asks to route work by complexity/cost, read
+[docs/routing.md](docs/routing.md). Use `alloy setup` for first-run configuration.
+`alloy route --prompt-file <task>` returns a JSON recommendation without executing
+another model. `alloy panel --route` resolves and executes in one invocation;
+prefer it when executing to avoid a second classifier call. Regular panels keep
+the full requested panel unless the user opts into routing.
+
+For execute, use `panel --route --mode make --host-family <provider-family>`
+instead of the fixed Maker table below. Pass a complete Maker prompt with its
+SPEC; retain the same diff application, tests and review workflow. Read the
+selected **model family** from the routing manifest, since `agy` can expose
+other providers' models. A routed Checker uses `--mode review --exclude-family
+<maker-family>`; ensure an independent non-host Checker remains, as required by
+execute. Host families are `openai`, `anthropic`, `xai`, and `google`.
+
+Show the chosen CLI/model/effort and policy reason. Unknown billing or quota is
+not zero cost. Route failures do not authorize budget increases or permission
+bypasses; explain the missing constraint and retain host handling as appropriate.
+On execution failure or timeout, inspect saved output/session before retrying;
+do not blindly route the same task to another model. Routing never changes the
+model of an already running host conversation.
 
 ### 2. Pick the Maker (other family, cheap)
 
@@ -743,7 +794,7 @@ it met the bar. (Evidence + citations: see `docs/methodology.md`.)
 
 Each Alloy round makes one model call **per ready panelist**, in parallel,
 billed to the **user's own** provider accounts via their CLIs. The full lifecycle
-is several rounds. alloy ships no keys and makes no network calls of its own.
+is several rounds. alloy ships no keys; opt-in routing sends task text to TypeSafe.
 For a one-off question, `ask` is the cheap path; reserve the lifecycle for real
 build tasks. `execute` is one Maker call plus the Checker panel per loop (at
 most three loops), so it sits between `ask` and the lifecycle.

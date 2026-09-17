@@ -24,6 +24,7 @@ def run_alloy(args, env_extra=None, timeout=60, cwd=None):
     # that exercise another adapter pass --panelists explicitly (the CLI flag
     # overrides this env).
     env["ALLOY_CONFIG"] = "/dev/null"
+    env["ALLOY_USAGE"] = "off"  # No real provider reads during mock tests
     env["ALLOY_PANELISTS"] = "codex,claude"
     # Repo access defaults ON (auto-detects the git root) -- but the test process
     # cwd IS a git repo (alloy's own), so pin it OFF by default to stay hermetic.

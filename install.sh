@@ -1,76 +1,84 @@
 #!/usr/bin/env bash
-# Install the alloy skill by symlinking this repo into the skill directory of
-# every supported host found on this machine, then run doctor so you see your
-# panel status immediately. Two links per host: `alloy` (the skill) and
-# `alloy-execute` (the /alloy-execute alias, a shim that defers to the skill).
-#
-# Usage:
-#   ./install.sh            # every host present: Claude Code (always),
-#                           # Codex (~/.codex), Grok (~/.grok),
-#                           # Gemini CLI (~/.gemini), Antigravity/agy
-#                           # (~/.gemini/config/skills)
-#   SKILLS_DIR=/path ./install.sh   # only this directory (CI / custom)
+# User-level Alloy CLI + skills installation. No sudo or shell-profile edits.
 set -euo pipefail
-
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Python 3 is the only runtime dependency.
+SETUP=0
+UNINSTALL=0
+DOCTOR=1
+for arg in "$@"; do
+  case "$arg" in
+    --setup) SETUP=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    --skip-doctor) DOCTOR=0 ;;
+    *) echo "Usage: ./install.sh [--setup] [--skip-doctor] [--uninstall]" >&2; exit 2 ;;
+  esac
+done
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "error: python3 not found on PATH (alloy needs Python 3.8+)." >&2
+  echo 'error: install Python 3.8+ first, then re-run this installer.' >&2
   exit 1
 fi
-
-link_one() {
-  local link="$1"
-  local target="$2"
-  local label="$3"
-  if [ -L "$link" ]; then
-    echo "Updating existing symlink: $link"
-    rm "$link"
-  elif [ -e "$link" ]; then
-    echo "error: $link already exists and is not a symlink." >&2
-    echo "Move or remove it, then re-run install.sh." >&2
-    exit 1
-  fi
-  ln -s "$target" "$link"
-  echo "Linked $link -> $target  ($label)"
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,8) else "Alloy requires Python 3.8+")'
+BIN_DIR="${ALLOY_INSTALL_BIN_DIR:-$HOME/.local/bin}"
+LINKS=("$BIN_DIR/alloy")
+TARGETS=("$REPO_DIR/bin/alloy")
+add_skills() {
+  LINKS+=("$1/alloy" "$1/alloy-execute")
+  TARGETS+=("$REPO_DIR" "$REPO_DIR/alloy-execute")
 }
-
-install_links() {
-  local skills_dir="$1"
-  local label="$2"
-  mkdir -p "$skills_dir"
-  link_one "$skills_dir/alloy" "$REPO_DIR" "$label"
-  link_one "$skills_dir/alloy-execute" "$REPO_DIR/alloy-execute" "$label"
-}
-
 if [ -n "${SKILLS_DIR:-}" ]; then
-  install_links "$SKILLS_DIR" "custom"
+  add_skills "$SKILLS_DIR"
 else
-  install_links "$HOME/.claude/skills" "Claude Code"
-  if [ -d "$HOME/.codex" ]; then
-    install_links "${CODEX_SKILLS_DIR:-$HOME/.codex/skills}" "Codex"
+  if [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1; then
+    add_skills "${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
   fi
-  if [ -d "$HOME/.grok" ]; then
-    install_links "${GROK_SKILLS_DIR:-$HOME/.grok/skills}" "Grok"
+  if [ -d "$HOME/.codex" ] || command -v codex >/dev/null 2>&1; then
+    add_skills "${CODEX_SKILLS_DIR:-$HOME/.codex/skills}"
   fi
-  if [ -d "$HOME/.gemini" ]; then
-    install_links "${GEMINI_SKILLS_DIR:-$HOME/.gemini/skills}" "Gemini CLI"
+  if [ -d "$HOME/.grok" ] || command -v grok >/dev/null 2>&1; then
+    add_skills "${GROK_SKILLS_DIR:-$HOME/.grok/skills}"
   fi
-  # Antigravity (agy) reads ~/.gemini/config/skills (via ~/.gemini/antigravity/skills).
   if [ -d "$HOME/.gemini/antigravity" ] || command -v agy >/dev/null 2>&1; then
-    install_links "${AGY_SKILLS_DIR:-$HOME/.gemini/config/skills}" "Antigravity (agy)"
+    add_skills "${AGY_SKILLS_DIR:-$HOME/.gemini/config/skills}"
   fi
 fi
-
+# Validate every destination before changing anything.
+for i in "${!LINKS[@]}"; do
+  link="${LINKS[$i]}"
+  target="${TARGETS[$i]}"
+  if [ "$UNINSTALL" = 0 ] && { [ -e "$link" ] || [ -L "$link" ]; }; then
+    if [ ! -L "$link" ] || [ ! "$link" -ef "$target" ]; then
+      echo "error: $link belongs to another installation; choose a different directory or move it first." >&2
+      exit 1
+    fi
+  fi
+done
+for i in "${!LINKS[@]}"; do
+  link="${LINKS[$i]}"
+  target="${TARGETS[$i]}"
+  if [ "$UNINSTALL" = 1 ]; then
+    if [ -L "$link" ] && [ "$link" -ef "$target" ]; then
+      rm "$link"
+      echo "Removed $link"
+    fi
+  else
+    mkdir -p "$(dirname "$link")"
+    if [ ! -L "$link" ]; then ln -s "$target" "$link"; fi
+    echo "Ready: $link"
+  fi
+done
+if [ "$UNINSTALL" = 1 ]; then
+  echo 'Uninstalled Alloy links. Configuration, credentials and run history retained.'
+  exit 0
+fi
 chmod +x "$REPO_DIR/bin/alloy"
-echo
-
-echo "Panel status:"
-"$REPO_DIR/bin/alloy" doctor || true
-echo
-echo "Done. RESTART your host CLI (Claude Code, Codex, Grok, Gemini CLI, or agy)"
-echo "or open a new session so it picks up the skill, then try:"
-echo "  /alloy doctor        /alloy ask <your hard question>"
-echo "  /alloy execute <a change you want made>   (alias: /alloy-execute)"
-echo "Optional config:  cp '$REPO_DIR/alloy.config.example' ~/.config/alloy/config"
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *) printf 'Add this directory to PATH, or invoke %s/alloy directly:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
+esac
+if [ "$DOCTOR" = 1 ]; then "$REPO_DIR/bin/alloy" doctor || true; fi
+if [ "$SETUP" = 1 ]; then
+  "$REPO_DIR/bin/alloy" setup
+else
+  printf 'Next: %s/alloy setup\n' "$BIN_DIR"
+fi
+echo 'Open a new host session to discover the Alloy skills.'

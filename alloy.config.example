@@ -90,3 +90,8 @@ ALLOY_CODEX_EFFORT=high
 # Disable the throttled, git-based update check (the one optional network call
 # Alloy makes; it sends no data of its own).
 # ALLOY_NO_UPDATE_CHECK=0
+
+# Subscription meters: native Codex/Claude/Antigravity usage reads, cached for
+# two minutes, included in panel/route context. No generation calls. Grok's
+# remaining subscription quota is currently unknown. See docs/usage.md.
+# ALLOY_USAGE=off
