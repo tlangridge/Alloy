@@ -1,0 +1,210 @@
+[
+  {
+    "id": "kind-1",
+    "task": "Rewrite the installation guide with clearer prerequisites, numbered setup steps and troubleshooting examples.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "documentation"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-2",
+    "task": "Correct Installl to Install in the README title, nothing else.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "documentation"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-3",
+    "task": "Add parameterized unit tests for the existing date parser, including leap years and invalid months. Do not modify its implementation.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "testing"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-4",
+    "task": "Run the existing test suite and summarize which cases pass or fail; do not investigate root causes.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "testing"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-5",
+    "task": "Build a responsive pricing page with three cards, accessible toggles and consistent typography.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "frontend"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-6",
+    "task": "Improve the dashboard layout, spacing, colors and mobile interactions while retaining all functionality.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "frontend"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-7",
+    "task": "Design a modular plugin architecture and explain the interface boundaries and tradeoffs.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "architecture"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-8",
+    "task": "Propose a multi-region event processing architecture with ordering and recovery guarantees.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "architecture"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-9",
+    "task": "Find why the worker occasionally deadlocks under concurrent retries and fix the root cause.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "debugging"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-10",
+    "task": "Investigate why a parser rejects valid dates only around daylight saving changes.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "debugging"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-11",
+    "task": "Review this pull request for correctness, regressions and missing tests. Return findings only.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "review"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-12",
+    "task": "Audit the authentication middleware for security bugs and report the evidence, without changes.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "review"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-13",
+    "task": "Research published model benchmarks and compare their methodologies with links to primary sources.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "research"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-14",
+    "task": "Gather current official documentation about three database replication strategies and summarize their differences.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "research"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-15",
+    "task": "Implement a CSV export endpoint for the existing orders resource using the supplied field mapping.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "implementation"
+    ],
+    "split": "heldout"
+  },
+  {
+    "id": "kind-16",
+    "task": "Add pagination to the existing list endpoint following the repository conventions.",
+    "acceptable_tiers": [
+      "small",
+      "medium",
+      "large"
+    ],
+    "acceptable_kinds": [
+      "implementation"
+    ],
+    "split": "heldout"
+  }
+]

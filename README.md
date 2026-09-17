@@ -44,6 +44,7 @@ queries CLI providers. The git update check can be disabled with
 alloy route --prompt-file task.txt         # choose a model; JSON output
 alloy panel --route --prompt-file task.txt # choose and run one read-only model
 alloy models refresh                      # discover available models
+alloy models advise                       # evidence, strengths and profile suggestions
 alloy usage                               # subscription capacity meters
 # In your agent: /alloy-usage
 ```
@@ -54,6 +55,8 @@ change. Existing model pins remain binding. See [the routing guide](docs/routing
 for setup, catalog updates, cost assumptions and independent Maker/Checker use.
 [Subscription meters](docs/usage.md) show fresh remaining capacity and reset times,
 and feed quota reserves and headroom into routing.
+[Model research](docs/model-research.md) informs task-specific recommendations
+within a bounded cost tolerance.
 
 ## See it in 15 seconds
 

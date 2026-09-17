@@ -33,12 +33,13 @@ for task in json.loads(Path(args.tasks).read_text())[:max(0, args.limit)]:
         if tier == 'unknown' or c['confidence'] < config['policy'].get('confidence_floor', .75) or answers['ambiguous']['noul'] >= .5 or answers['risk']['noul'] >= config['policy'].get('risk_threshold', .5):
             tier = 'large'
         rows.append(dict(id=task['id'], split=task['split'], required_tier=tier,
-            acceptable=tier in task['acceptable_tiers'], latency_ms=latency,
+            acceptable=tier in task['acceptable_tiers'] and (not task.get('acceptable_kinds') or answers['kind']['choice'] in task['acceptable_kinds']),
+            kind_acceptable=not task.get('acceptable_kinds') or answers['kind']['choice'] in task['acceptable_kinds'], latency_ms=latency,
             model=response['model'], usage=response['usage'], answers=answers))
     except r.RoutingError as exc:
         rows.append(dict(id=task['id'], error=str(exc), acceptable=False, split=task['split']))
     if len(rows) % 10 == 0:
-        print('Evaluated %s/%s' % (len(rows), min(args.limit, 50)), file=sys.stderr)
+        print('Evaluated %s/%s' % (len(rows), min(args.limit, len(json.loads(Path(args.tasks).read_text())))), file=sys.stderr)
 latencies = sorted(row['latency_ms'] for row in rows if 'latency_ms' in row)
 report = dict(created_at=time.time(), rubric_version=r.RUBRIC_VERSION, rows=rows,
     total=len(rows), acceptable=sum(row['acceptable'] for row in rows),

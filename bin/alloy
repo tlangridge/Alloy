@@ -59,7 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import alloy_routing as routing
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.3.3"
+ALLOY_VERSION = "0.4.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum

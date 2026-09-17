@@ -58,6 +58,144 @@ class RouterTests(unittest.TestCase):
         return r.route(core, 'Change the README title to Alloy.', self.args,
             transport=lambda payload: (answer or response(), 5), available=self.available)
 
+    def test_verified_failures_escalate_and_reach_jev(self):
+        for count, tier in ((0, 'small'), (1, 'medium'), (2, 'large')):
+            self.args.prior_failures = count
+            captured = []
+            def transport(payload):
+                captured.append(payload['state']['retry_context'])
+                return response(), 1
+            decision = r.route(core, 'Fix typo', self.args, transport=transport, available=self.available)
+            self.assertEqual(decision['required_tier'], tier)
+            self.assertEqual(captured[0]['verified_quality_failures'], count)
+            self.assertEqual(decision['retry_context'], captured[0])
+
+    def test_failed_profiles_excluded_without_overriding_pin(self):
+        self.args.prior_failures = 2
+        chosen = self.decide()['profile']
+        self.args.failed_profile = [chosen]
+        self.assertNotEqual(self.decide()['profile'], chosen)
+        self.args.profile = chosen
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+            self.decide()
+
+    def test_invalid_failure_context_rejected_before_inference(self):
+        for count, failed in ((-1, []), (101, []), (True, []), (0, ['codex-small']), (1, ['missing'])):
+            self.args.prior_failures = count
+            self.args.failed_profile = failed
+            transport = Mock()
+            with self.assertRaises(r.RoutingError):
+                r.route(core, 'Task', self.args, transport=transport, available=self.available)
+            transport.assert_not_called()
+
+    def test_failed_checker_cannot_satisfy_independence(self):
+        checker = self.checker_fixture()
+        self.args.prior_failures = 1
+        self.args.failed_profile = [checker['id']]
+        r.save(r.root() / 'routing.json', self.config)
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+            self.decide()
+
+    def evidence_pair(self):
+        data = r.evidence.catalog(); data['status'] = 'current'
+        catalog_patch = patch.object(r.evidence, 'catalog', return_value=data)
+        catalog_patch.start(); self.addCleanup(catalog_patch.stop)
+        base = self.config['profiles'][0]
+        self.config['profiles'] = [dict(base, id='cheap', model='gpt-5.6-terra', tier='large', effort='high', cost_rank=2),
+            dict(base, id='fit', model='gpt-5.6-sol', tier='large', effort='high', cost_rank=2.4)]
+        return self.config['profiles']
+
+    def kind_answer(self, kind, tier='medium', confidence=1):
+        reply = response(tier)
+        reply['answers']['kind'].update(choice=kind, confidence=confidence,
+            probabilities={k: int(k == kind) for k in r.questions()['kind']['criteria']})
+        return reply
+
+    def test_task_fit_prefers_documented_debugger_with_bounded_premium(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        with patch.object(r.evidence.time, 'time', return_value=1789680000):
+            decision = self.decide(self.kind_answer('debugging'))
+        self.assertEqual(decision['profile'], 'fit')
+        self.assertEqual(decision['cheapest_eligible'], 'cheap')
+        self.assertEqual(decision['recommendations'][0]['profile'], 'fit')
+        self.assertTrue(decision['model_evidence']['sources'])
+        self.assertEqual(decision['evidence_revision'], '2026-09-17.1')
+
+    def test_fit_does_not_overpay_or_escalate_small_tasks(self):
+        rows = self.evidence_pair(); rows[1]['cost_rank'] = 3
+        r.save(r.root() / 'routing.json', self.config)
+        self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'cheap')
+        rows[1]['cost_rank'] = 2.4; r.save(r.root() / 'routing.json', self.config)
+        self.assertEqual(self.decide(self.kind_answer('debugging', 'small'))['profile'], 'cheap')
+
+    def test_low_kind_confidence_stale_and_disabled_evidence_abstain(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        self.assertEqual(self.decide(self.kind_answer('debugging', confidence=.3))['profile'], 'cheap')
+        stale = dict(r.evidence.catalog(), status='stale')
+        with patch.object(r.evidence, 'catalog', return_value=stale):
+            self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'cheap')
+        self.config['policy']['use_model_evidence'] = False
+        r.save(r.root() / 'routing.json', self.config)
+        self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'cheap')
+
+    def test_wrong_model_family_alias_or_effort_gets_no_benchmark_credit(self):
+        data = r.evidence.catalog(); data['status'] = 'current'
+        for changes in (dict(model='gpt-5.6-sol-new'), dict(model='sonnet'),
+                        dict(family='google'), dict(effort='none')):
+            p = dict(model='gpt-5.6-sol', family='openai', effort='high'); p.update(changes)
+            self.assertEqual(r.evidence.assessment(p, data)['preferred_tasks'], [])
+
+    def test_fit_respects_pin_and_price_ceiling(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        with patch.dict(os.environ, {'ALLOY_CODEX_MODEL': 'gpt-5.6-terra'}):
+            self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'cheap')
+        self.args.max_estimated_usd = .1
+        with self.assertRaises(r.RoutingError): self.decide(self.kind_answer('debugging'))
+
+    def test_effort_override_disables_unverified_preference(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        with patch.dict(os.environ, {'ALLOY_CODEX_EFFORT': 'none'}):
+            self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'cheap')
+
+    def test_comparable_metered_prices_override_ordinal_ranks(self):
+        rows = self.evidence_pair()
+        rows[0].update(billing_mode='metered', input_per_million=10, output_per_million=50)
+        rows[1].update(billing_mode='metered', input_per_million=1, output_per_million=5, cost_rank=100)
+        r.save(r.root() / 'routing.json', self.config)
+        d = self.decide()
+        self.assertEqual(d['profile'], 'fit')
+        self.assertEqual(d['cost_basis'], 'estimated_usd')
+        self.assertAlmostEqual(d['selection_cost'], .02)
+
+    def test_user_task_preferences_and_configuration_validation(self):
+        rows = self.evidence_pair(); rows[1]['model'] = 'custom-model'
+        rows[1]['task_preferences'] = ['debugging']
+        r.save(r.root() / 'routing.json', self.config)
+        self.assertEqual(self.decide(self.kind_answer('debugging'))['profile'], 'fit')
+        rows[1]['task_preferences'] = ['invented']
+        with self.assertRaises(r.RoutingError): r.validate(self.config)
+        rows[1]['task_preferences'] = []
+        for field in ('task_fit_cost_slack', 'kind_confidence_floor'):
+            self.config['policy'][field] = float('nan')
+            with self.assertRaises(r.RoutingError): r.validate(self.config)
+            self.config['policy'].pop(field)
+
+    def test_catalog_expiry_and_missing_file_are_explicit(self):
+        with patch.object(r.evidence.time, 'time', return_value=1900000000):
+            self.assertEqual(r.evidence.catalog()['status'], 'stale')
+        with patch.object(r.evidence, 'PATH', Path(self.tmp.name)/'absent'):
+            self.assertEqual(r.evidence.catalog()['status'], 'unavailable')
+
+    def test_models_advice_is_read_only_and_explains_pins(self):
+        before = (r.root() / 'routing.json').read_bytes()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.dict(os.environ, {'ALLOY_CODEX_MODEL': 'gpt-5.6-sol'}):
+            self.assertEqual(core.main(['models', 'advise']), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(any(p['blocked_by_pin'] for p in result['profiles']))
+        self.assertTrue(result['candidates'])
+        self.assertEqual(before, (r.root() / 'routing.json').read_bytes())
+
     def test_small_and_large_choose_different_profiles(self):
         self.assertEqual(self.decide()['profile'], 'codex-small')
         self.assertEqual(self.decide(response('large'))['required_tier'], 'large')

@@ -1,0 +1,245 @@
+{
+  "schema": 1,
+  "revision": "2026-09-17.1",
+  "reviewed_at": "2026-09-17",
+  "expires_at": "2026-12-16",
+  "models": [
+    {
+      "models": [
+        "gpt-5.6-luna"
+      ],
+      "family": "openai",
+      "suggested_tier": "small",
+      "preferred_tasks": [
+        "documentation",
+        "testing"
+      ],
+      "strengths": "Economical bounded work; reserve for explicit tasks with executable checks.",
+      "limitations": "Lower difficult reasoning and security results than Sol; do not infer frontier capability from basic coding.",
+      "sources": [
+        "https://openai.com/index/gpt-5-6/"
+      ],
+      "applicable_efforts": [
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "gpt-5.6-terra"
+      ],
+      "family": "openai",
+      "suggested_tier": "medium",
+      "preferred_tasks": [
+        "implementation",
+        "testing"
+      ],
+      "strengths": "Balanced routine engineering and cost.",
+      "limitations": "Less evidence for the hardest debugging/security tasks than Sol/Astra.",
+      "sources": [
+        "https://openai.com/index/gpt-5-6/"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "family": "openai",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "debugging",
+        "review",
+        "architecture",
+        "research"
+      ],
+      "strengths": "Strong complex software work, technical reasoning and research.",
+      "limitations": "Superseded on several demanding agent benchmarks by Astra; higher cost than Luna/Terra.",
+      "sources": [
+        "https://openai.com/index/gpt-5-6/"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "gpt-6-astra"
+      ],
+      "family": "openai",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "debugging",
+        "review",
+        "architecture",
+        "research"
+      ],
+      "strengths": "Strong difficult terminal/scientific work and complex reasoning.",
+      "limitations": "High token price; effort and task token use determine actual cost; no universal advantage on every knowledge-work benchmark.",
+      "sources": [
+        "https://openai.com/index/gpt-6-astra/",
+        "https://artificialanalysis.ai/models/comparisons/gpt-6-astra-high-vs-grok-4-6"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "claude-sonnet-5"
+      ],
+      "family": "anthropic",
+      "suggested_tier": "medium",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "testing"
+      ],
+      "strengths": "Efficient multi-step coding and tool use.",
+      "limitations": "Lower security capability than Opus; tokenizer changes affect token cost; alias sonnet is not a pinned model.",
+      "sources": [
+        "https://www.anthropic.com/news/claude-sonnet-5"
+      ],
+      "applicable_efforts": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "claude-opus-5"
+      ],
+      "family": "anthropic",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "architecture",
+        "review"
+      ],
+      "strengths": "Strong daily software engineering and knowledge work.",
+      "limitations": "Fable 5.1 has stronger reported difficult agent results; greater token cost than Sonnet.",
+      "sources": [
+        "https://www.anthropic.com/news/claude-opus-5"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "claude-fable-5-1",
+        "claude-fable-5.1"
+      ],
+      "family": "anthropic",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "debugging",
+        "architecture",
+        "research",
+        "frontend"
+      ],
+      "strengths": "Strong difficult debugging, agentic scientific work and application building.",
+      "limitations": "Separate subscription quota; published harness and effort settings may differ from local CLI; no local quality benchmark yet.",
+      "sources": [
+        "https://www.anthropic.com/claude-fable-and-mythos-5-1"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "grok-4.6"
+      ],
+      "family": "xai",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "frontend",
+        "research"
+      ],
+      "strengths": "Competitive application-building and knowledge-work evidence at low API token price.",
+      "limitations": "Weaker reported terminal and long-horizon software scores than Sol on matched tables; cheap tokens do not guarantee cheap tasks.",
+      "sources": [
+        "https://x.ai/news/grok-4-6",
+        "https://artificialanalysis.ai/models/comparisons/gpt-6-astra-high-vs-grok-4-6"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "gemini-3.6-flash-high"
+      ],
+      "family": "google",
+      "suggested_tier": "medium",
+      "preferred_tasks": [
+        "implementation",
+        "frontend",
+        "documentation"
+      ],
+      "strengths": "Efficient coding, multimodal and knowledge work.",
+      "limitations": "Older Flash generation; benchmark claims do not certify agy harness or hard debugging success.",
+      "sources": [
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-6-flash-3-5-flash-lite-3-5-flash-cyber/"
+      ],
+      "applicable_efforts": [
+        "high"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "gemini-3.8-flash-high"
+      ],
+      "family": "google",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "frontend"
+      ],
+      "strengths": "Newer long-horizon software engineering and multi-step reasoning results.",
+      "limitations": "Introductory pricing and provider claims; agy quota/latency differ from API; low/medium variants not assumed equivalent.",
+      "sources": [
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/"
+      ],
+      "applicable_efforts": [
+        "high"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability"
+    }
+  ]
+}

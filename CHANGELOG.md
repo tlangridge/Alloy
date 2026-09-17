@@ -3,6 +3,21 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.4.0] - 2026-09-17
+
+### Added
+- Evidence-based task preferences for exact model IDs and reasoning efforts, with dated sources, expiry, configurable cost tolerance and `alloy models advise`.
+- Nine Jev task categories; comparable metered profiles use estimated dollars, while mixed billing retains quota-adjusted relative costs.
+- Explicit verified-failure context for Jev and policy: capability escalation after failed attempts and per-task failed-profile exclusions. Existing pins, budgets, quota reserves and independent Checker constraints still apply.
+
+### Changed
+- New Sol starter profiles support large tasks. Existing profile tiers remain user-controlled.
+- Document research strengths/limitations and preserve model-inversion adversarial review, the same Maker within a loop, and the two-fix-loop limit.
+
+### Validation
+- 149 automated tests cover evidence expiry, task preferences, metered comparisons, retry context and independent Checker eligibility.
+- Prior live Jev rubric-v2 checks passed 50 complexity examples and 16 task-kind examples. These are synthetic classification checks, not measured coding-quality or cost improvements.
+
 ## [0.3.3] - 2026-09-17
 
 ### Fixed

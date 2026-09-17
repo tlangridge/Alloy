@@ -461,6 +461,18 @@ other providers' models. A routed Checker uses `--mode review --exclude-family
 <maker-family>`; ensure an independent non-host Checker remains, as required by
 execute. Host families are `openai`, `anthropic`, `xai`, and `google`.
 
+Use `alloy models advise` to inspect dated task preferences and model candidates.
+Include observed bug symptoms, failing gates and confirmed review findings in the
+routing prompt. For a new attempt after verified quality failures, pass
+`--prior-failures N`; one requires at least medium capability, two require large.
+Use `--failed-profile ID` only when deliberately excluding a failed profile for
+that new attempt. Authentication, quota and transport failures do not count.
+These flags do not authorize automatic retries, extra fix loops, or changing the
+Maker inside an execute loop: retain the same Maker and independent adversarial
+Checker through the two-loop limit. Stop and report unresolved failures at the
+limit; carry the count into a separately authorized new attempt. Never treat a
+zero CLI exit status as proof of quality or a Checker allegation as confirmed.
+
 Show the chosen CLI/model/effort and policy reason. Unknown billing or quota is
 not zero cost. Route failures do not authorize budget increases or permission
 bypasses; explain the missing constraint and retain host handling as appropriate.
