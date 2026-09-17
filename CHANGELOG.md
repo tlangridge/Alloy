@@ -3,6 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.5.0] - 2026-09-17
+
+### Added
+- Skill-startup automatic stable-release updates for clean official Git installs, with a daily cache, check-only/disabled modes, and nonblocking skips while Alloy runs are active.
+- Preserve local work and developer branches, require a released starting commit and a fast-forward target, and report copied installs/worktrees as unsupported.
+- Reload skill instructions after an update; all skills linked to the installation share the updated code.
+
+### Validation
+- 164 automated tests cover the dispatcher, routing, usage and updater, including local-edit protection, stable-release validation, concurrent runs, offline failures and fast-forward-only installation.
+
 ## [0.4.0] - 2026-09-17
 
 ### Added

@@ -87,8 +87,9 @@ ALLOY_CODEX_EFFORT=high
 # its writes/shell are otherwise uncontained. Only enable if you accept that.
 # ALLOY_ALLOW_UNSANDBOXED=0
 
-# Disable the throttled, git-based update check (the one optional network call
-# Alloy makes; it sends no data of its own).
+# Skill startup automatically installs stable releases on clean official Git installs.
+# Set to 0 for check-only operation, or disable all checks with the second option.
+# ALLOY_AUTO_UPDATE=1
 # ALLOY_NO_UPDATE_CHECK=0
 
 # Subscription meters: native Codex/Claude/Antigravity usage reads, cached for

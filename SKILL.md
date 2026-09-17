@@ -159,30 +159,30 @@ The router uses this snapshot itself; do not override its
 family/tier constraints or treat unknown capacity as unlimited. Never redeem
 reset credits or change subscriptions as part of displaying usage.
 
-Then run the throttled update check (it does a `git fetch` against the skill's own
-remote at most once per day and sends no data):
+Then run the throttled automatic updater at the start of each skill invocation,
+before dispatching work (at most one network check per 24 hours):
 
 ```bash
 ~/.claude/skills/alloy/bin/alloy update-check
 ```
 
-If it prints `UPDATE_AVAILABLE …`, **stop and ask the user whether to update
-before running** (AskUserQuestion, or a plain question if that's unavailable):
+This installs newer published stable releases for clean official Git installations
+on main/master. No confirmation is needed. On `UPDATED`, read the updated
+`SKILL.md` from disk before proceeding and mention the new version once. This
+updates the CLI and every skill symlink to that installation. Do not run an
+updater during an execute loop or retry an update in the same invocation.
 
-- **Update now**, then continue on the new version:
-  - git checkout → `git -C <skill-root> pull --ff-only` (fast-forward only, so it
-    can't clobber local work; if it fails because the checkout diverged or has
-    local changes, report that and let the user resolve — never force).
-  - installed via skills.sh → `npx skills update alloy`.
-  - `bin/alloy` changes take effect immediately; updated SKILL.md instructions
-    load on the next session, so finish this run, then re-invoke.
-- **Continue on the current version** → proceed without updating.
+Local changes, developer branches, non-release commits, and active Alloy runs
+prevent installation. Never reset/stash local changes or force an update.
+Copied skills.sh installs/worktrees report `UPDATE_UNSUPPORTED`; mention the
+manual upgrade path once (`npx skills update` for skills.sh), then proceed.
+Offline failures and throttled/skipped checks do not block the task.
 
-If it prints anything else (`UP_TO_DATE` / `UPDATE_CHECK_SKIPPED` / `UNKNOWN` /
-`UPDATE_CHECK_DISABLED`), say nothing about updates and proceed. The check is
-throttled to once per day, so this offer appears at most about once a day — not
-on every run. If you are running non-interactively (no human to ask), just report
-`UPDATE_AVAILABLE` and proceed.
+Users can set `ALLOY_AUTO_UPDATE=0` for check-only operation or
+`ALLOY_NO_UPDATE_CHECK=1` to disable checks altogether. Respect these settings;
+do not ask permission or run a manual installer to bypass them. `--check-only`
+reports without installing; `--force` bypasses only the daily timer.
+
 
 ---
 
