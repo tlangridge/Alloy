@@ -132,3 +132,9 @@ documented by [CodexBar](https://github.com/steipete/CodexBar/blob/main/docs/gro
 
 Use `/alloy-usage` in an agent for the dedicated usage command. `install.sh` installs
 this alias alongside `/alloy` and `/alloy-execute`; `alloy usage` is the terminal equivalent.
+
+Claude model limits from `limits[].kind = weekly_scoped` are displayed separately,
+including **Claude / Fable**. Fable routing observes both the shared Claude windows
+and its own weekly limit. `is_active` describes the current selection and does not
+hide a reported bucket. Unknown model scopes and surface-specific limits are not
+assumed to apply to every Claude model. No additional provider request is needed.

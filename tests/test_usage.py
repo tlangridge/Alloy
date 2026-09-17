@@ -121,6 +121,31 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(u.headroom(sonnet, self.snapshot), 0)
         self.assertAlmostEqual(u.headroom(opus, self.snapshot), .7)
 
+    def test_claude_fable_scoped_limit_display_and_routing(self):
+        lane = dict(kind='weekly_scoped', percent=16, is_active=False,
+            resets_at=time.time()+3600, scope=dict(model=dict(id=None, display_name='Fable'), surface=None))
+        data = dict(seven_day=dict(utilization=30), limits=[lane])
+        row = self.row('claude'); row['windows'] = u.parse_claude(data)
+        self.snapshot['providers']['claude'] = row
+        self.assertIn('Claude / Fable', u.render(self.snapshot))
+        self.assertIn('84%', u.render(self.snapshot))
+        fable = dict(adapter='claude', model='claude-fable-5.1', billing_mode='subscription')
+        self.assertAlmostEqual(u.headroom(fable, self.snapshot), .7)
+        lane['percent'] = 95
+        row['windows'] = u.parse_claude(data)
+        self.assertAlmostEqual(u.headroom(fable, self.snapshot), .05)
+        self.assertAlmostEqual(u.headroom(dict(fable, model='sonnet'), self.snapshot), .7)
+        data['seven_day_fable'] = dict(utilization=10)
+        self.assertEqual(len(u.parse_claude(data)), 2)
+        lane['percent'] = None
+        with self.assertRaises(u.UsageError): u.parse_claude(data)
+
+    def test_claude_scoped_unknown_or_surface_not_shared(self):
+        for model, surface in [('Future', None), ('Fable', 'cowork')]:
+            data = dict(seven_day=dict(utilization=30), limits=[dict(kind='weekly_scoped',
+                percent=100, scope=dict(model=dict(display_name=model), surface=surface))])
+            self.assertEqual(len(u.parse_claude(data)), 1)
+
     def test_agy_builtin_contract_and_separate_pools(self):
         data = dict(status='SUCCESS', command=dict(name='usage', data=dict(groups=[dict(buckets=[
             dict(id='gemini-5h', window='5h', remaining_fraction=.9),

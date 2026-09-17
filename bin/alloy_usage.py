@@ -94,6 +94,31 @@ def parse_claude(data):
         scope = field[len('seven_day_'):] if field.startswith('seven_day_') else None
         pool = 'claude:' + scope if scope else 'claude'
         windows.append(window(pool, '5h' if field == 'five_hour' else '7d', 1 - used / 100, lane.get('resets_at')))
+    # Newer responses expose model buckets in limits, not seven_day_<model>.
+    limits = data.get('limits') or []
+    if not isinstance(limits, list):
+        raise UsageError('Unrecognized Claude scoped limits')
+    for lane in limits:
+        if not isinstance(lane, dict) or lane.get('kind') != 'weekly_scoped':
+            continue
+        scope = lane.get('scope')
+        if not isinstance(scope, dict) or scope.get('surface') is not None:
+            continue
+        model = scope.get('model')
+        if not isinstance(model, dict):
+            continue
+        names = ' '.join(str(model.get(k) or '') for k in ('id', 'display_name')).lower()
+        matches = [name for name in ('fable', 'sonnet', 'opus', 'haiku')
+                   if re.search(r'\b' + name + r'\b', names)]
+        if len(matches) != 1:
+            continue
+        used = lane.get('percent')
+        if not finite(used, 0, 100):
+            raise UsageError('Invalid Claude scoped quota percentage')
+        pool = 'claude:' + matches[0]
+        # Prefer the explicit scoped entry over a duplicate legacy bucket.
+        windows = [w for w in windows if w['pool'] != pool]
+        windows.append(window(pool, '7d', 1 - used / 100, lane.get('resets_at')))
     if not windows:
         raise UsageError('Claude did not report subscription windows')
     return windows
@@ -516,6 +541,8 @@ def render(snapshot):
             n = w['remaining_fraction']
             bar = '█' * round(n * 10) + '░' * (10 - round(n * 10))
             pool = w['pool'].partition(':')[2]
+            if provider == 'claude':
+                pool = {'fable': 'Fable', 'sonnet': 'Sonnet', 'opus': 'Opus', 'haiku': 'Haiku'}.get(pool, pool)
             if provider == 'antigravity':
                 pool = {'gemini': 'Gemini', '3p': 'Claude/GPT'}.get(pool, pool)
             if not pool and w['pool'] != provider:
