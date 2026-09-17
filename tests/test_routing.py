@@ -233,14 +233,14 @@ class RouterTests(unittest.TestCase):
             with self.assertRaises(r.RoutingError): r.key()
 
     def test_http_retry_bounded_and_error_body_not_exposed(self):
-        error = lambda: urllib.error.HTTPError('url', 429, 'secret-body', {'Retry-After': '0'}, None)
+        error = lambda: urllib.error.HTTPError('url', 429, 'secret-body', {'Retry-After': '0'}, io.BytesIO(b'secret-body'))
         opener = Mock(); opener.open.side_effect = [error(), error(), error()]
         with patch.object(r, 'key', return_value='secret'), patch.object(r.urllib.request, 'build_opener', return_value=opener), patch.object(r.time, 'sleep'):
             with self.assertRaisesRegex(r.RoutingError, 'HTTP 429'): r.request({})
         self.assertEqual(opener.open.call_count, 3)
 
     def test_http_401_does_not_retry_or_reveal_body(self):
-        opener = Mock(); opener.open.side_effect = urllib.error.HTTPError('url', 401, 'secret', {}, None)
+        opener = Mock(); opener.open.side_effect = urllib.error.HTTPError('url', 401, 'secret', {}, io.BytesIO(b'secret-body'))
         with patch.object(r, 'key', return_value='secret'), patch.object(r.urllib.request, 'build_opener', return_value=opener):
             with self.assertRaisesRegex(r.RoutingError, 'HTTP 401'): r.request({})
         self.assertEqual(opener.open.call_count, 1)
