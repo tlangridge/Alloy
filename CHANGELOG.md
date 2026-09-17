@@ -3,6 +3,11 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.3.2] - 2026-09-17
+
+### Changed
+- Version-only patch release. Includes the Grok quota support and `/alloy-usage` command shipped in 0.3.1; no functional changes.
+
 ## [0.3.1] - 2026-09-17
 
 ### Added
