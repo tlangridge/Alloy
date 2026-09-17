@@ -190,7 +190,9 @@ class RouterTests(unittest.TestCase):
         def output(argv, **kwargs):
             model = 'grok-new' if 'grok' in argv[0] else 'gemini-new'
             return Mock(returncode=0, stdout=model, stderr='')
-        with patch.object(r.subprocess, 'run', side_effect=output):
+        with patch.object(r.subprocess, 'run', side_effect=output), \
+             patch.object(core.ADAPTERS['grok'], 'resolved_bin', return_value='/mock/grok'), \
+             patch.object(core.ADAPTERS['antigravity'], 'resolved_bin', return_value='/mock/agy'):
             cache = r.refresh(core, self.available)
         self.assertIn('grok-new', cache['discovered']['grok']['models'])
         self.assertEqual(before, (r.root() / 'routing.json').read_text())

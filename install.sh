@@ -71,6 +71,8 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 chmod +x "$REPO_DIR/bin/alloy"
+# Print a literal $PATH for the user to paste into their shell configuration.
+# shellcheck disable=SC2016
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) printf 'Add this directory to PATH, or invoke %s/alloy directly:\n  export PATH="%s:$PATH"\n' "$BIN_DIR" "$BIN_DIR" ;;
