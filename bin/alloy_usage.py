@@ -99,6 +99,73 @@ def parse_claude(data):
     return windows
 
 
+def parse_grok(data):
+    config = data.get('config') if isinstance(data, dict) else None
+    if not isinstance(config, dict):
+        raise UsageError('Unrecognized Grok billing response')
+    used = config.get('creditUsagePercent')
+    # Only included credits are subscription capacity. Never use on-demand caps.
+    if used is None:
+        consumed, limit = config.get('used'), config.get('monthlyLimit')
+        if isinstance(consumed, dict) and isinstance(limit, dict):
+            consumed, limit = consumed.get('val'), limit.get('val')
+            if finite(consumed, 0, 1e18) and finite(limit, 1e-12, 1e18):
+                used = consumed / limit * 100
+    if not finite(used, 0, 100):
+        raise UsageError('Grok did not report valid included-credit usage')
+    period = config.get('currentPeriod')
+    period = period if isinstance(period, dict) else {}
+    end = timestamp(period.get('end'))
+    start = timestamp(period.get('start'))
+    if end is None:
+        end = timestamp(config.get('billingPeriodEnd'))
+        start = timestamp(config.get('billingPeriodStart'))
+    if end is None or (start is not None and (start >= end or start > time.time())):
+        raise UsageError('Grok did not report a valid billing period')
+    duration = end - start if start is not None else None
+    label = 'weekly' if duration and 6*86400 <= duration <= 8*86400 else 'monthly' if duration and 27*86400 <= duration <= 32*86400 else 'credits'
+    return [window('grok', label, 1 - used / 100, end)]
+
+
+def grok_auth_path(core):
+    return Path(core.setting('GROK_HOME') or Path.home() / '.grok').expanduser() / 'auth.json'
+
+
+def fetch_grok(core):
+    if core.setting('XAI_API_KEY') or core.setting('GROK_API_KEY'):
+        raise UsageError('API-key override present; subscription applicability is unknown')
+    with grok_auth_path(core).open('rb') as stream:
+        raw = stream.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        raise UsageError('Grok credential file too large')
+    credentials = json.loads(raw)
+    candidates = [(scope, entry) for scope, entry in credentials.items()
+        if isinstance(entry, dict) and isinstance(entry.get('key'), str) and entry['key']
+        and (scope.startswith('https://auth.x.ai::') or scope == 'https://accounts.x.ai/sign-in')]
+    preferred = [entry for scope, entry in candidates if scope.startswith('https://auth.x.ai::')]
+    entries = preferred or [entry for _, entry in candidates]
+    if len(entries) != 1:
+        raise UsageError('Grok login missing or ambiguous; run grok login')
+    entry = entries[0]
+    expires = timestamp(entry.get('expires_at'))
+    if expires is None or expires <= time.time():
+        raise UsageError('Grok login expired or expiry unknown; run grok login')
+    if str(entry.get('principal_type', '')).lower() == 'team':
+        raise UsageError('Grok team subscription quota is unavailable')
+    request = urllib.request.Request('https://cli-chat-proxy.grok.com/v1/billing?format=credits',
+        headers={'Authorization': 'Bearer ' + entry['key'],
+                 'x-xai-token-auth': 'xai-grok-cli', 'Accept': 'application/json'})
+    try:
+        with urllib.request.build_opener(core.routing.NoRedirect).open(request, timeout=8) as response:
+            raw = response.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            raise UsageError('Grok billing response too large')
+        return 'grok-cli-billing', parse_grok(json.loads(raw))
+    except urllib.error.HTTPError as exc:
+        code = exc.code; exc.close()
+        raise UsageError('Grok billing HTTP %s; keep the CLI responsible for login/token refresh' % code) from None
+
+
 def parse_agy(data):
     if (not isinstance(data, dict) or data.get('status') != 'SUCCESS'
         or data.get('command', {}).get('name') != 'usage'):
@@ -241,7 +308,7 @@ def binding(core, provider):
         'claude': [Path(core.setting('CLAUDE_CONFIG_DIR', str(Path.home() / '.claude'))) / '.credentials.json'],
         'antigravity': [Path.home() / '.gemini' / 'oauth_creds.json',
                        Path.home() / '.gemini/antigravity-cli/antigravity-oauth-token'],
-        'grok': []}[provider]
+        'grok': [grok_auth_path(core)]}[provider]
     parts = [str(p) for p in paths]
     for path in paths:
         try:
@@ -250,7 +317,7 @@ def binding(core, provider):
             parts.append('missing')
     names = {'codex': ('CODEX_API_KEY', 'OPENAI_API_KEY'),
              'claude': ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'),
-             'antigravity': ('ANTIGRAVITY_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'), 'grok': ('XAI_API_KEY',)}[provider]
+             'antigravity': ('ANTIGRAVITY_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'), 'grok': ('XAI_API_KEY', 'GROK_API_KEY')}[provider]
     # Persist only a digest, never tokens, identities or their source contents.
     parts.extend(core.setting(n, '') for n in names)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
@@ -258,7 +325,7 @@ def binding(core, provider):
 
 def fetch(core, provider, options):
     if provider == 'grok':
-        raise UsageError('No supported Grok subscription-limit source; token totals are not remaining quota')
+        return fetch_grok(core)
     if provider == 'codex':
         if core.setting('CODEX_API_KEY') or core.setting('OPENAI_API_KEY'):
             raise UsageError('API-key override present; subscription applicability is unknown')
@@ -463,7 +530,7 @@ def render(snapshot):
             lines.append('| %s | %s | `%s` %.0f%% | %s | %s |' %
                 (label, str(w['window']).replace('|', '\\|').replace('\n', ' '),
                  bar, n * 100, reset_text(w.get('resets_at'), now), status))
-    lines += ['', 'Stale/unknown readings are excluded from quota calculations. Grok quota reporting is not supported yet.']
+    lines += ['', 'Stale/unknown readings are excluded from quota calculations.']
     return '\n'.join(lines) + '\n'
 
 

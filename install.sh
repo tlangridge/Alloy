@@ -22,8 +22,8 @@ BIN_DIR="${ALLOY_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 LINKS=("$BIN_DIR/alloy")
 TARGETS=("$REPO_DIR/bin/alloy")
 add_skills() {
-  LINKS+=("$1/alloy" "$1/alloy-execute")
-  TARGETS+=("$REPO_DIR" "$REPO_DIR/alloy-execute")
+  LINKS+=("$1/alloy" "$1/alloy-execute" "$1/alloy-usage")
+  TARGETS+=("$REPO_DIR" "$REPO_DIR/alloy-execute" "$REPO_DIR/alloy-usage")
 }
 if [ -n "${SKILLS_DIR:-}" ]; then
   add_skills "$SKILLS_DIR"

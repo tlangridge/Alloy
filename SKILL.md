@@ -154,8 +154,8 @@ also includes its startup snapshot in the manifest and stderr.
 
 Treat only fresh quota as evidence. Provider windows are shared subscription
 capacity, not this task's token count. Keep Antigravity's Gemini and Claude/GPT
-pools separate, and preserve Codex/Claude model-specific windows. Grok currently
-reports unknown. The router uses this snapshot itself; do not override its
+pools separate, and preserve Codex/Claude model-specific windows. Grok reads included-credit usage from its CLI billing endpoint when available.
+The router uses this snapshot itself; do not override its
 family/tier constraints or treat unknown capacity as unlimited. Never redeem
 reset credits or change subscriptions as part of displaying usage.
 

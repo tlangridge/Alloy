@@ -19,7 +19,7 @@ An illustrative display (these percentages are examples):
 | Codex | 7d | `██████░░░░` 60% | 2d 4h | fresh |
 | Claude | 5h | `███████░░░` 70% | 1h 20m | fresh |
 | Antigravity / Gemini | weekly | `█████████░` 90% | 4d | fresh |
-| Grok | — | unknown | — | unavailable |
+| Grok | weekly | `█████░░░░░` 51% | 5d 22h | fresh |
 
 Every reported window appears separately, including model-specific windows. A
 bar fills with **remaining** capacity, not consumed capacity. A reset passing is
@@ -50,9 +50,9 @@ stable ID explicitly when multiple sessions share a directory.
 | Codex | Local `codex app-server` → `account/rateLimits/read` | Auth/version dependent; actual window duration is used, not an assumed five-hour window |
 | Claude | Claude login OAuth → Anthropic usage endpoint | Uses existing CLI token/file or the default macOS `Claude Code-credentials` Keychain item; it never refreshes or rewrites CLI credentials |
 | Antigravity | `agy -p /usage --output-format json` | Requires 1.1.11+ and a successful built-in usage report; unknown versions do not run print mode |
-| Grok | Unavailable | `grok usage` is a session token/cost ledger, not verified remaining subscription capacity |
+| Grok | CLI billing REST endpoint with the existing login | Included-credit percentage and billing-period reset; no inference |
 
-On this machine all three supported sources returned live limits. API/proxy
+On this machine all four supported sources returned live limits. API/proxy
 credential overrides disable ambiguous subscription probes rather than assuming
 a different account's capacity applies. A profile explicitly billed as metered
 never uses subscription quota for routing. For profiles whose billing is still
@@ -115,3 +115,20 @@ Only normalized quota observations, source/freshness metadata and credential-
 source digests are cached outside the repository. Tokens, emails, account IDs,
 and reset-credit identifiers are discarded. Digests are omitted from display,
 route context and manifests. Raw API bodies and Keychain secrets are not logged.
+
+### Grok billing source
+
+Alloy makes one bounded GET to `https://cli-chat-proxy.grok.com/v1/billing?format=credits`,
+using the existing unexpired login in `~/.grok/auth.json` (`GROK_HOME` is respected).
+It reads `creditUsagePercent`, or the legacy included `used / monthlyLimit` ratio.
+The billing period determines the reset and weekly/monthly label. On-demand spend
+caps are never treated as subscription quota. Missing fields, expired credentials,
+team logins and API-key overrides leave capacity unknown. Alloy does not refresh
+tokens, read browser cookies or persist identities. Credential-file changes invalidate
+the usage cache. The existing two-minute cache and quota routing policy apply.
+
+This is an undocumented provider interface and may change. The approach is also
+documented by [CodexBar](https://github.com/steipete/CodexBar/blob/main/docs/grok.md).
+
+Use `/alloy-usage` in an agent for the dedicated usage command. `install.sh` installs
+this alias alongside `/alloy` and `/alloy-execute`; `alloy usage` is the terminal equivalent.
