@@ -99,12 +99,12 @@ configured model access is still best-effort until its first execution.
 
 ## Cost controls
 
-Profiles carry a capability tier and a relative `cost_rank`. The resolver picks
-the lowest rank after applying fresh quota-pressure adjustments among eligible
-profiles. Exhausted or reserved live quota is excluded first. Starter ranks and tiers are editable
+Profiles carry a capability tier and a relative `cost_rank`. The resolver uses fresh quota-pressure adjustments, then permits a bounded
+cost premium for documented task fit (see below). When all eligible profiles
+have metered prices, estimated dollars replace relative ranks. Exhausted or reserved live quota is excluded first. Starter ranks and tiers are editable
 priors, not benchmark claims. Billing is subscription, metered or unknown;
 unknown does not mean free. [Live subscription meters](usage.md) supply Codex,
-Claude and Antigravity availability, with Grok reported as unknown.
+Claude, Grok and Antigravity availability when their local quota sources are available.
 
 For metered profiles, set `--input-per-million` and `--output-per-million` with
 `models add`. Estimates use policy token assumptions (10,000 input and 2,000
@@ -142,3 +142,46 @@ python3 bin/evaluate-routing --output /tmp/jev-evaluation.json
 Uninstallation removes only this checkout's links. Credentials, configuration
 and run history are retained. Setup/model edits save the preceding configuration
 as `routing.json.bak`; unsupported schema versions fail without rewriting it.
+
+## Evidence-informed task recommendations
+
+See [model research](model-research.md) for strengths, limitations and sources.
+`alloy models advise` reports known model evidence, pinned alternatives and newer
+candidates without modifying configuration. Route JSON now includes the top three
+eligible recommendations and the selection cost basis.
+
+The router uses Jev's task kind to favor documented strengths within 25% of the
+cheapest eligible cost for medium/large tasks. Small tasks stay cost-first. Prices
+are directly compared only when all eligible profiles are metered with known
+prices; mixed billing retains configured relative ranks and quota pressure.
+
+Optional `routing.json` policy fields:
+
+```json
+{"use_model_evidence": true, "task_fit_cost_slack": 0.25, "kind_confidence_floor": 0.65}
+```
+
+Set `use_model_evidence` to false for cost-only ranking. Exact model/effort matching
+and catalog expiry prevent old research from silently applying to new models.
+Existing profile tiers stay authoritative; `models advise` suggests adjustments.
+For custom models, `alloy models add --id PROFILE --task-preferences debugging,review`
+updates preferences; an empty string clears them. These are user priors, not
+measured success rates. Metadata never overrides hard eligibility constraints.
+
+## Recurring failures
+
+Pass observed bug symptoms and confirmed failing gates in the task prompt, plus
+`--prior-failures N` for verified quality failures on this task. Jev sees the count;
+policy requires at least medium after one failure and large after two. Repeat
+`--failed-profile ID` to exclude known failed profiles for a deliberately restarted
+attempt. Unknown IDs and exclusions without a failure count are rejected before
+inference. Exclusions apply to reserved Checkers too; pins and budgets still hold.
+These observations are stored with each routing decision, not inferred from CLI
+exit codes or treated as permanent model-wide penalties. Auth/outage failures do
+not count. Execute retains the same Maker, independent adversarial Checker and
+two-fix-loop limit. A restart needs its own authorization; no automatic rerouting.
+
+Token efficiency remains an estimate: metered selection uses configured token
+budgets and prices, while subscription selection uses quota pressure and relative
+cost ranks. Actual provider-specific tokens per successful fix are not yet
+learned from outcomes, and no calibrated expected-success probability is claimed.
