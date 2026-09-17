@@ -3,6 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.3.3] - 2026-09-17
+
+### Fixed
+- Display Claude Fable's separate weekly capacity from Claude's scoped usage response, alongside overall Claude limits, without another provider request.
+- Apply the scoped limit to Fable routing while retaining shared limits. Ignore unknown and surface-specific scopes rather than applying them to unrelated models.
+- Label recognized Claude model pools by name and avoid duplicate legacy/scoped buckets.
+
+### Validation
+- 135 automated tests pass, including Fable display, shared/scoped routing limits and scope isolation. A live usage read confirmed the separate Fable meter.
+
 ## [0.3.2] - 2026-09-17
 
 ### Changed
