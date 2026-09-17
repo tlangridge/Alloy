@@ -3,6 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.3.1] - 2026-09-17
+
+### Added
+- Invoke `/alloy-usage` directly in an agent, alongside `/alloy-execute`. The installer includes the new usage command.
+- Show Grok's remaining included subscription credits and reset time in `alloy usage`, using the existing Grok CLI login and a cached billing request.
+- Consider fresh Grok quota when routing tasks. Missing billing data, expired logins, team accounts and API-key overrides retain unknown capacity; on-demand spending caps never count as subscription quota.
+
+### Validation
+- 133 automated tests pass, including Grok parsing, credential/cache binding and sanitized HTTP failures. A live billing read confirmed the weekly quota meter without a model call.
+
 ## [0.3.0] - 2026-09-17
 
 ### Added
