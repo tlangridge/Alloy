@@ -1254,16 +1254,15 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 argv, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env,
                 start_new_session=True,
             )
-            pgid = os.getpgid(proc.pid)
-            with _LIVE_LOCK:
-                _LIVE_PGIDS.add(pgid)
-            # Record "running" + the pid NOW, so `alloy status` can report a run
-            # in flight from disk (no wake-up from the dispatcher required).
-            status["status"] = "running"
-            status["pid"] = proc.pid
-            status["started_utc"] = now_utc_iso()
-            write_atomic(status_path, json.dumps(status, indent=2))
+            pgid = proc.pid  # start_new_session makes the child its group leader.
             try:
+                with _LIVE_LOCK:
+                    _LIVE_PGIDS.add(pgid)
+                # Persist inside the cleanup guard: disk errors must not orphan workers.
+                status["status"] = "running"
+                status["pid"] = proc.pid
+                status["started_utc"] = now_utc_iso()
+                write_atomic(status_path, json.dumps(status, indent=2))
                 hb = max(2, setting_int("ALLOY_HEARTBEAT", DEFAULT_HEARTBEAT_S))
                 stall_s = max(0, setting_int("ALLOY_STALL_TIMEOUT", 0))  # 0 = off
                 last_bytes, last_activity = 0, time.monotonic()
@@ -1311,7 +1310,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                         log(f"{adapter.name}: working {int(now - start)}s/{timeout_s}s -- {note}")
                         next_hb = now + hb
             finally:
-                if hasattr(adapter, "execution_permissions"):
+                if hasattr(adapter, "execution_permissions") or proc.poll() is None:
                     _kill_group(pgid)
                     proc.wait()
                 with _LIVE_LOCK:
@@ -1325,6 +1324,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         log(f"{adapter.name}: NOT INSTALLED")
         return status
     except Exception as exc:  # pragma: no cover - defensive
+        status["status"] = "error"
         status["error"] = repr(exc)
         status["duration_ms"] = int((time.monotonic() - start) * 1000)
         write_atomic(status_path, json.dumps(status, indent=2))

@@ -12,7 +12,7 @@ All notable changes to Alloy are documented here. Format loosely follows
 - Automatic removal of clean task worktrees/branches after verified integration; unfinished work and detailed task artifacts are retained.
 
 ### Validation
-- 193 automated tests and skill validation pass, including offline end-to-end CLI execution, bounded correction, quota/pin checks, interruption recovery, and merge/squash cleanup proofs.
+- 195 automated tests and skill validation pass, including offline end-to-end CLI execution, bounded correction, quota/pin checks, interruption recovery, process-status write failures, and merge/squash cleanup proofs.
 - Provider write adapters have mock and local help-flag coverage; live provider write execution has not been evaluated.
 
 ## [0.5.0] - 2026-09-17

@@ -215,15 +215,15 @@ def revalidate(core, task, role):
 
 
 def gate(core, task, command, output):
+    child_state = output.with_suffix('.process.json')
     with output.open('wb') as f:
         cp = subprocess.Popen(command, shell=True, cwd=task['worktree'], stdin=subprocess.DEVNULL,
                               stdout=f, stderr=subprocess.STDOUT, start_new_session=True, env=core.routing.clean_env())
-        child_state = output.with_suffix('.process.json')
-        core.routing.save(child_state, dict(status='running', pid=cp.pid))
-        # Use the dispatcher's signal handling for test subprocesses too.
-        with core._LIVE_LOCK:
-            core._LIVE_PGIDS.add(cp.pid)
         try:
+            # Protect registration and persistence failures after launch too.
+            with core._LIVE_LOCK:
+                core._LIVE_PGIDS.add(cp.pid)
+            core.routing.save(child_state, dict(status='running', pid=cp.pid))
             try:
                 code = cp.wait(timeout=task['test_timeout'])
             except subprocess.TimeoutExpired:

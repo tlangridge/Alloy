@@ -413,3 +413,34 @@ else:
         self.assertTrue(Path(env['HOME']).is_relative_to(self.base) if hasattr(Path,'is_relative_to') else str(env['HOME']).startswith(str(self.base)))
         self.assertIn('command',ad._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
+
+
+    def test_gate_status_write_failure_reaps_child(self):
+        children=[]
+        launch=subprocess.Popen
+        def capture(*args,**kwargs):
+            child=launch(*args,**kwargs);children.append(child);return child
+        with patch.object(subprocess,'Popen',side_effect=capture), patch.object(core.routing,'save',side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError,'disk full'):
+                e.gate(core,dict(worktree=str(self.repo),test_timeout=5),
+                       sys.executable+' -c "import time; time.sleep(30)"',self.base/'gate.log')
+        self.assertEqual(len(children),1)
+        self.assertIsNotNone(children[0].poll())
+        self.assertNotIn(children[0].pid,core._LIVE_PGIDS)
+
+    def test_worker_status_write_failure_reaps_child(self):
+        children=[]
+        launch=subprocess.Popen
+        def capture(*args,**kwargs):
+            child=launch(*args,**kwargs);children.append(child);return child
+        ad=e.worker_adapter(core,self.maker,True)
+        ad.resolved_bin=lambda:sys.executable
+        ad.cli_version=lambda:'test'
+        ad.build_args=lambda *args:['-c','import time; time.sleep(30)']
+        with patch.object(subprocess,'Popen',side_effect=capture), patch.object(core,'write_atomic',side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError,'disk full'):
+                core.run_panelist(ad,str(self.prompt),str(self.base/'worker'),5,1000,'make',
+                                  repo=str(self.repo),managed_worktree=True)
+        self.assertEqual(len(children),1)
+        self.assertIsNotNone(children[0].poll())
+        self.assertNotIn(children[0].pid,core._LIVE_PGIDS)
