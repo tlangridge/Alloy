@@ -193,7 +193,8 @@ class ExecutionTests(unittest.TestCase):
         core.routing.save(status,dict(status='running',pid=os.getpgrp()))
         with self.assertRaisesRegex(e.ExecutionError,'still be running'): self.action(task,'resume')
 
-    def test_adapter_write_flags_keep_read_only_defaults(self):
+    @patch.object(core.AntigravityAdapter, '_enforced', return_value=True)
+    def test_adapter_write_flags_keep_read_only_defaults(self, _enforced):
         for name in ('codex','claude','grok','antigravity'):
             decision=dict(cli=name, model='test-model', effort=None)
             ad=e.worker_adapter(core,decision,True)
