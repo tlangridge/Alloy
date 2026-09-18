@@ -11,7 +11,9 @@ Read current TypeSafe API/question documentation for version-dependent changes.
 Keep the runtime standard-library Python 3.8+ and routing opt-in. Routing targets
 Codex, Claude, Grok and Antigravity (`agy`). Model profiles are configuration;
 provider family can differ from the CLI family. Preserve user model pins,
-billing settings, read-only execution and independent Maker/Checker constraints.
+billing settings, read-only consult/review panels and independent Maker/Checker
+constraints. Managed execute authorizes Maker edits/tests in an owned worktree;
+integration and cleanup must preserve unfinished work and require merge proof.
 
 Run `python3 -m unittest discover -s tests -v` and
 `python3 tests/validate_skill.py` for relevant changes. Tests must use mock CLIs

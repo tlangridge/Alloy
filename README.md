@@ -229,15 +229,15 @@ Now, inside Claude Code:
 | `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
-| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Light maker≠checker loop.** The host writes an 8-line SPEC from your sentence; a cheap **Maker** of a *different* model family (read-only, in your repo) returns the change as a unified diff; the host applies it and runs your tests; the panel — every ready family *except* the Maker's — checks it with ≤5 labeled finding cards; only `CONFIRMED` high-severity findings go back to the Maker; at most two fix loops. No tickets, no plan theater. |
+| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** An efficient other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy handles up to two correction rounds. The host judges and integrates, with automatic cleanup after verified integration. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
-In the lifecycle, **the host writes all the code; the panel only ever reads and
-reviews, read-only.** In `execute`, the Maker is invoked read-only too — it
-*returns a diff*, and the host is still the only thing that writes the tree. By default panelists read your real working tree (so they
-ground answers in your actual code), but their CLI read-only flag stops them
-editing files, running builds, or making any change — best-effort, with a tamper
-tripwire as backstop. The host does all the writing.
+Consult/review panels stay read-only. In managed `execute`, the Maker writes
+and tests in an isolated Git worktree while the Checker stays read-only. Alloy
+handles correction rounds and returns a compact host handoff. The host judges
+and integrates with `alloy integrate`; successful integration removes the owned
+worktree and branch. Failed or interrupted work is retained. Worktrees provide
+workflow isolation, not an OS security boundary. [Execution guide](docs/execution.md).
 
 The panel reads the repo itself, so you rarely need to spoon-feed files. When you
 *do* want to force specific files into the prompt (e.g. something outside the
@@ -261,10 +261,10 @@ research, planning, debugging triage, security/correctness review — *"if the c
 of being wrong is higher than the cost of asking three models, fuse."* They are a
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
 distinctive voice and just adds latency and cost). That is why Alloy uses the
-panel for the *thinking* and leaves the *writing* to the host — and why
-`execute` does **not** fuse the implementation: one cheap Maker drafts the diff,
-and the panel is used for what it is good at, proving a concrete diff fails a
-concrete spec.
+panel for comparing ideas. Managed `execute` delegates implementation and
+testing to one efficient Maker. A separate
+model family challenges the result against the spec; the same Maker handles
+corrections before the host receives the result.
 
 ## Safety model
 
@@ -297,14 +297,15 @@ concrete spec.
   this command".
 - **Prompts go on stdin**, never on the command line (no `ARG_MAX` limits, no
   quoting bugs, no shell injection, no leaking prompts into `ps`).
-- **No auto-approve.** Alloy never passes `--yolo` / `-y` /
+- **No sandbox bypass flags.** Alloy never passes `--yolo` / `-y` /
   `--dangerously-bypass-approvals-and-sandbox`.
-- **Execute mode does not change who writes.** The Maker is a normal read-only
-  panelist run (`panel --panelists <maker>`) that returns a unified diff; the
-  host applies it with `git apply` (or by hand) under its normal approval flow,
-  and the Checker panel excludes the Maker's model family so the check is
-  independent. Only `CONFIRMED` high-severity findings inside the diff may
-  change the tree; the loop is capped at two rounds.
+- **Managed execute grants explicit edit/test permissions.** Its Maker uses an
+  owned worktree; its Checker remains read-only. Allowed paths are checked after
+  execution. `task.json` and worker `status.json` expose file-write and command
+  permissions separately, including enforcement limits. The loop stops after
+  two correction rounds. `alloy integrate` cleans up only after proven integration;
+  `alloy cleanup` checks ancestry or an exact external squash diff. Dirty or
+  unreviewed worktrees are retained. See [execution boundaries](docs/execution.md).
 - **Secret scanning.** Panelist output (both the saved answer and the raw
   stdout/stderr files) is scanned and redacted for common secret shapes before it
   is saved. This is a best-effort heuristic, not a guarantee.
@@ -350,7 +351,7 @@ variables (env wins over the file):
 | `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, and antigravity on agy >= 1.1). Set it to pin a narrower / cheaper panel. |
 | `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
-| `ALLOY_MAKER_TIMEOUT` | `1800` | timeout for `panel --mode make` (the execute mode's Maker: one model that reads the repo before it writes a diff, where a timeout is lost work rather than a partial panel). `--timeout` overrides both |
+| `ALLOY_MAKER_TIMEOUT` | `1800` | timeout for legacy read-only `panel --mode make`. Managed `execute` uses `--timeout` (default 1800s per worker) and `--test-timeout` (600s per gate) |
 | `ALLOY_HEARTBEAT` | `30` | seconds between progress heartbeats for a slow panelist |
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
@@ -407,12 +408,10 @@ template, and the worked `cursor-agent` example (which shows how an adapter with
 
 ## Roadmap
 
-The panel reads your repo but stays **read-only** — it never writes; in
-`execute` the Maker returns a diff and the host applies it. Possible later
-PRs: an opt-in `alloy make` adapter that lets the Maker edit an isolated git
-worktree directly (explicit flag, never the real tree, no bypass flags),
-auto-running builds/tests, and a `ALLOY_JUDGE=codex|grok` judge-rotation
-override.
+Consult/review panels stay read-only. Managed execute delegates editing, tests
+and bounded correction to provider CLIs, with host integration and verified
+cleanup. Future orchestration can build on the task records and permission
+contract without weakening independent review or unfinished-work preservation.
 
 ## License
 

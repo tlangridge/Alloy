@@ -58,7 +58,9 @@ required tier, policy reason, rejected profiles, Jev probabilities, usage and
 latency. A routed panel also records it in `manifest.json`. Prompt-free decision
 history lives under the routing directory; ordinary panel artifacts still
 contain the prompt. A route selects a new task; it does not switch the model in
-an existing interactive session. The host still applies Maker diffs and tests.
+an existing interactive session. Managed `alloy execute --route` delegates edits,
+tests and correction to provider CLIs in an owned worktree; the host judges and
+integrates. See [managed execution](execution.md).
 
 `--panelists` restricts eligible adapters. Existing `ALLOY_*_MODEL` pins remain
 binding: add a matching profile or remove a pin to let that CLI use alternatives.

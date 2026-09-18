@@ -1,0 +1,415 @@
+"""Managed lifecycle tests: real temporary Git repos, fake CLIs, no paid calls."""
+import argparse
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+loader = importlib.machinery.SourceFileLoader('execution_core', str(ROOT / 'bin/alloy'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+core = importlib.util.module_from_spec(spec)
+sys.modules[loader.name] = core
+loader.exec_module(core)
+e = core.execution
+REAL_SELECT, REAL_DISPATCH, REAL_REVALIDATE = e.select, e.dispatch, e.revalidate
+
+
+class ExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.repo = self.base / 'repo'; self.repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
+        e.git(self.repo, 'checkout', '-b', 'main')
+        e.git(self.repo, 'config', 'user.name', 'Test')
+        e.git(self.repo, 'config', 'user.email', 'test@example.invalid')
+        (self.repo / 'file.txt').write_text('old\n')
+        e.git(self.repo, 'add', '.'); e.git(self.repo, 'commit', '-qm', 'base')
+        self.env = patch.dict(os.environ, {'ALLOY_RUN_ROOT': str(self.base / 'state/runs'),
+            'ALLOY_ROUTING_HOME': str(self.base / 'config'), 'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off'})
+        self.env.start(); self.addCleanup(self.env.stop)
+        patch.object(core, '_CONFIG', {}).start()
+        self.maker = dict(cli='claude', family='anthropic', model='sonnet', effort=None, profile='maker')
+        self.checker = dict(cli='grok', family='xai', model='grok-4.6', effort=None, profile='checker')
+        self.select = patch.object(e, 'select', return_value=(self.maker, self.checker)).start()
+        patch.object(e, 'probe').start()
+        patch.object(e, 'revalidate').start()
+        self.addCleanup(patch.stopall)
+        self.prompt = self.base / 'task.txt'; self.prompt.write_text('Change file.txt to new. Test it.')
+        self.args = argparse.Namespace(repo=str(self.repo), prompt_file=str(self.prompt), route=False,
+            maker_profile='maker', checker_profile='checker', host_family='openai', allow_path=['file.txt'],
+            test=[sys.executable + ' -c "from pathlib import Path; assert Path(\'file.txt\').read_text()==\'new\\n\'"'],
+            max_fix_rounds=2, timeout=10, test_timeout=5, max_estimated_usd=None)
+        self.verdicts = []
+        self.calls = []
+        def dispatch(core, task, role, prompt, folder):
+            self.calls.append((role, prompt))
+            folder.mkdir(parents=True, exist_ok=True)
+            if role == 'maker':
+                (Path(task['worktree']) / 'file.txt').write_text('new\n')
+                text = 'Updated file and ran checks.'
+            else:
+                text = json.dumps(self.verdicts.pop(0) if self.verdicts else dict(verdict='pass', findings=[]))
+            result = folder / 'result.md'; result.write_text(text)
+            return dict(status='ok', result_path=str(result))
+        patch.object(e, 'dispatch', side_effect=dispatch).start()
+
+    def create(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = e.create(core, self.args)
+        ids = list((e.home(core) / 'tasks').glob('*/task.json'))
+        return code, e.load(core, ids[-1].parent.name)
+
+    def action(self, task, command, **kw):
+        args = argparse.Namespace(task_id=task['id'], command=command, squash=False, integrated_commit=None, dry_run=False)
+        for k,v in kw.items(): setattr(args,k,v)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return e.lifecycle(core, args)
+
+    def test_full_execute_integrate_and_cleanup(self):
+        code, task = self.create()
+        self.assertEqual(code, 0); self.assertEqual(task['state'], 'ready')
+        self.assertEqual((self.repo / 'file.txt').read_text(), 'old\n')
+        self.assertEqual([c[0] for c in self.calls], ['maker', 'checker'])
+        self.assertTrue(task['permissions']['maker']['repository_write'])
+        self.assertFalse(task['permissions']['checker']['repository_write'])
+        self.assertEqual(self.action(task, 'integrate'), 0)
+        self.assertFalse(Path(task['worktree']).exists())
+        self.assertEqual((self.repo / 'file.txt').read_text(), 'new\n')
+        self.assertEqual(e.load(core, task['id'])['state'], 'cleaned')
+        self.assertNotEqual(e.git(self.repo, 'show-ref', '--verify', 'refs/heads/' + task['branch'], check=False).returncode, 0)
+        self.assertTrue((e.taskdir(core, task['id']) / 'changes.patch').exists())
+        self.assertEqual(self.action(task, 'cleanup'), 0)
+
+    def test_squash_integrate_cleanup_proof(self):
+        _, task = self.create()
+        self.assertEqual(self.action(task, 'integrate', squash=True), 0)
+        record = e.load(core, task['id'])
+        self.assertEqual(record['integration']['method'], 'exact_squash_diff')
+        self.assertFalse(Path(task['worktree']).exists())
+
+    def test_unmerged_task_not_cleaned(self):
+        _, task = self.create()
+        with self.assertRaisesRegex(e.ExecutionError, 'not proven'):
+            self.action(task, 'cleanup')
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_local_edits_and_new_commits_prevent_cleanup(self):
+        _, task = self.create()
+        e.git(self.repo, 'merge', '--ff-only', task['tip'])
+        p = Path(task['worktree']) / 'file.txt'; p.write_text('unfinished')
+        with self.assertRaisesRegex(e.ExecutionError, 'local edits'):
+            self.action(task, 'cleanup')
+        e.git(task['worktree'], 'add', '.'); e.git(task['worktree'], 'commit', '-qm', 'extra')
+        with self.assertRaisesRegex(e.ExecutionError, 'new commits'):
+            self.action(task, 'cleanup')
+
+    def test_external_squash_exact_match_required(self):
+        _, task = self.create()
+        e.git(self.repo, 'merge', '--squash', task['tip']); e.git(self.repo, 'commit', '-qm', 'squashed')
+        merged = e.git(self.repo, 'rev-parse', 'HEAD')
+        with self.assertRaises(e.ExecutionError): self.action(task, 'cleanup')
+        self.assertEqual(self.action(task, 'cleanup', integrated_commit=merged, dry_run=True), 0)
+        self.assertTrue(Path(task['worktree']).exists())
+        self.assertEqual(self.action(task, 'cleanup', integrated_commit=merged), 0)
+
+    def test_unrelated_or_partial_squash_refused(self):
+        _, task = self.create()
+        (self.repo / 'file.txt').write_text('different\n')
+        e.git(self.repo, 'commit', '-qam', 'other')
+        sha = e.git(self.repo, 'rev-parse', 'HEAD')
+        with self.assertRaisesRegex(e.ExecutionError, 'exactly match'):
+            self.action(task, 'cleanup', integrated_commit=sha)
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_target_advanced_or_dirty_refuses_integration(self):
+        _, task = self.create()
+        e.git(self.repo, 'commit', '--allow-empty', '-qm', 'advanced')
+        with self.assertRaisesRegex(e.ExecutionError, 'Target advanced'):
+            self.action(task, 'integrate')
+        (self.repo / 'file.txt').write_text('local')
+        with self.assertRaisesRegex(e.ExecutionError, 'must be clean'):
+            self.action(task, 'integrate')
+
+    def test_review_failure_drives_correction_without_host(self):
+        self.verdicts = [dict(verdict='fail', findings=[dict(path='file.txt', evidence='Example failure', fix='Check exact newline')])]
+        code, task = self.create()
+        self.assertEqual(code, 0); self.assertEqual(len(task['rounds']), 2)
+        self.assertIn('Example failure', self.calls[2][1])
+        self.assertEqual([c[0] for c in self.calls], ['maker','checker','maker','checker'])
+
+    def test_failed_gates_bounded_and_retained(self):
+        self.args.test = [sys.executable + ' -c "raise SystemExit(1)"']
+        code, task = self.create()
+        self.assertEqual(code, 3); self.assertEqual(task['state'], 'needs_attention')
+        self.assertEqual(len(task['rounds']), 3)
+        self.assertTrue(all(c[0] == 'maker' for c in self.calls))
+        self.assertTrue(Path(task['worktree']).exists())
+        with self.assertRaises(e.ExecutionError): self.action(task,'cleanup')
+
+    def test_scope_violation_stops_before_review(self):
+        self.args.allow_path = ['elsewhere']
+        code, task = self.create()
+        self.assertEqual(code, 3); self.assertIn('outside allowed', task['error'])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_no_false_pass_on_malformed_review(self):
+        self.verdicts = [dict(verdict='pass', findings=[dict(path='file.txt', evidence='Bug', fix='Fix')])]
+        code, task = self.create()
+        self.assertEqual(code, 3); self.assertIn('Inconsistent', task['error'])
+
+    def test_active_task_lock_blocks_cleanup(self):
+        _, task = self.create()
+        with e.locked(e.taskdir(core, task['id']) / 'task.lock'):
+            with self.assertRaisesRegex(e.ExecutionError, 'busy'):
+                self.action(task, 'cleanup')
+
+    def test_recovery_after_worktree_removal(self):
+        _, task = self.create()
+        e.git(self.repo, 'merge', '--ff-only', task['tip'])
+        task.update(state='integrated', integration=e.proof(task)); e.save(core,task)
+        e.git(self.repo,'worktree','remove',task['worktree'])
+        self.assertEqual(self.action(task,'cleanup'), 0)
+
+    def test_managed_paths_and_ids_validated(self):
+        with self.assertRaises(e.ExecutionError): e.load(core,'../repo')
+        _, task = self.create()
+        task['worktree'] = str(self.repo); e.save(core,task)
+        with self.assertRaisesRegex(e.ExecutionError, 'ownership'): e.load(core,task['id'])
+
+    def test_orphaned_worker_blocks_resume(self):
+        _, task = self.create()
+        task['state']='interrupted'; e.save(core,task)
+        status=e.taskdir(core,task['id'])/'round-0/maker/status.json'
+        core.routing.save(status,dict(status='running',pid=os.getpgrp()))
+        with self.assertRaisesRegex(e.ExecutionError,'still be running'): self.action(task,'resume')
+
+    def test_adapter_write_flags_keep_read_only_defaults(self):
+        for name in ('codex','claude','grok','antigravity'):
+            decision=dict(cli=name, model='test-model', effort=None)
+            ad=e.worker_adapter(core,decision,True)
+            prompt=self.base/'prompt.txt';prompt.write_text('Task')
+            with patch.object(core, 'setting', return_value=None):
+                args=ad.build_args(str(prompt),str(self.base/'out'),'make',dict(repo=str(self.repo),pdir=str(self.base/name),timeout_s=10))
+            self.assertFalse(ad.read_only)
+            self.assertNotIn('bypassPermissions',args)
+            self.assertNotIn('--dangerously-skip-permissions',args)
+            self.assertTrue(core.ADAPTERS[name].read_only)
+            if name=='codex':self.assertIn('workspace-write',args)
+            elif name in ('claude','grok'):self.assertIn('acceptEdits',args)
+            else:self.assertIn('accept-edits',args)
+
+    def test_real_subprocess_writes_worktree_and_records_boundary(self):
+        binary = self.base / 'mock-cli'
+        binary.write_text('#!' + sys.executable + "\n" + """
+import json, os, sys
+from pathlib import Path
+if '--version' in sys.argv:
+    print('1.2.3'); raise SystemExit(0)
+if '--help' in sys.argv:
+    print('acceptEdits --allowedTools --allow --tools --permission-mode --prompt-file --output-format'); raise SystemExit(0)
+assert 'TYPESAFE_API_KEY' not in os.environ
+mode = sys.argv[sys.argv.index('--permission-mode') + 1]
+if mode == 'acceptEdits':
+    assert '--tools' in sys.argv and 'Bash' in sys.argv
+    Path('file.txt').write_text('new\\n')
+    print('Changed file.txt and tested it.')
+else:
+    assert mode == 'plan'
+    assert Path('file.txt').read_text() == 'new\\n'
+    print(json.dumps(dict(verdict='pass', findings=[])))
+""")
+        binary.chmod(0o700)
+        with patch.dict(os.environ, ALLOY_BIN_CLAUDE=str(binary), ALLOY_BIN_GROK=str(binary), TYPESAFE_API_KEY='fake-test-key'), patch.object(e, 'dispatch', side_effect=REAL_DISPATCH):
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual((self.repo/'file.txt').read_text(), 'old\n')
+        m, c = task['rounds'][0]['maker'], task['rounds'][0]['checker']
+        self.assertEqual(m['cwd'], task['worktree'])
+        self.assertFalse(m['read_only']); self.assertTrue(c['read_only'])
+        self.assertEqual(m['permissions']['command_execution'], 'allowed')
+        self.assertEqual(c['permissions']['command_execution'], 'provider_read_only_policy')
+        self.assertEqual(self.action(task, 'integrate'), 0)
+
+    def test_interruption_resumes_with_shared_attempt_limit(self):
+        original = e.dispatch.side_effect
+        def interrupt(core, task, role, prompt, folder):
+            if role == 'maker':
+                (Path(task['worktree'])/'file.txt').write_text('partial')
+                raise KeyboardInterrupt()
+            return original(core,task,role,prompt,folder)
+        with patch.object(e, 'dispatch', side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt): self.create()
+        path = next((e.home(core)/'tasks').glob('*/task.json'))
+        task=e.load(core,path.parent.name)
+        self.assertEqual(task['state'],'interrupted')
+        self.assertEqual(self.action(task,'resume'),0)
+        task=e.load(core,task['id'])
+        self.assertEqual(len(task['rounds']),2)
+        task['state']='needs_attention'; task['max_fix_rounds']=1; e.save(core,task)
+        before=len(self.calls)
+        self.assertEqual(self.action(task,'resume'),3)
+        self.assertEqual(len(self.calls),before)
+
+    def test_checker_tampering_rejects_pass(self):
+        original=e.dispatch.side_effect
+        def tamper(core,task,role,prompt,folder):
+            out=original(core,task,role,prompt,folder)
+            if role=='checker': (Path(task['worktree'])/'file.txt').write_text('tampered')
+            return out
+        with patch.object(e,'dispatch',side_effect=tamper): code,task=self.create()
+        self.assertEqual(code,3); self.assertIn('Checker changed',task['error'])
+
+    def test_retained_worktree_cap(self):
+        self.args.max_fix_rounds=0
+        self.args.test=['exit 1']
+        for _ in range(4): self.create()
+        with self.assertRaisesRegex(e.ExecutionError,'Four retained'): self.create()
+        self.assertEqual(len(list((e.home(core)/'worktrees').iterdir())),4)
+
+    def test_dirty_source_stops_before_selection(self):
+        (self.repo/'file.txt').write_text('uncommitted')
+        with self.assertRaisesRegex(e.ExecutionError,'clean committed'): self.create()
+        self.select.assert_not_called()
+
+    def test_test_timeout_preserves_work(self):
+        self.args.test=[sys.executable + ' -c "import time; time.sleep(10)"']
+        self.args.test_timeout=1; self.args.max_fix_rounds=0
+        code,task=self.create()
+        self.assertEqual(code,3); self.assertEqual(task['rounds'][0]['gates'][0]['exit_code'],124)
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_selection_and_resume_preserve_independence_and_pins(self):
+        r=core.routing
+        config=r.starter(core)
+        base=config['profiles'][0]
+        config['profiles']=[dict(base,id='maker',adapter='claude',family='anthropic',model='test-maker',tier='large',effort=None,billing_mode='subscription'),
+                            dict(base,id='checker',adapter='grok',family='xai',model='test-checker',tier='large',effort=None,billing_mode='subscription')]
+        r.save(r.root()/'routing.json',config)
+        available={n:dict(status='ready',compatible=True) for n in r.FAMILIES}
+        with patch.object(r,'inventory',return_value=available):
+            maker,checker=REAL_SELECT(core,self.args,'Task')
+            self.assertEqual({maker['family'],checker['family'],self.args.host_family},{'openai','anthropic','xai'})
+            task=dict(maker=maker,checker=checker,host_family='openai',max_estimated_usd=None)
+            REAL_REVALIDATE(core,task,'maker')
+            with patch.dict(os.environ,ALLOY_CLAUDE_MODEL='different'):
+                with self.assertRaises(r.RoutingError): REAL_REVALIDATE(core,task,'maker')
+            config['profiles'][0]['billing_mode']='metered'
+            r.save(r.root()/'routing.json',config)
+            with self.assertRaisesRegex(e.ExecutionError,'billing changed'): REAL_REVALIDATE(core,task,'maker')
+            config['profiles'][1]['family']='anthropic'; r.save(r.root()/'routing.json',config)
+            with self.assertRaises(r.RoutingError): REAL_SELECT(core,self.args,'Task')
+
+    def test_cli_execute_to_integrate_offline(self):
+        binary=self.base/'mock-cli'
+        binary.write_text('#!' + sys.executable + '\n' + """
+import json,sys
+from pathlib import Path
+if '--version' in sys.argv:
+    print('1.2.3'); raise SystemExit(0)
+if '--help' in sys.argv:
+    print('--permission-mode --model --output-format --prompt-file acceptEdits --allowedTools --allow --tools'); raise SystemExit(0)
+mode=sys.argv[sys.argv.index('--permission-mode')+1]
+if mode=='acceptEdits':
+    Path('file.txt').write_text('new\\n'); print('Done')
+else:
+    assert mode=='plan' and Path('file.txt').read_text()=='new\\n'
+    print(json.dumps(dict(verdict='pass',findings=[])))
+""")
+        binary.chmod(0o700)
+        r=core.routing;config=r.starter(core); base=config['profiles'][0]
+        config['profiles']=[dict(base,id='maker',adapter='claude',model='test-maker',family='anthropic',tier='large',effort=None,billing_mode='subscription'),
+                            dict(base,id='checker',adapter='grok',model='test-checker',family='xai',tier='large',effort=None,billing_mode='subscription')]
+        r.save(r.root()/'routing.json',config)
+        env=dict(PATH=os.environ['PATH'], HOME=str(self.base/'home'), ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
+                 ALLOY_RUN_ROOT=str(self.base/'state/runs'),ALLOY_ROUTING_HOME=str(self.base/'config'),
+                 ALLOY_BIN_CLAUDE=str(binary),ALLOY_BIN_GROK=str(binary),ALLOY_BIN_CODEX='/nonexistent',ALLOY_BIN_ANTIGRAVITY='/nonexistent',
+                 ANTHROPIC_API_KEY='test-only',XAI_API_KEY='test-only')
+        command=[sys.executable,str(ROOT/'bin/alloy')]
+        result=subprocess.run(command+['execute','--repo',str(self.repo),'--prompt-file',str(self.prompt),'--host-family','openai',
+            '--maker-profile','maker','--checker-profile','checker','--allow-path','file.txt','--test',self.args.test[0]],
+            env=env,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+        task=json.loads(result.stdout)
+        self.assertEqual(task['state'],'ready')
+        result=subprocess.run(command+['integrate',task['id']],env=env,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads(result.stdout)['state'],'cleaned')
+        self.assertFalse(Path(task['worktree']).exists())
+
+    def test_jev_selection_uses_one_fake_assessment_for_both_roles(self):
+        r=core.routing;config=r.starter(core);base=config['profiles'][0]
+        config['profiles']=[dict(base,id='maker',adapter='claude',family='anthropic',model='test-maker',tier='large',effort=None,billing_mode='subscription'),
+                            dict(base,id='checker',adapter='grok',family='xai',model='test-checker',tier='large',effort=None,billing_mode='subscription')]
+        r.save(r.root()/'routing.json',config)
+        self.args.route=True
+        answers={}
+        for name,q in r.questions().items():
+            if q['type']=='choice':
+                choice='small' if name=='complexity' else 'implementation'
+                answers[name]=dict(type='choice',choice=choice,confidence=1,probabilities={k:int(k==choice) for k in q['criteria']})
+            else: answers[name]=dict(type='noul',noul=0)
+        available={n:dict(status='ready',compatible=True) for n in r.FAMILIES}
+        with patch.object(r,'inventory',return_value=available), patch.object(r,'request',return_value=(dict(model='jev-test',answers=answers,usage=dict(input_tokens=1,output_tokens=1)),1)) as request:
+            maker,checker=REAL_SELECT(core,self.args,'Task')
+        self.assertEqual(request.call_count,1)
+        self.assertEqual(maker['family'],'anthropic'); self.assertEqual(checker['family'],'xai')
+
+    def test_resume_quota_reserve_and_budget_fail_closed(self):
+        r=core.routing;config=r.starter(core);base=config['profiles'][0]
+        config['profiles']=[dict(base,id='maker',adapter='claude',family='anthropic',model='test-maker',tier='large',effort=None,billing_mode='subscription',quota_pool='claude'),
+                            dict(base,id='checker',adapter='grok',family='xai',model='test-checker',tier='large',effort=None,billing_mode='subscription',quota_pool='grok')]
+        r.save(r.root()/'routing.json',config)
+        available={n:dict(status='ready',compatible=True) for n in r.FAMILIES}
+        with patch.object(r,'inventory',return_value=available):
+            maker,checker=REAL_SELECT(core,self.args,'Task')
+            task=dict(maker=maker,checker=checker,host_family='openai',max_estimated_usd=None)
+            config['quota_pools']['claude']=dict(remaining_fraction=0,reserve_fraction=.1)
+            r.save(r.root()/'routing.json',config)
+            with self.assertRaises(r.RoutingError): REAL_REVALIDATE(core,task,'maker')
+            config['quota_pools']={};config['profiles'][0]['billing_mode']='metered';r.save(r.root()/'routing.json',config)
+            task['max_estimated_usd']=0
+            with self.assertRaises(r.RoutingError): REAL_REVALIDATE(core,task,'maker')
+
+    def test_scope_preserves_leading_whitespace_in_names(self):
+        original=e.dispatch.side_effect
+        def maker(core,task,role,prompt,folder):
+            result=original(core,task,role,prompt,folder)
+            if role=='maker': (Path(task['worktree'])/' secret.txt').write_text('out of scope')
+            return result
+        self.args.allow_path=['file.txt','secret.txt']
+        with patch.object(e,'dispatch',side_effect=maker): code,task=self.create()
+        self.assertEqual(code,3); self.assertIn('outside allowed',task['error'])
+
+    def test_non_utf8_diff_is_preserved(self):
+        original=e.dispatch.side_effect
+        def maker(core,task,role,prompt,folder):
+            result=original(core,task,role,prompt,folder)
+            if role=='maker': (Path(task['worktree'])/'file.txt').write_bytes(b'new\xff\n')
+            return result
+        self.args.test=['exit 0']
+        with patch.object(e,'dispatch',side_effect=maker): code,task=self.create()
+        self.assertEqual(code,0,task.get('error'))
+        self.assertIn(b'new\xff', (e.taskdir(core,task['id'])/'changes.patch').read_bytes())
+        self.assertEqual(self.action(task,'integrate',squash=True),0)
+
+    def test_antigravity_staged_prompt_and_private_settings(self):
+        prompt=self.base/'prompt.txt';prompt.write_text('Task')
+        ctx=dict(repo=str(self.repo),pdir=str(self.base/'agy'),timeout_s=10,managed_worktree=True)
+        ad=e.worker_adapter(core,dict(cli='antigravity',model='test',effort=None),True)
+        args=ad.build_args(str(prompt),str(self.base/'last'),'make',ctx)
+        self.assertIn(str(self.base/'agy/prompt_in/prompt.md'),args[args.index('-p')+1])
+        with patch.object(core.AntigravityAdapter,'_AUTH_LINKS',()), patch.object(core.AntigravityAdapter,'_keychain_plist',return_value=None):
+            env=ad.prepare_env(ctx)
+        self.assertTrue(Path(env['HOME']).is_relative_to(self.base) if hasattr(Path,'is_relative_to') else str(env['HOME']).startswith(str(self.base)))
+        self.assertIn('command',ad._settings()['permissions']['allow'])
+        self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
