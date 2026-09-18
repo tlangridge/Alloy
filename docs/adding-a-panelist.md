@@ -133,3 +133,17 @@ keeps "I added an adapter" from silently weakening Alloy's safety promise.
 
 > Lesson: an adapter is more than an invocation string. The `read_only` and
 > `auth` answers are what keep Alloy safe and honest.
+
+
+## Managed execution capability
+
+Read-only panel support does not automatically grant managed-write support.
+`bin/alloy_execution.py` explicitly supports write modes for Codex, Claude, Grok
+and Antigravity, checks the installed help flags, and uses per-dispatch adapter
+copies. Adding a new CLI requires a reviewed write policy and mock lifecycle
+coverage; do not route unsupported CLIs into a writable worktree by default.
+
+`status.json.permissions` distinguishes `repository_write` from
+`command_execution`, records scope/enforcement, and discloses OS and Git metadata
+isolation. A normal panel remains read-only. See [managed execution](execution.md)
+for the complete contract and cleanup invariants.

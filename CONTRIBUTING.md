@@ -20,9 +20,10 @@ python3 tests/validate_skill.py            # SKILL.md frontmatter + standing rul
   runs offline with no API spend. New behavior needs a test; new adapters need a
   failure-mode test (missing / timeout / nonzero exit).
 - **Stdlib only.** No third-party Python deps — portability is a feature.
-- **Keep the safety model intact.** Panelists stay read-only; prompts go on
-  stdin; panelist output is treated as untrusted; no auto-approve / bypass flags;
-  run artifacts stay outside the repo. If a change touches any of these, say so.
+- **Keep the safety model intact.** Consult/review panelists stay read-only;
+  managed execution explicitly grants the Maker edit/test permissions in an owned
+  worktree. Model output is untrusted, sandbox bypass flags are forbidden, and
+  cleanup requires integration proof. Run artifacts stay outside the repo. If a change touches any of these, say so.
 - **Match the voice.** Lead with the point; concrete over generic.
 
 ## Adding a panelist (the most common contribution)
@@ -49,5 +50,6 @@ macOS + Linux and Python 3.8 + 3.12. Green CI is required to merge.
 
 Alloy implements OpenRouter's "Fusion" methodology locally with CLI agents. It is
 **not** trying to be an agent framework or a competitor to other multi-model
-tools. Features that don't serve "dispatch read-only panel → judge → synthesize"
-are probably out of scope — open an issue first if unsure.
+tools. Changes should serve independent multi-model reasoning or managed execution
+that reduces host work while retaining review and safe cleanup. Open an issue
+first if unsure.

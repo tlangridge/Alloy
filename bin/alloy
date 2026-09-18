@@ -72,9 +72,10 @@ if __name__ == '__main__':
             print('UPDATE_SKIPPED (installation lock unavailable)')
             sys.exit(0)
 import alloy_routing as routing
+import alloy_execution as execution
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.5.0"
+ALLOY_VERSION = "0.6.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -694,7 +695,7 @@ class AntigravityAdapter(Adapter):
         which this adapter never passes). Set ALLOY_ANTIGRAVITY_HOME=run for a
         throwaway one inside the run dir, or to a path of your own."""
         pdir = (ctx or {}).get("pdir")
-        raw = (setting("ALLOY_ANTIGRAVITY_HOME") or "").strip()
+        raw = "run" if (ctx or {}).get("managed_worktree") else (setting("ALLOY_ANTIGRAVITY_HOME") or "").strip()
         if raw and raw.lower() != "run":
             home = os.path.abspath(os.path.expanduser(raw))
         elif raw.lower() == "run":
@@ -1170,14 +1171,19 @@ _AUTH_FAIL_RE = re.compile(
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                  timeout_s: int, max_chars: int, mode: str,
-                 repo: "str | None" = None) -> dict:
+                 repo: "str | None" = None, managed_worktree: bool = False) -> dict:
     os.makedirs(pdir, exist_ok=True)
     _chmod(pdir, 0o700)
     # cwd: empty throwaway (no repo) / the real repo (read-only adapter, live) /
     # a disposable copy (write-capable adapter). See _panelist_cwd.
-    cwd, cwd_note = _panelist_cwd(adapter, repo, pdir)
-    repo_access = ("none" if repo is None
-                   else "real" if adapter.read_only else "copy")
+    if managed_worktree:
+        if not repo or adapter.read_only:
+            raise execution.ExecutionError('Managed write dispatch requires a write adapter and worktree')
+        cwd, cwd_note = repo, None
+    else:
+        cwd, cwd_note = _panelist_cwd(adapter, repo, pdir)
+    repo_access = ('managed_worktree' if managed_worktree else
+                   'none' if repo is None else 'real' if adapter.read_only else 'copy')
     out_path = os.path.join(pdir, "stdout.txt")
     err_path = os.path.join(pdir, "stderr.txt")
     last_path = os.path.join(pdir, "last_message.txt")
@@ -1191,7 +1197,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s,
            # A caller-chosen session id, so the CLI's saved session is known
            # BEFORE dispatch and can be resumed if alloy has to kill it.
-           "session_id": str(uuid.uuid4())}
+           "session_id": str(uuid.uuid4()), "managed_worktree": managed_worktree}
     argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
 
     # quiet down ANSI / interactive behaviour in the child
@@ -1214,6 +1220,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "cli_version": adapter.cli_version(),
         "adapter_version": ALLOY_VERSION,
         "read_only": adapter.read_only,
+        "permissions": getattr(adapter, "execution_permissions", dict(execution.permissions(adapter, not adapter.read_only),
+            repository_scope=repo_access, os_isolation=False, scope_validation="panel_tamper_check")),
         "cwd": cwd,
         "repo_access": repo_access,   # none | real (live repo) | copy (disposable)
         "status": "error",
@@ -1246,16 +1254,15 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 argv, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env,
                 start_new_session=True,
             )
-            pgid = os.getpgid(proc.pid)
-            with _LIVE_LOCK:
-                _LIVE_PGIDS.add(pgid)
-            # Record "running" + the pid NOW, so `alloy status` can report a run
-            # in flight from disk (no wake-up from the dispatcher required).
-            status["status"] = "running"
-            status["pid"] = proc.pid
-            status["started_utc"] = now_utc_iso()
-            write_atomic(status_path, json.dumps(status, indent=2))
+            pgid = proc.pid  # start_new_session makes the child its group leader.
             try:
+                with _LIVE_LOCK:
+                    _LIVE_PGIDS.add(pgid)
+                # Persist inside the cleanup guard: disk errors must not orphan workers.
+                status["status"] = "running"
+                status["pid"] = proc.pid
+                status["started_utc"] = now_utc_iso()
+                write_atomic(status_path, json.dumps(status, indent=2))
                 hb = max(2, setting_int("ALLOY_HEARTBEAT", DEFAULT_HEARTBEAT_S))
                 stall_s = max(0, setting_int("ALLOY_STALL_TIMEOUT", 0))  # 0 = off
                 last_bytes, last_activity = 0, time.monotonic()
@@ -1303,6 +1310,9 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                         log(f"{adapter.name}: working {int(now - start)}s/{timeout_s}s -- {note}")
                         next_hb = now + hb
             finally:
+                if hasattr(adapter, "execution_permissions") or proc.poll() is None:
+                    _kill_group(pgid)
+                    proc.wait()
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.discard(pgid)
         status["exit_code"] = proc.returncode
@@ -1314,6 +1324,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         log(f"{adapter.name}: NOT INSTALLED")
         return status
     except Exception as exc:  # pragma: no cover - defensive
+        status["status"] = "error"
         status["error"] = repr(exc)
         status["duration_ms"] = int((time.monotonic() - start) * 1000)
         write_atomic(status_path, json.dumps(status, indent=2))
@@ -1995,6 +2006,7 @@ def build_parser() -> argparse.ArgumentParser:
     ve = sub.add_parser("version", help="print version and adapters")
     ve.set_defaults(func=cmd_version)
     routing.register(sub, sys.modules[__name__])
+    execution.register(sub, sys.modules[__name__])
     return p
 
 
@@ -2004,7 +2016,7 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (routing.RoutingError, OSError, UnicodeError) as exc:
+    except (routing.RoutingError, execution.ExecutionError, OSError, UnicodeError) as exc:
         log(str(exc))
         return 2
 
