@@ -27,7 +27,27 @@ MODEL_KEYS = {n: "ALLOY_" + n.upper() + "_MODEL" for n in FAMILIES}
 EFFORT_KEYS = {n: "ALLOY_" + n.upper() + "_EFFORT" for n in FAMILIES}
 TIERS = ["small", "medium", "large"]
 KEY_ENV = "TYPESAFE_API_KEY"
+JEV_PROVIDERS = {
+    "typesafe": dict(endpoint="https://api.typesafe.ai/v1/systemone",
+                     key_env=KEY_ENV, key_file="jev-key", model="jev-1.13.0"),
+    "openrouter": dict(endpoint="https://openrouter.ai/api/alpha/decisions",
+                       key_env="OPENROUTER_API_KEY", key_file="openrouter-key",
+                       model="~typesafe/jev-latest"),
+}
 MAX_INPUT = 64000
+
+
+def provider_settings(provider="typesafe"):
+    if not isinstance(provider, str) or provider not in JEV_PROVIDERS:
+        raise RoutingError("jev_provider must be typesafe or openrouter")
+    return JEV_PROVIDERS[provider]
+
+
+def jev_model(config):
+    provider = config.get("jev_provider", "typesafe")
+    # Each service has its own model namespace; preserve direct API model pins.
+    field = "openrouter_model" if provider == "openrouter" else "jev_model"
+    return config.get(field, provider_settings(provider)["model"])
 
 
 def family(profile):
@@ -44,7 +64,7 @@ def root():
 
 
 def clean_env():
-    return {k: v for k, v in os.environ.items() if k != KEY_ENV}
+    return {k: v for k, v in os.environ.items() if k not in (KEY_ENV, "OPENROUTER_API_KEY")}
 
 
 def save(path, value):
@@ -87,6 +107,9 @@ def validate(config):
         raise RoutingError("Unsupported routing config schema; preserve your file and update Alloy.")
     if not isinstance(config.get("jev_model", "jev-1.13.0"), str):
         raise RoutingError("jev_model must be a model ID string")
+    provider_settings(config.get("jev_provider", "typesafe"))
+    if not isinstance(config.get("openrouter_model", "~typesafe/jev-latest"), str) or not config.get("openrouter_model", "~typesafe/jev-latest").strip():
+        raise RoutingError("openrouter_model must be a nonempty model ID string")
     profiles = config.get("profiles")
     if not isinstance(profiles, list):
         raise RoutingError("profiles must be an array")
@@ -187,18 +210,19 @@ def starter(core):
                 discovery_ttl_seconds=86400))
 
 
-def key():
-    value = os.environ.get(KEY_ENV)
+def key(provider="typesafe"):
+    settings = provider_settings(provider)
+    value = os.environ.get(settings["key_env"])
     if value:
         return value.strip()
-    path = root() / "jev-key"
+    path = root() / settings["key_file"]
     try:
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
             raise RoutingError("Jev credential must be a regular owner-only file (chmod 600).")
         return path.read_text().strip()
     except FileNotFoundError:
-        raise RoutingError("Jev key missing. Run alloy setup or set TYPESAFE_API_KEY.")
+        raise RoutingError("%s key missing. Set %s or use %s." % (provider, settings["key_env"], path))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -206,15 +230,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(payload):
-    secret = key()
+def request(payload, provider="typesafe"):
+    settings = provider_settings(provider)
+    secret = key(provider)
     if not secret:
         raise RoutingError("Jev key is empty; run alloy setup.")
     data = json.dumps(payload, allow_nan=False).encode()
     opener = urllib.request.build_opener(NoRedirect)
     started = time.monotonic()
     for attempt in range(3):
-        req = urllib.request.Request("https://api.typesafe.ai/v1/systemone", data=data,
+        req = urllib.request.Request(settings["endpoint"], data=data,
             headers={"Authorization": "Bearer " + secret, "Content-Type": "application/json"})
         try:
             with opener.open(req, timeout=5) as response:
@@ -516,13 +541,14 @@ def route(core, prompt, args, transport=None, available=None, usage_snapshot=Non
         if stale or changed:
             refresh(core, available)
     usage_snapshot = usage.get(core, config) if usage_snapshot is None else usage_snapshot
-    payload = dict(model=config.get("jev_model", "jev-1.13.0"), state={"task": prompt, "retry_context": retry_context(args, config)}, questions=questions())
-    response, latency = (transport or request)(payload)
+    payload = dict(model=jev_model(config), state={"task": prompt, "retry_context": retry_context(args, config)}, questions=questions())
+    response, latency = transport(payload) if transport else request(payload, provider=config.get("jev_provider", "typesafe"))
     answers = checked_answers(response)
     decision = resolve(core, config, answers, available, args, usage_snapshot)
     decision["subscription_usage"] = usage.public(usage_snapshot)
     cache = read_json(root() / "models-cache.json", {})
     decision.update(schema=SCHEMA, rubric_version=RUBRIC_VERSION, jev_model=response["model"],
+                    jev_provider=config.get("jev_provider", "typesafe"),
                     answers=answers, jev_usage=response["usage"], jev_latency_ms=latency,
                     catalog_hash=hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
                     cli_versions=available, discovery_refreshed_at=cache.get("refreshed_at"),
@@ -550,14 +576,17 @@ def read_prompt(args):
 def setup(core, args):
     path = root() / "routing.json"
     config = load() if path.exists() else starter(core)
+    if getattr(args, "jev_provider", None):
+        config["jev_provider"] = args.jev_provider
+    settings = provider_settings(config.get("jev_provider", "typesafe"))
     interactive = not args.non_interactive and sys.stdin.isatty()
     available = inventory(core)
     for name, status in available.items():
         print("%s: %s%s" % (name, status["status"], " (compatibility check failed)" if not status.get("compatible") else ""), file=sys.stderr)
-    if not os.environ.get(KEY_ENV) and not (root() / "jev-key").exists() and interactive:
-        secret = getpass.getpass("Jev API key (hidden; Enter to configure later): ").strip()
+    if not os.environ.get(settings["key_env"]) and not (root() / settings["key_file"]).exists() and interactive:
+        secret = getpass.getpass(config.get("jev_provider", "typesafe") + " API key (hidden; Enter to configure later): ").strip()
         if secret:
-            save(root() / "jev-key", secret + "\n")
+            save(root() / settings["key_file"], secret + "\n")
     billing = {}
     for item in args.billing:
         name, sep, value = item.partition("=")
@@ -610,6 +639,7 @@ def register(sub, core):
     add_route_options(p)
     p.set_defaults(func=lambda a: emit(route(core, read_prompt(a), a)))
     p = sub.add_parser("setup", help="guided Jev key and routing configuration")
+    p.add_argument("--jev-provider", choices=sorted(JEV_PROVIDERS), help="Jev credential provider; preserves existing model pins and billing")
     p.add_argument("--non-interactive", action="store_true")
     p.add_argument("--skip-live-test", action="store_true")
     p.add_argument("--billing", action="append", default=[], metavar="CLI=MODE")

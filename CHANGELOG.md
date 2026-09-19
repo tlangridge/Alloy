@@ -3,6 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.7.0] - 2026-09-19
+
+### Added
+- OpenRouter-backed Jev routing through the Decisions API, with a separate private key, provider selection and preserved TypeSafe model pins and credentials.
+- Combined managed-execution readiness reports and `execute --check` without model inference or worktree creation.
+- Exact Claude/Grok worker-session reuse where supported, short Maker correction updates, and explicit fresh-context fallback for other adapters.
+- Revision-bound review packets containing the diff and test evidence; required context receipts reject incomplete or mismatched reviews, and oversized packets stop for task splitting.
+- Execution setup/retry timing, blocking-step reporting, and separate test/review/deployment/live-verification states.
+
+### Changed
+- Skills display subscription usage and task/model assignments on every invocation and when delegation changes, with Markdown and plain-text presentation guidance.
+- Managed workers suppress repeated waiting heartbeats; permissions, independent review, correction limits, required checks and merge-proof cleanup remain enforced.
+
+### Validation
+- 207 offline tests and skill validation pass, including session recovery, preserved permissions, aggregated readiness blockers and context-receipt failures.
+- One live Jev/OpenRouter routing smoke test succeeded; no coding task was dispatched. Native session reuse is covered by mock CLIs and installed CLI help checks, not paid live execution.
+
 ## [0.6.0] - 2026-09-18
 
 ### Added

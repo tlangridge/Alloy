@@ -58,7 +58,7 @@ Here the roles map to local tools:
   other-family Checker reviews read-only. Alloy runs the correction loop and
   returns a compact result; you judge and integrate it. See *Execute mode*.
 
-Alloy ships no API keys. Opt-in Jev routing sends task text to TypeSafe; model
+Alloy ships no API keys. Opt-in Jev routing sends task text to TypeSafe or OpenRouter; model
 refresh queries providers and the optional update check uses git. It orchestrates
 CLIs the user already installed and authenticated; their prompts, the repo files
 the panel reads (repo access is on by default), diffs, and any web pages a
@@ -138,20 +138,49 @@ Run `doctor` first:
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
 
-At session start, surface the subscription meter:
+### Show usage and task assignments in chat
+
+**Every Alloy invocation must show a usage table and a task-routing statement
+in the host's visible chat**, including the execute alias. Tool output alone
+is not sufficient. At invocation, run:
 
 ```bash
-"$ALLOY_BIN" usage --if-changed --session <stable-session-id>
+"$ALLOY_BIN" usage --format markdown
 ```
 
-Use the same session ID throughout the task. Render the returned Markdown in
-chat rather than leaving it buried in tool output; if output is empty, omit the
-meter. Repeat this lightweight check at a new user turn while Alloy work is
-active, before delegation, and after a long run or quota failure. Provider reads
-are cached for two minutes; `--if-changed` suppresses repeated displays until
-capacity crosses a 5-point band, a reset changes, or freshness changes. Use
-`--refresh` after a quota error and `--cached` for offline context. Each panel
-also includes its startup snapshot in the manifest and stderr.
+Render the returned Markdown directly, outside a code fence, under a short
+**Alloy · <mode>** label. Keep the existing ten-cell capacity bars, percentages,
+reset times, model-specific pools and freshness/unknown labels. Use native
+Markdown tables; if the host cannot render tables, use one compact plain-text
+line per provider/window with the same values. Avoid HTML, color-only indicators
+or host-specific widgets. If usage is disabled or unavailable, show that status
+instead of inventing a meter or enabling tracking. For `usage` mode, this is the
+requested command: honor its options (including JSON) and do not run it twice.
+
+Immediately below the meter, state **what task goes to which CLI/model and why**.
+For one assignment, use one sentence. For multiple assignments, use a compact
+table with `Task / role | CLI · model | Status / reason`. Include the host's
+judging role when applicable; do not guess its model ID. Use exact model IDs
+from actual routing decisions, manifests or managed task records. Before these
+exist, label assignments **pending selection** (or **planned** for explicit
+profiles); update the statement when dispatch confirms them. Never claim a
+worker ran merely because a profile was recommended. For diagnostic/setup/usage
+commands, say **No tasks dispatched**; for `route`, say **Selected; not executed**.
+
+Show the meter plus updated assignments again when a new delegation round or
+reroute changes the task/model mapping, and after a quota failure. Do not repeat
+it for every poll or Maker correction using the same workers. Use cached readings
+within their normal two-minute lifetime; do not force a refresh simply to redraw
+the table. Use `--refresh` after a quota error and `--cached` for offline context.
+Do not make an extra Jev call just to populate the display.
+
+For interim checks during the same invocation, use
+`usage --if-changed --session <stable-session-id>` at a new user turn while Alloy
+work is active and after a long run. Render nonempty output; suppression here
+does not replace the required invocation/delegation display. Each panel also
+includes its startup snapshot in the manifest and stderr. In the final answer,
+briefly identify the actual workers and outcome so the result remains clear if
+progress messages are collapsed.
 
 Treat only fresh quota as evidence. Provider windows are shared subscription
 capacity, not this task's token count. Keep Antigravity's Gemini and Claude/GPT
@@ -390,14 +419,15 @@ can serve models from several families. Normal `alloy panel` remains read-only.
 
 Write an eight-line SPEC: goal, current behavior, desired behavior, allowed
 paths, non-goals, acceptance criteria, test commands, and handoff criteria.
+Include a concrete reproduction and before/after acceptance check in the SPEC.
+Keep local tests, deployment, and live behavior verification as separate outcomes.
 Use the user's existing authorization. Resolve missing requirements before
 spending provider tokens; do not add an approval ceremony for an authorized task.
 Start from a clean committed checkout on the intended target branch. Never
 stash, reset, or commit unrelated user work just to satisfy this condition.
 
 Run `alloy models list` to inspect configured profiles; run `alloy setup` if
-needed (use `alloy setup --skip-live-test` to avoid a live setup call). Preserve model pins and billing preferences. Use `alloy usage --format
-markdown` when a quota snapshot helps. Explain that execute makes at most three
+needed (use `alloy setup --skip-live-test` to avoid a live setup call). Preserve model pins and billing preferences. Show the usage table and task assignments as required in Step 0. Explain that execute makes at most three
 Maker calls and three Checker calls, plus local tests. Estimated spend limits
 apply **per provider dispatch**, not as a hard whole-task billing cap.
 
@@ -410,6 +440,10 @@ Write the SPEC outside the source repository, then invoke the actual CLI:
   --host-family openai --route --allow-path src --allow-path tests \
   --test 'python3 -m unittest discover -s tests -v'
 ```
+
+Add `--check` to the execute command when a readiness report is needed before
+dispatch; normal execute also checks readiness. Show the combined blocker report
+instead of attempting workers one at a time.
 
 Set `--host-family` to your actual model family, not automatically to your CLI's.
 Use `--route` only when Jev routing is authorized/configured; otherwise replace
@@ -430,7 +464,10 @@ bypass flags. Inspect `task.json` and each worker's `status.json` for machine-re
 `permissions.repository_write`, `command_execution`, enforcement and scope.
 
 Never detach dispatch with `nohup`, `disown`, or shell backgrounding. Keep the
-terminal/tool session attached and wait for completion while reporting progress.
+terminal/tool session attached and wait for completion. Report new results,
+failures, blockers and decisions; avoid repeated “still running” updates. Use
+`blocking_step` to identify what prevents completion. Reuse sessions through Alloy;
+never manually resume a provider to bypass its bounds or permissions.
 Use `"$ALLOY_BIN" tasks` to locate active/retained task IDs and records. A timeout
 retains the worktree; inspect the error and subprocess status, then use
 `"$ALLOY_BIN" resume <task-id>` if there are remaining attempts. Never resume the
@@ -586,7 +623,7 @@ it met the bar. (Evidence + citations: see `docs/methodology.md`.)
 
 Each Alloy round makes one model call **per ready panelist**, in parallel,
 billed to the **user's own** provider accounts via their CLIs. The full lifecycle
-is several rounds. alloy ships no keys; opt-in routing sends task text to TypeSafe.
+is several rounds. alloy ships no keys; opt-in routing sends task text to TypeSafe or OpenRouter.
 For a one-off question, `ask` is the cheap path; reserve the lifecycle for real
 build tasks. Managed `execute` uses one Maker and one independent Checker per
 loop (at most three loops), with local gates and a compact host handoff.
