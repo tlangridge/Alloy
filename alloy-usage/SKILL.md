@@ -22,7 +22,11 @@ Run the Alloy usage command and render its Markdown output in chat.
    Respect disabled checks; skipped/unavailable updates do not block usage.
 3. Run `"$ALLOY_BIN" usage` with the user's supplied usage options, such as
    `--refresh`, `--cached`, or `--format json`. Default to Markdown.
-4. Show the returned meter, preserving unknown/stale status and reset times.
+4. Render the returned meter directly in chat, outside code fences, preserving
+   capacity bars, percentages, separate model pools, unknown/stale status and
+   reset times. If tables are unsupported, use compact provider/window lines
+   with the same values. Honor an explicit JSON format request. Add **No tasks
+   dispatched** below the meter.
    If `--if-changed` returns nothing, say the usage snapshot is unchanged.
 
 This command reads cached or live provider billing data without model inference.

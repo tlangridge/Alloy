@@ -233,7 +233,7 @@ def stop(process):
 def provider_env(core):
     env = core.routing.clean_env()
     for name, value in core._CONFIG.items():
-        if name != 'TYPESAFE_API_KEY':
+        if name not in ('TYPESAFE_API_KEY', 'OPENROUTER_API_KEY'):
             env.setdefault(name, value)
     return env
 

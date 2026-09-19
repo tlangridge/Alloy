@@ -75,7 +75,7 @@ import alloy_routing as routing
 import alloy_execution as execution
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.6.0"
+ALLOY_VERSION = "0.7.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -1197,7 +1197,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s,
            # A caller-chosen session id, so the CLI's saved session is known
            # BEFORE dispatch and can be resumed if alloy has to kill it.
-           "session_id": str(uuid.uuid4()), "managed_worktree": managed_worktree}
+           "session_id": getattr(adapter, "managed_session_id", None) or str(uuid.uuid4()), "managed_worktree": managed_worktree}
     argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
 
     # quiet down ANSI / interactive behaviour in the child
@@ -1210,7 +1210,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     # Adapter-supplied overrides win over the inherited environment (they exist
     # precisely to redirect a CLI away from the user's real state -- see agy).
     env.update(adapter.prepare_env(ctx))
-    env.pop("TYPESAFE_API_KEY", None)  # router-only credential
+    env.pop("TYPESAFE_API_KEY", None)  # router-only credentials
+    env.pop("OPENROUTER_API_KEY", None)
 
     status = {
         "name": adapter.name,
@@ -1298,7 +1299,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                         except subprocess.TimeoutExpired:
                             pass
                         break
-                    if now >= next_hb:
+                    if now >= next_hb and not getattr(adapter, "quiet_progress", False):
                         # Progress-aware heartbeat: total bytes + idle age tell
                         # "working" (bytes climbing across beats) from "maybe
                         # stuck" (idle keeps growing, bytes flat).

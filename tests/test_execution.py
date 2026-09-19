@@ -21,6 +21,7 @@ sys.modules[loader.name] = core
 loader.exec_module(core)
 e = core.execution
 REAL_SELECT, REAL_DISPATCH, REAL_REVALIDATE = e.select, e.dispatch, e.revalidate
+REAL_READINESS = e.readiness
 
 
 class ExecutionTests(unittest.TestCase):
@@ -40,6 +41,7 @@ class ExecutionTests(unittest.TestCase):
         patch.object(core, '_CONFIG', {}).start()
         self.maker = dict(cli='claude', family='anthropic', model='sonnet', effort=None, profile='maker')
         self.checker = dict(cli='grok', family='xai', model='grok-4.6', effort=None, profile='checker')
+        patch.object(e, 'readiness', return_value=dict(ready=True, blockers=[])).start()
         self.select = patch.object(e, 'select', return_value=(self.maker, self.checker)).start()
         patch.object(e, 'probe').start()
         patch.object(e, 'revalidate').start()
@@ -58,7 +60,10 @@ class ExecutionTests(unittest.TestCase):
                 (Path(task['worktree']) / 'file.txt').write_text('new\n')
                 text = 'Updated file and ran checks.'
             else:
-                text = json.dumps(self.verdicts.pop(0) if self.verdicts else dict(verdict='pass', findings=[]))
+                verdict = self.verdicts.pop(0) if self.verdicts else dict(verdict='pass', findings=[])
+                receipt = task['rounds'][-1]['packet']
+                verdict.update(packet_id=receipt['id'], revision=receipt['revision'], context_complete=True)
+                text = json.dumps(verdict)
             result = folder / 'result.md'; result.write_text(text)
             return dict(status='ok', result_path=str(result))
         patch.object(e, 'dispatch', side_effect=dispatch).start()
@@ -74,6 +79,170 @@ class ExecutionTests(unittest.TestCase):
         for k,v in kw.items(): setattr(args,k,v)
         with contextlib.redirect_stdout(io.StringIO()):
             return e.lifecycle(core, args)
+
+    def test_readiness_collects_dirty_auth_and_capacity_without_inference(self):
+        self.args.max_fix_rounds = 0
+        self.args.test = ['exit 1']
+        for _ in range(4): self.create()
+        (self.repo / 'file.txt').write_text('dirty')
+        r = core.routing
+        config = r.starter(core)
+        r.save(r.root() / 'routing.json', config)
+        available = {n: dict(status='auth', compatible=False) for n in r.FAMILIES}
+        with patch.object(r, 'inventory', return_value=available), patch.object(r, 'request') as request:
+            report = REAL_READINESS(core, self.args, str(self.repo))
+        self.assertFalse(report['ready'])
+        self.assertTrue(any('repository:' in x for x in report['blockers']))
+        self.assertTrue(any('capacity:' in x for x in report['blockers']))
+        self.assertTrue(any('maker:' in x for x in report['blockers']))
+        self.assertTrue(any('checker:' in x for x in report['blockers']))
+        request.assert_not_called()
+
+    def test_readiness_preserves_independence_pins_and_permissions(self):
+        r = core.routing
+        config = r.starter(core)
+        base = config['profiles'][0]
+        config['profiles'] = [dict(base, id='maker', adapter='claude', family='anthropic', model='test-maker', tier='large', effort=None),
+                              dict(base, id='checker', adapter='grok', family='anthropic', model='test-checker', tier='large', effort=None)]
+        r.save(r.root() / 'routing.json', config)
+        available = {n: dict(status='ready', compatible=True) for n in r.FAMILIES}
+        with patch.object(r, 'inventory', return_value=available):
+            report = REAL_READINESS(core, self.args, str(self.repo))
+            self.assertTrue(any('independence:' in x for x in report['blockers']))
+            config['profiles'][1]['family'] = 'xai'
+            r.save(r.root() / 'routing.json', config)
+            self.assertTrue(REAL_READINESS(core, self.args, str(self.repo))['ready'])
+            with patch.dict(os.environ, ALLOY_CLAUDE_MODEL='different'):
+                self.assertFalse(REAL_READINESS(core, self.args, str(self.repo))['ready'])
+            with patch.object(e, 'probe', side_effect=e.ExecutionError('permission flag missing')):
+                report = REAL_READINESS(core, self.args, str(self.repo))
+            self.assertTrue(any('permission flag missing' in x for x in report['blockers']))
+
+    def test_preflight_reports_without_creating_task_or_selecting(self):
+        self.args.check = True
+        with patch.object(e, 'readiness', return_value=dict(ready=False, blockers=['maker: login needed'])):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(e.create(core, self.args), 2)
+        self.assertEqual(json.loads(output.getvalue())['blockers'], ['maker: login needed'])
+        self.select.assert_not_called()
+        self.assertFalse((e.home(core) / 'worktrees').exists())
+
+    def test_packet_receipt_required_and_bound_to_revision(self):
+        original = e.dispatch.side_effect
+        def missing(core, task, role, prompt, folder):
+            result = original(core, task, role, prompt, folder)
+            if role == 'checker':
+                Path(result['result_path']).write_text(json.dumps(dict(verdict='pass', findings=[])))
+            return result
+        with patch.object(e, 'dispatch', side_effect=missing):
+            code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('context receipt', task['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+        receipt = task['rounds'][0]['packet']
+        verdict = dict(verdict='pass', findings=[], packet_id=receipt['id'], revision='wrong', context_complete=True)
+        with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
+        verdict.update(revision=receipt['revision'], context_complete=False)
+        with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
+
+    def test_review_packet_contains_actual_code_and_gate_output(self):
+        self.args.test += ['echo acceptance-evidence']
+        _, task = self.create()
+        packet = json.loads((e.taskdir(core, task['id']) / 'review-0.json').read_text())
+        self.assertEqual(packet['revision'], task['tip'])
+        self.assertEqual(packet['changed_files'], ['file.txt'])
+        self.assertIn('+new', packet['diff'])
+        self.assertIn('acceptance-evidence', packet['tests'][1]['output'])
+        self.assertTrue(all(g['revision'] == task['tip'] for g in task['rounds'][0]['gates']))
+        self.assertIn('REVIEW PACKET:', self.calls[1][1])
+
+    def test_large_review_packet_retains_work_without_truncation(self):
+        original = e.dispatch.side_effect
+        def large(core, task, role, prompt, folder):
+            result = original(core, task, role, prompt, folder)
+            if role == 'maker': (Path(task['worktree']) / 'file.txt').write_text('x' * 100000)
+            return result
+        self.args.test = ['exit 0']
+        with patch.object(e, 'dispatch', side_effect=large): code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('split the task', task['error'])
+        self.assertEqual([role for role, _ in self.calls], ['maker'])
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_native_sessions_reused_with_same_permissions_and_short_updates(self):
+        binary = self.base / 'session-cli'
+        binary.write_text('#!' + sys.executable + '\n' + r'''
+import json, sys, re
+from pathlib import Path
+if '--version' in sys.argv: print('test'); raise SystemExit(0)
+if '--help' in sys.argv:
+    print('--resume --session-id acceptEdits --allowedTools --allow --tools'); raise SystemExit(0)
+mode = sys.argv[sys.argv.index('--permission-mode') + 1]
+role = 'maker' if mode == 'acceptEdits' else 'checker'
+resumed = '--resume' in sys.argv
+assert not (resumed and '--session-id' in sys.argv)
+sid = sys.argv[sys.argv.index('--resume' if resumed else '--session-id') + 1]
+state = Path.cwd().parent.parent / (role + '-session.json')
+if resumed:
+    assert json.loads(state.read_text()) == sid
+else:
+    assert not state.exists()
+    state.write_text(json.dumps(sid))
+prompt = Path(sys.argv[sys.argv.index('--prompt-file') + 1]).read_text() if '--prompt-file' in sys.argv else sys.stdin.read()
+if role == 'maker':
+    assert '--tools' in sys.argv and 'Bash' in sys.argv
+    if resumed:
+        assert 'TASK / ACCEPTANCE CRITERIA:' not in prompt
+        assert '-F1' in prompt
+    Path('file.txt').write_text('new\n')
+    print('Changed and tested')
+else:
+    packet = json.loads(prompt.split('REVIEW PACKET:' + chr(10))[1])
+    receipt = dict(packet_id=re.search(r'"packet_id":"([^"]+)"', prompt).group(1), revision=packet['revision'], context_complete=True)
+    print(json.dumps(dict(verdict='pass' if resumed else 'fail', findings=[] if resumed else [dict(path='file.txt',evidence='Concrete example',fix='Verify newline')], **receipt)))
+''')
+        binary.chmod(0o700)
+        with patch.dict(os.environ, ALLOY_BIN_CLAUDE=str(binary), ALLOY_BIN_GROK=str(binary)), patch.object(e, 'dispatch', side_effect=REAL_DISPATCH):
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(len(task['rounds']), 2)
+        for role in ('maker', 'checker'):
+            first, second = [record[role] for record in task['rounds']]
+            self.assertEqual(first['session_id'], second['session_id'])
+            self.assertEqual(second['session_mode'], 'resumed')
+            self.assertEqual(first['permissions'], second['permissions'])
+        self.assertNotEqual(task['sessions']['maker']['id'], task['sessions']['checker']['id'])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): e.finish(core, task)
+        summary = json.loads(output.getvalue())
+        self.assertEqual(summary['metrics']['resumed_worker_calls'], 2)
+        self.assertEqual(summary['metrics']['review_retries'], 1)
+        self.assertGreater(summary['metrics']['verified_result_ms'], 0)
+        self.assertFalse(summary['verification']['deployed'])
+        self.assertFalse(summary['verification']['live_behavior_verified'])
+
+    def test_interrupted_native_dispatch_keeps_exact_session_identity(self):
+        _, task = self.create()
+        task['sessions']['maker'] = dict(id='12345678-1234-1234-1234-123456789abc', supported=True, started=False, mode='native')
+        folder = e.taskdir(core, task['id']) / 'interrupted-maker'
+        with patch.object(core, 'run_panelist', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                REAL_DISPATCH(core, task, 'maker', 'TASK / ACCEPTANCE CRITERIA: task', folder)
+        saved = e.load(core, task['id'])
+        self.assertTrue(saved['sessions']['maker']['started'])
+        def resumed(ad, prompt, directory, *args, **kwargs):
+            argv = ad.build_args(prompt, str(Path(directory) / 'last'), 'make',
+                                 dict(session_id=ad.managed_session_id))
+            self.assertIn('--resume', argv)
+            self.assertNotIn('--session-id', argv)
+            self.assertIn('acceptEdits', argv)
+            self.assertIn(saved['sessions']['maker']['id'], argv)
+            return dict(status='error')
+        with patch.object(core, 'run_panelist', side_effect=resumed) as call:
+            result = REAL_DISPATCH(core, saved, 'maker', 'TASK / ACCEPTANCE CRITERIA: task', folder)
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(call.call_count, 1)  # No silent fresh-session fallback.
 
     def test_full_execute_integrate_and_cleanup(self):
         code, task = self.create()
@@ -227,7 +396,10 @@ if mode == 'acceptEdits':
 else:
     assert mode == 'plan'
     assert Path('file.txt').read_text() == 'new\\n'
-    print(json.dumps(dict(verdict='pass', findings=[])))
+    prompt = Path(sys.argv[sys.argv.index('--prompt-file')+1]).read_text()
+    import re
+    receipt = dict(packet_id=re.search(r'"packet_id":"([^"]+)"', prompt).group(1), revision=re.search(r'"revision":"([^"]+)"', prompt).group(1), context_complete=True)
+    print(json.dumps(dict(verdict='pass', findings=[], **receipt)))
 """)
         binary.chmod(0o700)
         with patch.dict(os.environ, ALLOY_BIN_CLAUDE=str(binary), ALLOY_BIN_GROK=str(binary), TYPESAFE_API_KEY='fake-test-key'), patch.object(e, 'dispatch', side_effect=REAL_DISPATCH):
@@ -324,7 +496,10 @@ if mode=='acceptEdits':
     Path('file.txt').write_text('new\\n'); print('Done')
 else:
     assert mode=='plan' and Path('file.txt').read_text()=='new\\n'
-    print(json.dumps(dict(verdict='pass',findings=[])))
+    prompt = Path(sys.argv[sys.argv.index('--prompt-file')+1]).read_text()
+    import re
+    receipt = dict(packet_id=re.search(r'"packet_id":"([^"]+)"', prompt).group(1), revision=re.search(r'"revision":"([^"]+)"', prompt).group(1), context_complete=True)
+    print(json.dumps(dict(verdict='pass', findings=[], **receipt)))
 """)
         binary.chmod(0o700)
         r=core.routing;config=r.starter(core); base=config['profiles'][0]

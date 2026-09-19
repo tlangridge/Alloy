@@ -370,6 +370,68 @@ class RouterTests(unittest.TestCase):
             (r.root() / 'jev-key').chmod(0o644)
             with self.assertRaises(r.RoutingError): r.key()
 
+    def test_openrouter_transport_uses_decisions_and_separate_key(self):
+        r.save(r.root() / 'openrouter-key', 'router-secret')
+        r.save(r.root() / 'jev-key', 'direct-secret')
+        result = response()
+        result['usage']['cost'] = 0.00001
+        opener = Mock()
+        opener.open.return_value.__enter__ = Mock(return_value=Mock(read=Mock(return_value=json.dumps(result).encode())))
+        opener.open.return_value.__exit__ = Mock(return_value=False)
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': '', 'TYPESAFE_API_KEY': ''}), patch.object(r.urllib.request, 'build_opener', return_value=opener):
+            actual, latency = r.request({'model': '~typesafe/jev-latest'}, provider='openrouter')
+        req = opener.open.call_args[0][0]
+        self.assertEqual(req.full_url, 'https://openrouter.ai/api/alpha/decisions')
+        self.assertEqual(req.get_header('Authorization'), 'Bearer router-secret')
+        self.assertEqual(json.loads(req.data)['model'], '~typesafe/jev-latest')
+        self.assertEqual(actual, result)
+        r.checked_answers(actual)
+
+    def test_openrouter_key_never_falls_back_to_typesafe(self):
+        r.save(r.root() / 'jev-key', 'direct-secret')
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': '', 'TYPESAFE_API_KEY': 'direct-env'}):
+            with self.assertRaisesRegex(r.RoutingError, 'openrouter key missing'):
+                r.key('openrouter')
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': 'router-env'}):
+            self.assertEqual(r.key('openrouter'), 'router-env')
+            self.assertNotIn('OPENROUTER_API_KEY', r.clean_env())
+            self.assertNotIn('OPENROUTER_API_KEY', r.usage.provider_env(core))
+        r.save(r.root() / 'openrouter-key', 'file-secret')
+        (r.root() / 'openrouter-key').chmod(0o644)
+        with patch.dict(os.environ, {'OPENROUTER_API_KEY': ''}):
+            with self.assertRaisesRegex(r.RoutingError, 'owner-only'):
+                r.key('openrouter')
+
+    def test_provider_switch_preserves_profiles_and_direct_model_pin(self):
+        self.config['jev_model'] = 'jev-pinned'
+        r.save(r.root() / 'routing.json', self.config)
+        args = argparse.Namespace(non_interactive=True, skip_live_test=True, billing=[], jev_provider='openrouter')
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, args)
+        config = r.load()
+        self.assertEqual(config['profiles'], self.config['profiles'])
+        self.assertEqual(config['jev_model'], 'jev-pinned')
+        self.assertEqual(r.jev_model(config), '~typesafe/jev-latest')
+        with patch.object(r, 'request', return_value=(response(), 1)) as request:
+            decision = r.route(core, 'Fix typo', self.args, available=self.available)
+        self.assertEqual(request.call_args[1], {'provider': 'openrouter'})
+        self.assertEqual(request.call_args[0][0]['model'], '~typesafe/jev-latest')
+        self.assertEqual(decision['jev_provider'], 'openrouter')
+        config['openrouter_model'] = '~typesafe/jev-1.13'
+        self.assertEqual(r.jev_model(config), '~typesafe/jev-1.13')
+        config['jev_provider'] = 'typesafe'
+        self.assertEqual(r.jev_model(config), 'jev-pinned')
+        for invalid in ('other', None, []):
+            config['jev_provider'] = invalid
+            with self.assertRaises(r.RoutingError): r.validate(config)
+
+    def test_openrouter_incomplete_probabilities_fail_closed(self):
+        result = response()
+        del result['answers']['complexity']['probabilities']
+        self.config['jev_provider'] = 'openrouter'
+        r.save(r.root() / 'routing.json', self.config)
+        with self.assertRaises(r.RoutingError): self.decide(result)
+
     def test_http_retry_bounded_and_error_body_not_exposed(self):
         error = lambda: urllib.error.HTTPError('url', 429, 'secret-body', {'Retry-After': '0'}, io.BytesIO(b'secret-body'))
         opener = Mock(); opener.open.side_effect = [error(), error(), error()]
@@ -415,11 +477,11 @@ class RouterTests(unittest.TestCase):
     def test_routed_panel_dispatch_manifest_and_key_isolation(self):
         # Real dispatcher with a fake executable; inspect actual argv and env.
         executable = Path(self.tmp.name) / 'mock'
-        executable.write_text('#!/usr/bin/env python3\nimport os,sys,json\nprint(json.dumps({"argv":sys.argv[1:],"key_present":"TYPESAFE_API_KEY" in os.environ}))\n')
+        executable.write_text('#!/usr/bin/env python3\nimport os,sys,json\nprint(json.dumps({"argv":sys.argv[1:],"key_present":any(k in os.environ for k in ("TYPESAFE_API_KEY","OPENROUTER_API_KEY"))}))\n')
         executable.chmod(0o755)
         task = Path(self.tmp.name) / 'task'; task.write_text('Rename README heading')
         output = io.StringIO()
-        with patch.dict(os.environ, {'ALLOY_BIN_CODEX': str(executable), 'CODEX_API_KEY': 'test', 'TYPESAFE_API_KEY': 'private', 'ALLOY_REPO': 'none'}), patch.object(r, 'inventory', return_value=self.available), patch.object(r, 'request', return_value=(response(), 1)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+        with patch.dict(os.environ, {'ALLOY_BIN_CODEX': str(executable), 'CODEX_API_KEY': 'test', 'TYPESAFE_API_KEY': 'private', 'OPENROUTER_API_KEY': 'private-router', 'ALLOY_REPO': 'none'}), patch.object(r, 'inventory', return_value=self.available), patch.object(r, 'request', return_value=(response(), 1)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
             code = core.main(['panel', '--route', '--prompt-file', str(task), '--no-repo', '--run-dir', str(Path(self.tmp.name) / 'runs')])
         self.assertEqual(code, 0)
         manifest = json.loads(Path(output.getvalue().strip().splitlines()[-1]).read_text())

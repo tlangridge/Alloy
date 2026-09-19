@@ -50,6 +50,52 @@ attempt limit. `--max-estimated-usd` is a per-dispatch routing estimate, not a
 hard provider billing limit or whole-task budget. Subscription quota information
 can be cached or unavailable; unknown quota does not mean unlimited capacity.
 
+## Readiness, sessions and review context
+
+Add `--check` to the same execute command for a JSON readiness report. It checks
+source cleanliness/branch, the four-worktree limit, configured models and pins,
+authentication indicators, quota/budget eligibility, CLI permission support, and
+whether independent Maker/Checker families are available. It reports blockers
+together without calling Jev, launching a worker, or creating a worktree. Normal
+execute performs the same preflight and rechecks selection before dispatch.
+Local checks cannot prove a model's provider-side entitlement or that a stored
+login has not expired; those can still fail on the first call.
+
+Claude and Grok reuse a separate exact session ID per role when their help output
+supports both `--session-id` and `--resume`. Resumes reapply the model, scope and
+permission flags, preserve the worktree and original attempt limit, and send the
+Maker a short update with revision-qualified finding IDs and failed checks.
+Interrupted calls retain their session identity. A failed resume stops for
+inspection instead of silently restarting. Codex, Antigravity and incompatible
+CLI versions currently report `fresh_context_fallback`; they retain the same
+worker profiles and receive full context on every call. No `--last` session
+selection is used.
+
+Each Checker receives a bounded, self-contained packet: goal, exact base/tip,
+changed filenames, complete diff, test commands/results and bounded test output.
+It can inspect needed dependencies in the worktree. The verdict must acknowledge
+the packet hash, revision and context completeness; missing or mismatched receipts
+stop the run. This verifies the response corresponds to the supplied packet, not
+that the model understood every line. Packets over 96 KB stop for a smaller task
+split, preserving the worktree instead of silently dropping code. Full artifacts
+remain on disk. Reviews require concrete failure examples; the Maker may challenge
+unsupported findings with code/test evidence. Unresolved disagreements reach the
+host at the existing correction bound; independent review is never waived.
+
+Required repository checks still run every round; this change does not cache
+checks or run potentially mutating tests alongside the Checker. Successful gate
+records include their reviewed revision. Define a reproduction/acceptance check
+in the SPEC; the Maker is asked for before/after evidence. The final handoff keeps
+local tests, independent review, deployment and live verification separate.
+Passing local gates does not imply deployment or verified live behavior.
+
+The compact result exposes the current `blocking_step` and `metrics`: startup
+milliseconds to the first worker dispatch (a proxy, not time to its first useful
+output), worker setup milliseconds, fresh starts, resumed calls, review retries,
+context receipt failures, and wall time to the locally verified result. Timings
+include waits across task resumes. Managed workers suppress repeated waiting
+heartbeats; report phase results, failures, blockers and decisions in chat.
+
 ## Lifecycle and cleanup
 
 ```text

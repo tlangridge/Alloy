@@ -28,7 +28,7 @@ the disagreement* rather than averaging it away.
 > blind spot none of them saw — then let you decide.
 
 Alloy sends **no telemetry**. Regular panels use your authenticated CLIs.
-Optional **Jev routing** sends task text to TypeSafe using your key; model discovery
+Optional **Jev routing** sends task text to TypeSafe or OpenRouter using your key; model discovery
 queries CLI providers. The stable-release auto-updater can be disabled with
 `ALLOY_NO_UPDATE_CHECK=1`. See [routing setup and cost controls](docs/routing.md).
 
@@ -331,7 +331,7 @@ corrections before the host receives the result.
 ## Privacy & cost
 
 Opt-in Jev routing sends task text (including explicit attachments on routed
-panels) to TypeSafe. Setup can store its key in an owner-only user file outside
+panels) to TypeSafe or OpenRouter, according to your configuration. Setup can store its key in an owner-only user file outside
 the repository. Model refresh queries providers and the optional update check
 contacts GitHub for release metadata and uses Git to install updates. Each regular Alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider

@@ -37,6 +37,36 @@ with permissions `600`. Routing configuration lives in `routing.json` beside
 it. `ALLOY_ROUTING_HOME` overrides this directory; otherwise XDG_CONFIG_HOME is
 respected. No secret is stored in the repository or forwarded to child CLIs.
 
+## Use Jev through OpenRouter
+
+You can use an OpenRouter key instead of a direct TypeSafe key:
+
+```sh
+alloy setup --jev-provider openrouter --non-interactive --skip-live-test
+```
+
+Save just your key in `~/.config/alloy/openrouter-key` with permissions `600`,
+or set `OPENROUTER_API_KEY`. Environment credentials take precedence. The same
+routing-directory overrides apply. Keys are never forwarded to coding CLIs.
+This selects `jev_provider: "openrouter"` in `routing.json`, using
+`openrouter_model: "~typesafe/jev-latest"` by default. Set `openrouter_model`
+explicitly to pin another supported Jev version. Existing profiles, billing
+settings, and the direct TypeSafe `jev_model` pin are preserved.
+
+Alloy sends its task state and typed questions to OpenRouter's
+[Decisions endpoint](https://openrouter.ai/openapi.json)
+(`https://openrouter.ai/api/alpha/decisions`), not chat completions. OpenRouter
+bills the Jev routing call; your coding CLIs still use their existing billing
+modes. The endpoint is alpha. Alloy requires complete confidence/probability
+answers and fails closed if the service response is incompatible. It never
+falls back to a different service or credential. Decision history records
+`jev_provider`, the returned model, latency and token usage (including cost
+when supplied by OpenRouter).
+
+Switch back with `alloy setup --jev-provider typesafe --non-interactive
+--skip-live-test` (on one line). Your saved direct key remains available.
+Without an explicit provider setting, existing installations use TypeSafe.
+
 ## Decide or execute
 
 ```sh
