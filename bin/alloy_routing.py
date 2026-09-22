@@ -184,36 +184,40 @@ def load():
 
 
 def starter(core):
-    # Editable priors, not benchmark results; actual access is checked at dispatch.
-    seeds = [("codex", "gpt-5.6-luna", "small", "medium", 1),
-             ("codex", "gpt-5.6-terra", "medium", "high", 2),
-             ("codex", "gpt-5.6-sol", "large", "high", 2.5),
-             ("codex", "gpt-6-sol", "large", "high", 2),
-             ("codex", "gpt-6-astra", "large", "high", 4),
-             ("claude", "sonnet", "medium", None, 2),
-             ("claude", "claude-opus-5-5", "large", "medium", 3),
-             ("grok", core.setting("ALLOY_GROK_MODEL", "grok-4.7"), "large", None, 3),
-             ("antigravity", core.ADAPTERS["antigravity"].model(), "medium", "high", 1),
-             ("antigravity", "gemini-3.8-flash-low", "small", "low", 1),
-             ("antigravity", "gemini-3.8-flash-medium", "medium", "medium", 1.25),
-             ("antigravity", "gemini-3.8-flash-high", "large", "high", 1.5),
-             ("antigravity", "gemini-3.1-pro-low", "medium", "low", 2),
-             ("antigravity", "gemini-3.1-pro-high", "large", "high", 3)]
-    profiles = []
-    for adapter, model, tier, effort, rank in seeds:
-        if not model:
+    # Shipped public configuration, never copied from a developer's home directory.
+    path = Path(__file__).resolve().parent.parent / 'data/routing-defaults.json'
+    config = validate(read_json(path))
+    for p in config['profiles']:
+        if p['id'] == 'grok-large':
+            p['model'] = core.setting('ALLOY_GROK_MODEL', p['model'])
+        elif p['id'] == 'antigravity-medium':
+            p['model'] = core.ADAPTERS['antigravity'].model()
+    config['profiles'] = [p for p in config['profiles'] if p['model']]
+    return config
+
+
+def refresh_defaults(core, config):
+    """Add absent models; preserve every existing profile and effort choice."""
+    known = {(p['adapter'], p['model']) for p in config['profiles']}
+    ids = {p['id'] for p in config['profiles']}
+    for template in starter(core)['profiles']:
+        identity = (template['adapter'], template['model'])
+        if identity in known:
             continue
-        profile_id = adapter + "-" + tier
-        if any(p["id"] == profile_id for p in profiles):
-            profile_id += "-" + model
-        profiles.append(dict(id=profile_id, adapter=adapter, model=model,
-                             tier=tier, family=FAMILIES[adapter], effort=effort, cost_rank=rank, enabled=True,
-                             billing_mode="unknown", quota_pool=adapter,
-                             evidence="editable starter assumption; not benchmarked"))
-    return dict(schema=SCHEMA, jev_model="jev-1.13.0", profiles=profiles,
-                quota_pools={}, policy=dict(confidence_floor=.75, risk_threshold=.5,
-                estimated_input_tokens=10000, estimated_output_tokens=2000,
-                discovery_ttl_seconds=86400))
+        p = copy.deepcopy(template)
+        # Only inherit unambiguous subscription billing; never infer metered rates.
+        modes = {old['billing_mode'] for old in config['profiles']
+                 if old['adapter'] == p['adapter']}
+        if modes == {'subscription'}:
+            p['billing_mode'] = 'subscription'
+        base = p['id']
+        suffix = 2
+        while p['id'] in ids:
+            p['id'] = base + '-' + str(suffix)
+            suffix += 1
+        config['profiles'].append(p)
+        ids.add(p['id']); known.add(identity)
+    return config
 
 
 def key(provider="typesafe"):
@@ -666,6 +670,8 @@ def read_prompt(args):
 def setup(core, args):
     path = root() / "routing.json"
     config = load() if path.exists() else starter(core)
+    if getattr(args, "refresh_defaults", False):
+        refresh_defaults(core, config)
     if getattr(args, "jev_provider", None):
         config["jev_provider"] = args.jev_provider
     settings = provider_settings(config.get("jev_provider", "typesafe"))
@@ -732,6 +738,7 @@ def register(sub, core):
     p.add_argument("--jev-provider", choices=sorted(JEV_PROVIDERS), help="Jev credential provider; preserves existing model pins and billing")
     p.add_argument("--non-interactive", action="store_true")
     p.add_argument("--skip-live-test", action="store_true")
+    p.add_argument("--refresh-defaults", action="store_true", help="add missing shipped profiles without replacing user settings")
     p.add_argument("--billing", action="append", default=[], metavar="CLI=MODE")
     p.set_defaults(func=lambda a: setup(core, a))
     p = sub.add_parser("models", help="inspect model profiles or refresh discovery")

@@ -547,6 +547,28 @@ class RouterTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=medium', argv)
         self.assertEqual(core.ADAPTERS['codex'].model(), before)
 
+    def test_shipped_defaults_refresh_is_additive_private_and_idempotent(self):
+        original = dict(self.config['profiles'][0], model='custom-pinned',
+                        enabled=False, billing_mode='subscription', cost_rank=17)
+        disabled = dict(self.config['profiles'][1], model='gpt-6-sol',
+                        enabled=False, effort='low', billing_mode='subscription')
+        self.config['profiles'] = [original, disabled]
+        r.save(r.root() / 'routing.json', self.config)
+        args = argparse.Namespace(non_interactive=True, skip_live_test=True,
+                                  billing=[], refresh_defaults=True)
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, args)
+            first = r.load()
+            r.setup(core, args)
+        self.assertEqual(first, r.load())
+        self.assertEqual(first['profiles'][:2], [original, disabled])
+        self.assertEqual(sum(p['model'] == 'gpt-6-sol' for p in first['profiles']), 1)
+        self.assertTrue(any(p['model'] == 'claude-opus-5-5' for p in first['profiles']))
+        self.assertTrue(all(p['billing_mode'] == 'subscription' for p in first['profiles'] if p['adapter'] == 'codex'))
+        self.assertEqual((r.root() / 'routing.json').stat().st_mode & 0o777, 0o600)
+        self.assertFalse((r.root() / 'jev-key').exists())
+        self.assertFalse((r.root() / 'openrouter-key').exists())
+
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'
         r.save(r.root() / 'routing.json', self.config)

@@ -3,12 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
-## Unreleased
+## [0.8.0] - 2026-09-22
 
+- Ship public routing defaults and additive `setup --refresh-defaults` upgrades; each user supplies their own API key. No private configuration is distributed.
 - Send bounded, allowlisted model metrics to Jev and request per-candidate task fit in the same request; preserve hard constraints, cost tolerance and unknown outcome metrics.
 
 - Add GPT-6 Sol and Gemini 3.8 Flash low/medium/high plus Gemini 3.1 Pro low/high to starter routing profiles. Preserve existing profiles and billing settings.
 - Add exact GPT-6 Sol capability and pricing references without transferring high-effort evidence to lower-effort Gemini variants.
+
+### Validation
+- 215 offline tests and skill validation pass, including additive/idempotent config upgrades, user settings preservation, model-card privacy and bounded Jev fit judgments. No paid inference used.
 
 ## [0.7.1] - 2026-09-22
 

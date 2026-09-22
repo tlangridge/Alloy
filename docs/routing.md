@@ -246,3 +246,23 @@ Measured success rate, tokens per successful fix and latency are explicitly null
 Alloy does not yet have enough verified, model/effort/task-specific outcome data
 to estimate them. Known failures are task-specific, not global penalties.
 No paid inference was used to validate this change; tests use a fake transport.
+
+## Shipped configuration upgrades
+
+`data/routing-defaults.json` is the public source for new-install profiles and
+policy. It contains no credentials or account-specific billing. Each user supplies
+their own TypeSafe or OpenRouter key as described above. Model evidence ships
+separately in `data/model-evidence.json`; both files update with Alloy releases.
+
+For existing installations, run:
+
+```sh
+alloy setup --refresh-defaults --non-interactive --skip-live-test
+```
+
+This backs up the private config and adds missing adapter/model pairs. Existing
+profiles, disabled models, effort settings, pins, provider selection and policy
+remain unchanged. New profiles inherit subscription billing only when that CLI's
+existing profiles all agree on it; metered or mixed billing requires explicit
+configuration. No key is created and no model inference occurs. Repeating the
+command is idempotent. `models advise` reports any model-pin conflicts afterward.
