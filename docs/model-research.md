@@ -1,4 +1,4 @@
-# Model evidence and routing — 2026-09-17
+# Model evidence and routing — refreshed 2026-09-22
 
 ## What the evidence supports
 
@@ -14,7 +14,7 @@ quota costs, and cheaper tokens do not guarantee a cheaper completed task.
 | GPT-5.6 Sol | Complex debugging, technical reasoning, research | The previous medium starter tier was too restrictive: new starter profiles classify Sol as large. Still not a universal best choice. |
 | GPT-6 Astra | Difficult terminal/scientific workflows and complex reasoning | Strong candidate for hard work. High API token price and effort selection require attention; it is not automatically cheapest or best on every task. |
 | Claude Sonnet 5 | Efficient multi-step coding and debugging | Medium default; lower cybersecurity capability than Opus. Its tokenizer can increase token counts versus the predecessor. |
-| Claude Opus 5 | Broad software engineering and knowledge work | Large default; newer Fable evidence is stronger on some difficult agent tasks. |
+| Claude Opus 5 | Broad software engineering and knowledge work | Legacy profile retained; Opus 5.5 is the new large starter. |
 | Claude Fable 5.1 | Difficult debugging, scientific agents and application building | Large default. Respect the distinct Fable subscription pool. Published success does not establish local CLI performance. |
 | Grok 4.6 | Application building and knowledge work | Keep large capability, but do not give debugging/review a specialty preference based on a composite intelligence score alone. |
 | Gemini 3.6 Flash high | Efficient implementation and multimodal/UI work | Medium default; older generation. Preserve existing profiles rather than silently changing model IDs. |
@@ -104,3 +104,48 @@ Jev rubric v2 accepted 50/50 existing complexity cases and classified 16/16 held
 task-category cases correctly. The two runs used 47,948 reported input tokens;
 no downstream model execution was included. These small synthetic sets are
 regression checks, not a calibrated accuracy estimate on real workloads.
+
+## September 22 refresh: Opus 5.5, Sol and current prices
+
+Opus 5.5 medium becomes the Claude large starter (`claude-opus-5-5`). Its
+relative cost rank is 3 instead of 4: a conservative, editable efficiency prior,
+not a measured subscription multiplier. Existing configurations are not migrated.
+Sol stays large at rank 2.5; pins and independent model-family checks still win.
+Grok's default becomes 4.7; explicit older model pins remain valid.
+
+Anthropic reports FrontierCode 54.6% and CursorBench 52.5% for Opus 5.5 medium.
+Its headline TerminalBench 66.4% uses xhigh, versus Astra high at 57.9%; most
+other headline results use max. Astra remains ahead on reported science
+(64.6% vs 58.7%) and automation (41.4% vs 40.0%). These vendor comparisons
+have different efforts and harnesses, and some Claude evaluations use fallback
+models. They justify a coding preference, not a universal winner or a local
+success probability. [Launch methodology](https://www.anthropic.com/claude-opus-5-5).
+
+Standard direct API USD per million tokens, checked September 22:
+
+| Model | Input | Cached input | Output | Source |
+| --- | ---: | ---: | ---: | --- |
+| GPT-5.6 Luna | 0.20 | 0.02 | 1.20 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-luna) |
+| GPT-5.6 Terra | 2 | 0.20 | 12 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-terra) |
+| GPT-5.6 Sol | 4 | 0.40 | 20 | [OpenAI](https://developers.openai.com/api/docs/models/gpt-5.6-sol) |
+| GPT-6 Astra | 10 | 1 | 50 | [OpenAI](https://developers.openai.com/api/docs/pricing) |
+| Claude Sonnet 5 | 2 | 0.20 | 10 | [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing) |
+| Claude Opus 5.5 | 4 | 0.20 | 20 | [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing) |
+| Claude Fable 5.1 | 10 | 0.25 | 50 | [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing) |
+| Grok 4.7 | 2 | not recorded | 6 | [xAI](https://x.ai/api) |
+| Gemini 3.8 Flash | 0.75 | 0.075 | 3.75 | [Google](https://ai.google.dev/gemini-api/docs/pricing) |
+
+Sol's promotional rate lasts at least through November 21; Gemini's through
+December 31 (then 1.50/0.15/7.50). OpenAI long-context rates differ above 272K
+input tokens. Cache writes/storage, tools and fast/batch tiers are extra or
+separately priced. Gemini API prices do not establish agy subscription costs.
+New GPT-6 Sol/Luna prices are listed by OpenAI too; they are distinct models,
+not aliases for the requested GPT-5.6 profiles, so this refresh does not silently
+swap them in.
+
+`models advise` exposes dated `api_pricing` for matched models. It does not
+populate billing mode, rewrite configured prices or assume an OpenRouter or
+subscription rate equals direct API pricing. Confirm actual billing and copy
+applicable rates into metered profiles only. Jev classifies the task; code does
+cost arithmetic and applies quota headroom, evidence and independent-family
+constraints. No extra Jev request or price scraping is needed on each prompt.

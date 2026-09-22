@@ -138,6 +138,21 @@ Run `doctor` first:
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
 
+### Model and billing guidance
+
+For setup and model refreshes, read `docs/model-research.md` and run
+`alloy models advise`. Its dated `api_pricing` is reference data, not your CLI bill. Preserve
+model pins, explicit prices and billing modes. For metered profiles, confirm the
+actual provider, service tier, context length and current rates before configuring
+prices. For subscriptions, use live quota headroom and editable cost ranks; never
+convert an API discount into a claimed subscription saving.
+
+Jev classifies task kind, complexity, risk and ambiguity; deterministic policy
+combines those judgments with eligible profiles, cost, evidence and quota. Keep
+price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
+for coding; retain Sol as a capable independent-family option and Astra for hard
+reasoning/science. These are task-specific priors, not universal winners.
+
 ### Show usage and task assignments in chat
 
 **Every Alloy invocation must show a usage table and a task-routing statement
@@ -167,10 +182,11 @@ profiles); update the statement when dispatch confirms them. Never claim a
 worker ran merely because a profile was recommended. For diagnostic/setup/usage
 commands, say **No tasks dispatched**; for `route`, say **Selected; not executed**.
 
-Show the meter plus updated assignments again when a new delegation round or
-reroute changes the task/model mapping, and after a quota failure. Do not repeat
-it for every poll or Maker correction using the same workers. Use cached readings
-within their normal two-minute lifetime; do not force a refresh simply to redraw
+Show the meter plus updated assignments for **every execution round**, including
+Maker corrections, retries, resumes and new workstreams, even with the same workers
+and unchanged quota readings. Also show it after a reroute or quota failure.
+Never use `--if-changed` to suppress a round-boundary table. Do not repeat it for
+ordinary waiting polls. Use cached readings within their normal two-minute lifetime; do not force a refresh simply to redraw
 the table. Use `--refresh` after a quota error and `--cached` for offline context.
 Do not make an extra Jev call just to populate the display.
 
@@ -455,6 +471,13 @@ be challenged, not blindly obeyed. Independent Checker contexts reduce shared
 assumptions. Each review returns at most 5 findings with path, evidence and a
 scoped remedy. Malformed reviews fail closed. Stop after two fix rounds; the
 runtime enforces this bound, including resumes.
+
+Each round emits `ALLOY_ROUND_USAGE` with the usage table and planned worker roles
+on stderr and saves `round-N/usage.md` plus a public snapshot in the task record.
+When this event appears, immediately render its table and assignments in visible
+chat, outside code fences, even on corrections with unchanged workers. If the
+host buffers output, read the saved round files while waiting and render each
+unseen round once. Tool output alone does not satisfy this requirement.
 
 Maker commands use explicit edit/test permissions. `--allow-path` is validated
 after execution, not an OS confinement boundary. Codex uses `workspace-write`;

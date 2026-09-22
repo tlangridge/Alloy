@@ -43,7 +43,8 @@ def assessment(profile, data):
     return dict(status='matched' if supported else 'effort-unverified',
         preferred_tasks=row['preferred_tasks'] if supported else [],
         strengths=row['strengths'], limitations=row['limitations'], sources=row['sources'],
-        basis=row['basis'], suggested_tier=row['suggested_tier'])
+        basis=row['basis'], suggested_tier=row['suggested_tier'],
+        api_pricing=row.get('api_pricing'))
 
 
 def advise(core, config, data, cache):

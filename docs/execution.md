@@ -219,3 +219,14 @@ resume/integrate/cleanup; repository locks serialize Alloy lifecycle mutations.
 Saved process IDs guard against resuming while a worker may still be alive.
 External editors and Git commands do not honor Alloy's locks: avoid concurrent
 manual mutations of a task worktree during execution or cleanup.
+
+### Every-round usage display
+
+Execute emits `ALLOY_ROUND_USAGE` on stderr before each Maker round, including
+corrections and resumed rounds. Each event includes a Markdown usage table and
+planned Maker/Checker assignments. The same text is in `round-N/usage.md` and
+the public snapshot in `task.json` under `rounds[N].usage`. JSON stdout remains
+machine-readable. The host must render every new round in chat, even when usage
+or workers have not changed; tool output alone is insufficient. Normal cache
+TTL and disabled/unavailable tracking behavior are preserved. Buffered hosts
+can read unseen round files while waiting. Waiting polls need no repeated table.

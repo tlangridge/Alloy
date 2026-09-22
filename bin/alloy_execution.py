@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
@@ -408,6 +409,26 @@ def dispatch(core, task, role, prompt, folder):
     return result
 
 
+def round_usage(core, task, folder, index):
+    """Persist and emit every round boundary, independent of quota changes."""
+    snapshot = core.routing.usage.public(core.routing.usage.get(core))
+    lines = ['**Alloy · execute · round %s**' % (index + 1), '',
+             core.routing.usage.render(snapshot),
+             '| Task / role | CLI · model | Status / reason |',
+             '| --- | --- | --- |']
+    for role in ('maker', 'checker'):
+        worker = task[role]
+        lines.append('| %s | %s · %s | Planned: %s |' % (
+            role.title(), worker['cli'], worker['model'],
+            'edit and test' if role == 'maker' else 'independent review after gates'))
+    lines.append('| Lead | Host | Judge result and integrate |')
+    markdown = '\n'.join(lines) + '\n'
+    path = folder / 'usage.md'
+    path.write_text(markdown)
+    print('ALLOY_ROUND_USAGE ' + str(path) + '\n' + markdown, file=sys.stderr, flush=True)
+    return dict(snapshot=snapshot, markdown_path=str(path))
+
+
 def run(core, task):
     directory = taskdir(core, task['id'])
     task.pop('error', None)
@@ -425,6 +446,7 @@ def run(core, task):
             folder.mkdir(exist_ok=True)
             record = dict(index=index, started_at=time.time())
             task['rounds'].append(record)
+            record['usage'] = round_usage(core, task, folder, index)
             save(core, task)
             prompt = ('You are the implementation Maker. Edit files and run tests in this managed worktree: ' + task['worktree'] +
                 '\nAllowed paths: ' + json.dumps(task['allow_paths']) + '\nDo not commit, merge, push, spawn agents, or edit Git metadata. '

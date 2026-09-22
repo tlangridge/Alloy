@@ -58,6 +58,37 @@ class RouterTests(unittest.TestCase):
         return r.route(core, 'Change the README title to Alloy.', self.args,
             transport=lambda payload: (answer or response(), 5), available=self.available)
 
+    def test_grok_47_default_preserves_pins_and_separates_fast_evidence(self):
+        with patch.dict(os.environ, {'ALLOY_GROK_MODEL': ''}):
+            profiles = r.starter(core)['profiles']
+            self.assertEqual(next(p['model'] for p in profiles if p['adapter'] == 'grok'), 'grok-4.7')
+        with patch.dict(os.environ, {'ALLOY_GROK_MODEL': 'grok-4.6'}):
+            self.assertEqual(next(p['model'] for p in r.starter(core)['profiles'] if p['adapter'] == 'grok'), 'grok-4.6')
+        data = r.evidence.catalog()
+        data['status'] = 'current'
+        profile = dict(model='grok-4.7', family='xai', effort='high')
+        self.assertEqual(r.evidence.assessment(profile, data)['status'], 'matched')
+        profile['model'] = 'grok-4.7-build-fast'
+        self.assertEqual(r.evidence.assessment(profile, data)['status'], 'unmatched')
+
+    def test_opus_efficiency_and_price_advice_do_not_change_billing(self):
+        profile = next(p for p in self.config['profiles'] if p['id'] == 'claude-large')
+        self.assertEqual(profile['model'], 'claude-opus-5-5')
+        self.assertEqual(profile['effort'], 'medium')
+        data = r.evidence.catalog(); data['status'] = 'current'
+        advice = r.evidence.assessment(profile, data)
+        self.assertIn('implementation', advice['preferred_tasks'])
+        self.assertEqual(advice['api_pricing']['output_per_million'], 20)
+        self.assertEqual(profile['billing_mode'], 'unknown')
+        self.assertIsNone(r.estimate(profile, self.config))
+        profile['billing_mode'] = 'metered'
+        profile.update(input_per_million=7, output_per_million=30)
+        self.assertEqual(r.estimate(profile, self.config), .13)
+        r.evidence.advise(core, self.config, data, {})
+        self.assertEqual(profile['input_per_million'], 7)
+        profile['model'] = 'opus'
+        self.assertEqual(r.evidence.assessment(profile, data)['status'], 'unmatched')
+
     def test_verified_failures_escalate_and_reach_jev(self):
         for count, tier in ((0, 'small'), (1, 'medium'), (2, 'large')):
             self.args.prior_failures = count
@@ -119,7 +150,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(decision['cheapest_eligible'], 'cheap')
         self.assertEqual(decision['recommendations'][0]['profile'], 'fit')
         self.assertTrue(decision['model_evidence']['sources'])
-        self.assertEqual(decision['evidence_revision'], '2026-09-17.1')
+        self.assertEqual(decision['evidence_revision'], r.evidence.catalog()['revision'])
 
     def test_fit_does_not_overpay_or_escalate_small_tasks(self):
         rows = self.evidence_pair(); rows[1]['cost_rank'] = 3
