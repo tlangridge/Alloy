@@ -449,7 +449,7 @@ Offline or failed checks are cached for 24 hours and do not block skill use.
 ### Shared routing defaults, your own API key
 
 Alloy ships [model profiles and policy](data/routing-defaults.json) and
-[dated model evidence](data/model-evidence.json). Every user supplies their own
+[dated model evidence](data/model-evidence.json). Users opting into Jev supply their own
 TypeSafe or OpenRouter key; no API keys are included. Run `alloy setup --skip-live-test`
 (or add `--jev-provider openrouter`) to configure routing without paid inference.
 Existing users can add the latest shipped models without replacing personal
@@ -463,3 +463,19 @@ alloy models advise
 Existing profiles, disabled models, pins and billing remain intact. A model pin
 may still exclude new profiles. Keys stay in private local files or environment
 variables, never in the shared defaults. See [routing setup](docs/routing.md).
+
+
+### No Jev key? Let the host route
+
+Jev is optional. The host agent can select workers using the bundled model
+profiles, evidence and quota context:
+
+```sh
+alloy setup --keyless --non-interactive
+alloy models context
+```
+
+The Alloy skill guides the host to select explicit Maker/Checker profiles and
+supply its task assessment to `execute`, without `--route`. Normal CLI logins,
+billing, independent review and permission controls still apply. This uses host
+reasoning tokens instead of Jev and may take longer; no router API key is needed.

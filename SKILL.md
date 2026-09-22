@@ -143,7 +143,8 @@ Run `doctor` first:
 Alloy includes `data/routing-defaults.json` (profiles and routing policy) and
 `data/model-evidence.json` (dated capabilities and API pricing). Use these shared
 files; never copy a developer's private config or credentials to another user.
-Each user supplies their own TypeSafe or OpenRouter API key through hidden setup,
+Jev is optional. If a user opts into Jev, they supply their own TypeSafe or
+OpenRouter API key through hidden setup,
 the supported environment variable, or an owner-only local key file. Never put
 keys in the skill, defaults, prompts, command arguments or release artifacts.
 
@@ -156,6 +157,34 @@ profiles (including disabled models), effort choices, pins and billing. Check
 Setup with `--skip-live-test` makes no inference call and needs no API key yet.
 Only run a paid live test when authorized. Defaults are versioned with releases;
 update the shared files as model evidence changes.
+
+### Keyless host routing (no Jev required)
+
+Without a Jev key, do not block Alloy or ask the user to obtain one. Initialize
+profiles with `alloy setup --keyless --non-interactive`, then read
+`alloy models context`, `alloy models advise`, and `docs/model-research.md`.
+The host performs the routing judgment using the included guidance. This spends
+host reasoning tokens and may be slower than Jev; it makes no router API call.
+The provider CLIs still need their normal authentication/subscriptions.
+
+Assess task kind, complexity, risk and ambiguity. Compare exact model/effort,
+capability evidence, expected task cost, quota headroom and verified failures.
+Select the cheapest credible worker; do not treat unknown quota as full, or
+invent measured success rates. Escalate after verified repeated failures. Keep
+model pins and billing settings intact. For execute, reserve an independent
+Checker and exclude the host family from both workers. If no valid trio exists,
+report that blocker rather than weakening independent review.
+
+Show the required usage table and explain each assignment. Run execute with
+`--maker-profile ID --checker-profile ID --task-tier small|medium|large
+--task-kind KIND`, adding `--task-risk` or `--task-ambiguous` when appropriate;
+omit `--route`. Pass the assessed tier explicitly. Existing budget, quota,
+permission, correction and cleanup controls still apply. Ordinary consult/review
+panels can use host-chosen CLI/model overrides with their read-only permissions.
+
+Jev remains the optional fast router for authorized/configured users. If it
+fails, report the failure and make an explicit host selection using the same
+controls; never silently remove a budget, pin or review requirement.
 
 ### Model and billing guidance
 
@@ -465,7 +494,7 @@ Start from a clean committed checkout on the intended target branch. Never
 stash, reset, or commit unrelated user work just to satisfy this condition.
 
 Run `alloy models list` to inspect configured profiles; run `alloy setup` if
-needed (use `alloy setup --skip-live-test` to avoid a live setup call). Preserve model pins and billing preferences. Show the usage table and task assignments as required in Step 0. Explain that execute makes at most three
+needed (use `alloy setup --keyless --non-interactive` when Jev is not configured). Preserve model pins and billing preferences. Show the usage table and task assignments as required in Step 0. Explain that execute makes at most three
 Maker calls and three Checker calls, plus local tests. Estimated spend limits
 apply **per provider dispatch**, not as a hard whole-task billing cap.
 

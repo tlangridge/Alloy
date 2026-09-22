@@ -3,6 +3,11 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.8.1] - 2026-09-22
+
+- Add keyless setup and host model-context inspection; the skill selects explicit workers without requiring Jev.
+- Host task tier, kind, risk and ambiguity feed the existing execution eligibility checks.
+
 ## [0.8.0] - 2026-09-22
 
 - Ship public routing defaults and additive `setup --refresh-defaults` upgrades; each user supplies their own API key. No private configuration is distributed.
