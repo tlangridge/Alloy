@@ -188,11 +188,17 @@ def starter(core):
     seeds = [("codex", "gpt-5.6-luna", "small", "medium", 1),
              ("codex", "gpt-5.6-terra", "medium", "high", 2),
              ("codex", "gpt-5.6-sol", "large", "high", 2.5),
+             ("codex", "gpt-6-sol", "large", "high", 2),
              ("codex", "gpt-6-astra", "large", "high", 4),
              ("claude", "sonnet", "medium", None, 2),
              ("claude", "claude-opus-5-5", "large", "medium", 3),
              ("grok", core.setting("ALLOY_GROK_MODEL", "grok-4.7"), "large", None, 3),
-             ("antigravity", core.ADAPTERS["antigravity"].model(), "medium", "high", 1)]
+             ("antigravity", core.ADAPTERS["antigravity"].model(), "medium", "high", 1),
+             ("antigravity", "gemini-3.8-flash-low", "small", "low", 1),
+             ("antigravity", "gemini-3.8-flash-medium", "medium", "medium", 1.25),
+             ("antigravity", "gemini-3.8-flash-high", "large", "high", 1.5),
+             ("antigravity", "gemini-3.1-pro-low", "medium", "low", 2),
+             ("antigravity", "gemini-3.1-pro-high", "large", "high", 3)]
     profiles = []
     for adapter, model, tier, effort, rank in seeds:
         if not model:

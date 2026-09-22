@@ -89,6 +89,21 @@ class RouterTests(unittest.TestCase):
         profile['model'] = 'opus'
         self.assertEqual(r.evidence.assessment(profile, data)['status'], 'unmatched')
 
+    def test_current_models_are_routable_with_explicit_pins(self):
+        wanted = {'gpt-6-sol', 'claude-opus-5-5', 'grok-4.7',
+                  'gemini-3.8-flash-low', 'gemini-3.8-flash-medium',
+                  'gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'gemini-3.1-pro-high'}
+        self.assertTrue(wanted <= {p['model'] for p in self.config['profiles']})
+        for model in wanted:
+            p = next(p for p in self.config['profiles'] if p['model'] == model)
+            self.args.profile = p['id']
+            with patch.dict(os.environ, {r.MODEL_KEYS[p['adapter']]: model}):
+                decision = self.decide()
+            self.assertEqual(decision['model'], model)
+        data = r.evidence.catalog(); data['status'] = 'current'
+        low = dict(model='gemini-3.8-flash-low', family='google', effort='low')
+        self.assertEqual(r.evidence.assessment(low, data)['status'], 'unmatched')
+
     def test_verified_failures_escalate_and_reach_jev(self):
         for count, tier in ((0, 'small'), (1, 'medium'), (2, 'large')):
             self.args.prior_failures = count
@@ -228,9 +243,10 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(before, (r.root() / 'routing.json').read_bytes())
 
     def test_small_and_large_choose_different_profiles(self):
-        self.assertEqual(self.decide()['profile'], 'codex-small')
+        small = self.decide()
+        self.assertEqual(small['required_tier'], 'small')
         self.assertEqual(self.decide(response('large'))['required_tier'], 'large')
-        self.assertNotEqual(self.decide(response('large'))['profile'], 'codex-small')
+        self.assertNotEqual(self.decide(response('large'))['profile'], small['profile'])
 
     def test_uncertainty_and_risk_raise_floor(self):
         for reply in (response(confidence=.2), response(risk=.9), response(ambiguous=.9), response('unknown')):
@@ -477,6 +493,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
 
     def test_route_adapter_does_not_mutate_default(self):
+        self.args.profile = 'codex-small'
         before = core.ADAPTERS['codex'].model()
         decision = self.decide()
         ad = r.routed_adapter(core, decision)
@@ -513,7 +530,7 @@ class RouterTests(unittest.TestCase):
         task = Path(self.tmp.name) / 'task'; task.write_text('Rename README heading')
         output = io.StringIO()
         with patch.dict(os.environ, {'ALLOY_BIN_CODEX': str(executable), 'CODEX_API_KEY': 'test', 'TYPESAFE_API_KEY': 'private', 'OPENROUTER_API_KEY': 'private-router', 'ALLOY_REPO': 'none'}), patch.object(r, 'inventory', return_value=self.available), patch.object(r, 'request', return_value=(response(), 1)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            code = core.main(['panel', '--route', '--prompt-file', str(task), '--no-repo', '--run-dir', str(Path(self.tmp.name) / 'runs')])
+            code = core.main(['panel', '--route', '--profile', 'codex-small', '--prompt-file', str(task), '--no-repo', '--run-dir', str(Path(self.tmp.name) / 'runs')])
         self.assertEqual(code, 0)
         manifest = json.loads(Path(output.getvalue().strip().splitlines()[-1]).read_text())
         self.assertEqual(manifest['routing']['model'], 'gpt-5.6-luna')

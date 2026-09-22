@@ -3,6 +3,11 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## Unreleased
+
+- Add GPT-6 Sol and Gemini 3.8 Flash low/medium/high plus Gemini 3.1 Pro low/high to starter routing profiles. Preserve existing profiles and billing settings.
+- Add exact GPT-6 Sol capability and pricing references without transferring high-effort evidence to lower-effort Gemini variants.
+
 ## [0.7.1] - 2026-09-22
 
 ### Changed

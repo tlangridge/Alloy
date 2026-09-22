@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "2026-09-22.2",
+  "revision": "2026-09-22.3",
   "reviewed_at": "2026-09-17",
   "expires_at": "2026-12-16",
   "models": [
@@ -372,6 +372,41 @@
         "reviewed_at": "2026-09-22",
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
+    },
+    {
+      "models": [
+        "gpt-6-sol"
+      ],
+      "family": "openai",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "review",
+        "architecture"
+      ],
+      "strengths": "Officially positioned for complex coding and agentic workflows; lower standard API token price than GPT-5.6 Sol.",
+      "limitations": "No local quality or subscription efficiency benchmark. API price is not a subscription quota multiplier. Model and effort availability depend on the CLI account.",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-sol"
+      ],
+      "applicable_efforts": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "conservative editorial prior from official model positioning; not calibrated success probability",
+      "reviewed_at": "2026-09-22",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 10,
+        "cached_input_per_million": 0.2,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
+        "notes": "Standard direct API text pricing. Above 272K input tokens input/cache are 2x and output 1.5x; cache writes and tools billed separately. Subscription pricing differs."
       }
     }
   ]
