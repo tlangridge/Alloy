@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "2026-09-17.1",
+  "revision": "2026-09-22.2",
   "reviewed_at": "2026-09-17",
   "expires_at": "2026-12-16",
   "models": [
@@ -26,7 +26,16 @@
         "max",
         "ultra"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 0.2,
+        "output_per_million": 1.2,
+        "cached_input_per_million": 0.02,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
+      }
     },
     {
       "models": [
@@ -49,7 +58,16 @@
         "max",
         "ultra"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 12,
+        "cached_input_per_million": 0.2,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
+      }
     },
     {
       "models": [
@@ -64,9 +82,11 @@
         "research"
       ],
       "strengths": "Strong complex software work, technical reasoning and research.",
-      "limitations": "Superseded on several demanding agent benchmarks by Astra; higher cost than Luna/Terra.",
+      "limitations": "Opus 5.5 leads vendor-reported coding comparisons; Astra leads several hard agent/science tasks. Sol remains a cheaper OpenAI alternative to Astra and an independent-family reviewer. Promotional API price is not a subscription multiplier.",
       "sources": [
-        "https://openai.com/index/gpt-5-6/"
+        "https://openai.com/index/gpt-5-6/",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://www.anthropic.com/claude-opus-5-5"
       ],
       "applicable_efforts": [
         "high",
@@ -74,7 +94,17 @@
         "max",
         "ultra"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 4,
+        "output_per_million": 20,
+        "cached_input_per_million": 0.4,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately. Promotional pricing available at least through 2026-11-21; recheck then."
+      },
+      "reviewed_at": "2026-09-22"
     },
     {
       "models": [
@@ -102,7 +132,16 @@
         "max",
         "ultra"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 10,
+        "output_per_million": 50,
+        "cached_input_per_million": 1,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
+      }
     },
     {
       "models": [
@@ -126,7 +165,16 @@
         "xhigh",
         "max"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 10,
+        "cached_input_per_million": 0.2,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
     },
     {
       "models": [
@@ -149,7 +197,16 @@
         "xhigh",
         "max"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 5,
+        "output_per_million": 25,
+        "cached_input_per_million": 0.5,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
     },
     {
       "models": [
@@ -174,7 +231,16 @@
         "xhigh",
         "max"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "api_pricing": {
+        "input_per_million": 10,
+        "output_per_million": 50,
+        "cached_input_per_million": 0.25,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
     },
     {
       "models": [
@@ -198,6 +264,37 @@
         "xhigh"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "grok-4.7"
+      ],
+      "family": "xai",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging"
+      ],
+      "strengths": "Vendor-reported improvement in long-horizon coding and verification; DeepSWE reports a high-effort result.",
+      "limitations": "Most launch comparisons use 4.7 xhigh versus 4.6 high; no local quality or quota-efficiency evaluation. Equal token prices do not guarantee equal task cost. Fast variant is separately priced.",
+      "sources": [
+        "https://x.ai/news/grok-4-7"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh"
+      ],
+      "basis": "conservative editorial prior from vendor launch evidence; not calibrated success probability",
+      "reviewed_at": "2026-09-22",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 6,
+        "cached_input_per_million": null,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://x.ai/api",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
     },
     {
       "models": [
@@ -240,6 +337,42 @@
         "high"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability"
+    },
+    {
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "family": "anthropic",
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "review",
+        "architecture",
+        "frontend"
+      ],
+      "strengths": "Strong coding and long investigations at medium effort; vendor reports FrontierCode 54.6% and CursorBench 52.5% at medium.",
+      "limitations": "Vendor evidence, not local success probabilities. Main benchmark table mostly uses max; TerminalBench uses xhigh. Astra leads reported science and automation results. API task savings do not measure subscription quota savings.",
+      "sources": [
+        "https://www.anthropic.com/claude-opus-5-5"
+      ],
+      "applicable_efforts": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "conservative editorial prior from vendor benchmarks; not calibrated success probability",
+      "reviewed_at": "2026-09-22",
+      "api_pricing": {
+        "input_per_million": 4,
+        "output_per_million": 20,
+        "cached_input_per_million": 0.2,
+        "currency": "USD",
+        "reviewed_at": "2026-09-22",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
+      }
     }
   ]
 }

@@ -360,7 +360,7 @@ variables (env wins over the file):
 | `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.6-flash-high` | agy model — the latest Gemini family seat (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for cheap/fast, `gemini-3.1-pro-high` for the previous Pro) |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
 | `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
-| `ALLOY_GROK_MODEL` | grok default (`grok-4.6`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, now `grok-4.6`) |
+| `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
 | `ALLOY_JUDGE` | `host` | who judges (the invoking agent; see methodology). Rotation to a CLI is on the roadmap. |

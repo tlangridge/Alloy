@@ -76,6 +76,11 @@ def main():
         if not ok:
             fail(f"body is missing {label}")
 
+    if 'every execution round' not in low or 'alloy_round_usage' not in low:
+        fail('execute must require visible usage for every round')
+    if 'do not repeat it for every poll or maker correction' in low:
+        fail('same-worker corrections must not suppress round usage')
+
     # The /alloy-execute alias is a shim that defers to this file -- it must
     # exist, be named for its slash command, and carry no second runbook.
     shim_path = os.path.join(REPO, "alloy-execute", "SKILL.md")

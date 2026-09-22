@@ -3,6 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.7.1] - 2026-09-22
+
+### Changed
+- Claude large starter uses Opus 5.5 at medium effort with a lower editable cost rank; Grok defaults to 4.7. Existing model pins and billing configuration remain intact.
+- Refreshed Sol/Opus benchmark guidance and dated API price references in model advice, keeping subscription quotas separate from API prices.
+- Every execute round emits and saves usage Markdown with worker assignments, including corrections and resumes. Both skills require visible chat rendering even when workers and usage are unchanged.
+
+### Validation
+- 210 offline tests (full suite plus added regression coverage) and skill validation; no paid model execution used for this release.
+
 ## [0.7.0] - 2026-09-19
 
 ### Added

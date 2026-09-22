@@ -190,8 +190,8 @@ def starter(core):
              ("codex", "gpt-5.6-sol", "large", "high", 2.5),
              ("codex", "gpt-6-astra", "large", "high", 4),
              ("claude", "sonnet", "medium", None, 2),
-             ("claude", "opus", "large", None, 4),
-             ("grok", core.setting("ALLOY_GROK_MODEL", "grok-4.6"), "large", None, 3),
+             ("claude", "claude-opus-5-5", "large", "medium", 3),
+             ("grok", core.setting("ALLOY_GROK_MODEL", "grok-4.7"), "large", None, 3),
              ("antigravity", core.ADAPTERS["antigravity"].model(), "medium", "high", 1)]
     profiles = []
     for adapter, model, tier, effort, rank in seeds:

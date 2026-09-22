@@ -311,10 +311,32 @@ else:
 
     def test_review_failure_drives_correction_without_host(self):
         self.verdicts = [dict(verdict='fail', findings=[dict(path='file.txt', evidence='Example failure', fix='Check exact newline')])]
-        code, task = self.create()
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            code, task = self.create()
+        self.assertEqual(output.getvalue().count('ALLOY_ROUND_USAGE'), 2)
+        for index, record in enumerate(task['rounds']):
+            text = Path(record['usage']['markdown_path']).read_text()
+            self.assertIn('round %s' % (index + 1), text)
+            self.assertIn('tracking is disabled', text)
+            self.assertIn('claude · sonnet', text)
         self.assertEqual(code, 0); self.assertEqual(len(task['rounds']), 2)
         self.assertIn('Example failure', self.calls[2][1])
         self.assertEqual([c[0] for c in self.calls], ['maker','checker','maker','checker'])
+
+    def test_round_usage_repeats_unchanged_table_without_auth_metadata(self):
+        snapshot = dict(enabled=True, providers={'claude': dict(
+            status='ready', binding='private-auth-binding', windows=[])})
+        task = dict(maker=self.maker, checker=self.checker)
+        output = io.StringIO()
+        with patch.object(core.routing.usage, 'get', return_value=snapshot), contextlib.redirect_stderr(output):
+            for index in range(2):
+                folder = self.base / str(index); folder.mkdir()
+                record = e.round_usage(core, task, folder, index)
+                self.assertNotIn('binding', record['snapshot']['providers']['claude'])
+                self.assertIn('| Provider / pool |', Path(record['markdown_path']).read_text())
+        self.assertEqual(output.getvalue().count('| Provider / pool |'), 2)
+        self.assertNotIn('private-auth-binding', output.getvalue())
 
     def test_failed_gates_bounded_and_retained(self):
         self.args.test = [sys.executable + ' -c "raise SystemExit(1)"']
