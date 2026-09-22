@@ -5,6 +5,8 @@ All notable changes to Alloy are documented here. Format loosely follows
 
 ## Unreleased
 
+- Send bounded, allowlisted model metrics to Jev and request per-candidate task fit in the same request; preserve hard constraints, cost tolerance and unknown outcome metrics.
+
 - Add GPT-6 Sol and Gemini 3.8 Flash low/medium/high plus Gemini 3.1 Pro low/high to starter routing profiles. Preserve existing profiles and billing settings.
 - Add exact GPT-6 Sol capability and pricing references without transferring high-effort evidence to lower-effort Gemini variants.
 

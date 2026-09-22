@@ -147,8 +147,11 @@ actual provider, service tier, context length and current rates before configuri
 prices. For subscriptions, use live quota headroom and editable cost ranks; never
 convert an API discount into a claimed subscription saving.
 
-Jev classifies task kind, complexity, risk and ambiguity; deterministic policy
-combines those judgments with eligible profiles, cost, evidence and quota. Keep
+Jev classifies task kind, complexity, risk and ambiguity, and assesses candidate
+task fit from compact model cards in the same request. Deterministic policy
+combines those judgments with eligible profiles, cost, evidence and quota.
+Unknown measured success, latency and tokens per successful fix stay unknown;
+never present vendor benchmarks as local outcomes. Keep
 price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
 for coding; retain Sol as a capable independent-family option and Astra for hard
 reasoning/science. These are task-specific priors, not universal winners.

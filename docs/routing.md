@@ -217,3 +217,32 @@ Token efficiency remains an estimate: metered selection uses configured token
 budgets and prices, while subscription selection uses quota pressure and relative
 cost ranks. Actual provider-specific tokens per successful fix are not yet
 learned from outcomes, and no calibrated expected-success probability is claimed.
+
+
+## Model context sent to Jev (rubric 3)
+
+The same request now includes up to 32 enabled, CLI-ready, model-pin-compatible
+candidate cards: exact model/family/effort, configured tier, billing mode,
+relative cost rank, configured token estimates and estimated API spend, fresh
+quota headroom and snapshot time, shared quota pool, evidence status/sources,
+strengths/limitations, and verified failures on this task. Fields are allowlisted;
+credentials, CLI diagnostic text and arbitrary configuration are never copied.
+Profiles beyond the card limit remain eligible through deterministic policy.
+
+One independent Noul question per card assesses supported task fit. This adds
+questions and input tokens but no second network round trip. These are advisory
+judgments, not measured task success probabilities. Fits at or above .75 promote
+task preference; at or below .25 remove it; intermediate or absent answers retain
+the dated prior. Thresholds require offline/live evaluation on representative
+work before any claim of improved accuracy. Malformed probabilities fail closed.
+Only matched effort-specific evidence or explicit user task preferences can
+influence fit. Stale/unmatched evidence cannot gain credibility from Jev's answer.
+Small tasks and `use_model_evidence=false` retain cost-based ranking. In the latter
+case no model-fit questions are requested. All hard filters and the existing
+cost-tolerance ceiling remain enforced in code, as does independent review.
+
+Decision history records the model cards and selected fit judgment for audit.
+Measured success rate, tokens per successful fix and latency are explicitly null:
+Alloy does not yet have enough verified, model/effort/task-specific outcome data
+to estimate them. Known failures are task-specific, not global penalties.
+No paid inference was used to validate this change; tests use a fake transport.

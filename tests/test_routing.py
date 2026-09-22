@@ -157,6 +157,51 @@ class RouterTests(unittest.TestCase):
             probabilities={k: int(k == kind) for k in r.questions()['kind']['criteria']})
         return reply
 
+    def test_jev_receives_model_metrics_and_fit_changes_bounded_choice(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        captured = []
+        def transport(payload):
+            captured.append(payload)
+            reply = self.kind_answer('implementation')
+            reply['answers'].update(fit_0=dict(type='noul', noul=.1),
+                                    fit_1=dict(type='noul', noul=.9))
+            return reply, 1
+        decision = r.route(core, 'Implement a complex change', self.args,
+                           transport=transport, available=self.available)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(decision['profile'], 'fit')
+        self.assertEqual(decision['jev_task_fit'], .9)
+        card = captured[0]['state']['models'][0]
+        self.assertEqual(card['billing_mode'], 'unknown')
+        self.assertIsNone(card['estimated_api_usd'])
+        self.assertIsNone(card['measured_success_rate'])
+        self.assertIn('strengths', card)
+        self.config['profiles'][1]['cost_rank'] = 3
+        r.save(r.root() / 'routing.json', self.config)
+        decision = r.route(core, 'Implement a complex change', self.args,
+                           transport=transport, available=self.available)
+        self.assertEqual(decision['profile'], 'cheap')
+
+    def test_model_cards_are_bounded_allowlisted_and_honor_effort(self):
+        self.config['profiles'][0]['secret'] = 'DO-NOT-SEND'
+        self.available['codex']['auth'] = 'DO-NOT-SEND'
+        with patch.dict(os.environ, {'ALLOY_CODEX_EFFORT': 'low'}):
+            cards = r.model_context(core, self.config, self.available, {},
+                                    dict(failed_profiles=[]))
+        self.assertNotIn('DO-NOT-SEND', json.dumps(cards))
+        self.assertEqual(cards[0]['effort'], 'low')
+        self.assertEqual(cards[0]['evidence_status'], 'effort-unverified')
+        self.assertEqual(r.model_fits(dict(answers={'fit_0':dict(type='noul',noul=.99)}), cards), {})
+        self.config['profiles'] = [dict(self.config['profiles'][0], id=str(i)) for i in range(100)]
+        self.assertEqual(len(r.model_context(core, self.config, self.available, {},
+                         dict(failed_profiles=[]))), 32)
+
+    def test_invalid_model_fit_fails_closed(self):
+        for value in (True, -1, float('nan'), 1.1):
+            reply = response(); reply['answers']['fit_0'] = dict(type='noul', noul=value)
+            with self.assertRaisesRegex(r.RoutingError, 'model-fit'):
+                self.decide(reply)
+
     def test_task_fit_prefers_documented_debugger_with_bounded_premium(self):
         self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
         with patch.object(r.evidence.time, 'time', return_value=1789680000):
