@@ -149,3 +149,19 @@ subscription rate equals direct API pricing. Confirm actual billing and copy
 applicable rates into metered profiles only. Jev classifies the task; code does
 cost arithmetic and applies quota headroom, evidence and independent-family
 constraints. No extra Jev request or price scraping is needed on each prompt.
+
+
+## GPT-6 Sol and Gemini profile additions
+
+GPT-6 Sol is now an explicit large-tier starter at relative rank 2, alongside
+retained GPT-5.6 Sol. The [official model page](https://developers.openai.com/api/docs/models/gpt-6-sol)
+positions it for complex coding and agents, with standard API prices of $2 input,
+$0.20 cached input and $10 output per million tokens. These are not subscription
+multipliers. Its task preferences remain conservative priors, not local benchmarks.
+
+Starter profiles also include Gemini 3.8 Flash low/medium/high and Gemini 3.1 Pro
+low/high. All five IDs were listed by `agy models` on September 22. Capability
+tiers and relative costs are editable assumptions; lower-effort variants do not
+inherit high-effort benchmark evidence. Actual access is checked at dispatch.
+Existing installations need explicit profile updates; setup does not overwrite
+user configuration or remove model pins automatically.

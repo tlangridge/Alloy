@@ -138,6 +138,25 @@ Run `doctor` first:
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
 
+### Shipped configuration and user credentials
+
+Alloy includes `data/routing-defaults.json` (profiles and routing policy) and
+`data/model-evidence.json` (dated capabilities and API pricing). Use these shared
+files; never copy a developer's private config or credentials to another user.
+Each user supplies their own TypeSafe or OpenRouter API key through hidden setup,
+the supported environment variable, or an owner-only local key file. Never put
+keys in the skill, defaults, prompts, command arguments or release artifacts.
+
+For a new opt-in routing installation, run `alloy setup --skip-live-test` and
+choose `--jev-provider openrouter` if requested. For an existing configured user
+upgrading models, run `alloy setup --refresh-defaults --non-interactive --skip-live-test`.
+This adds absent shipped models, backs up the config, and preserves existing
+profiles (including disabled models), effort choices, pins and billing. Check
+`alloy models advise` for pin conflicts; don't remove user pins automatically.
+Setup with `--skip-live-test` makes no inference call and needs no API key yet.
+Only run a paid live test when authorized. Defaults are versioned with releases;
+update the shared files as model evidence changes.
+
 ### Model and billing guidance
 
 For setup and model refreshes, read `docs/model-research.md` and run
@@ -147,8 +166,11 @@ actual provider, service tier, context length and current rates before configuri
 prices. For subscriptions, use live quota headroom and editable cost ranks; never
 convert an API discount into a claimed subscription saving.
 
-Jev classifies task kind, complexity, risk and ambiguity; deterministic policy
-combines those judgments with eligible profiles, cost, evidence and quota. Keep
+Jev classifies task kind, complexity, risk and ambiguity, and assesses candidate
+task fit from compact model cards in the same request. Deterministic policy
+combines those judgments with eligible profiles, cost, evidence and quota.
+Unknown measured success, latency and tokens per successful fix stay unknown;
+never present vendor benchmarks as local outcomes. Keep
 price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
 for coding; retain Sol as a capable independent-family option and Astra for hard
 reasoning/science. These are task-specific priors, not universal winners.

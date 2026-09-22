@@ -89,6 +89,21 @@ class RouterTests(unittest.TestCase):
         profile['model'] = 'opus'
         self.assertEqual(r.evidence.assessment(profile, data)['status'], 'unmatched')
 
+    def test_current_models_are_routable_with_explicit_pins(self):
+        wanted = {'gpt-6-sol', 'claude-opus-5-5', 'grok-4.7',
+                  'gemini-3.8-flash-low', 'gemini-3.8-flash-medium',
+                  'gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'gemini-3.1-pro-high'}
+        self.assertTrue(wanted <= {p['model'] for p in self.config['profiles']})
+        for model in wanted:
+            p = next(p for p in self.config['profiles'] if p['model'] == model)
+            self.args.profile = p['id']
+            with patch.dict(os.environ, {r.MODEL_KEYS[p['adapter']]: model}):
+                decision = self.decide()
+            self.assertEqual(decision['model'], model)
+        data = r.evidence.catalog(); data['status'] = 'current'
+        low = dict(model='gemini-3.8-flash-low', family='google', effort='low')
+        self.assertEqual(r.evidence.assessment(low, data)['status'], 'unmatched')
+
     def test_verified_failures_escalate_and_reach_jev(self):
         for count, tier in ((0, 'small'), (1, 'medium'), (2, 'large')):
             self.args.prior_failures = count
@@ -141,6 +156,51 @@ class RouterTests(unittest.TestCase):
         reply['answers']['kind'].update(choice=kind, confidence=confidence,
             probabilities={k: int(k == kind) for k in r.questions()['kind']['criteria']})
         return reply
+
+    def test_jev_receives_model_metrics_and_fit_changes_bounded_choice(self):
+        self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
+        captured = []
+        def transport(payload):
+            captured.append(payload)
+            reply = self.kind_answer('implementation')
+            reply['answers'].update(fit_0=dict(type='noul', noul=.1),
+                                    fit_1=dict(type='noul', noul=.9))
+            return reply, 1
+        decision = r.route(core, 'Implement a complex change', self.args,
+                           transport=transport, available=self.available)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(decision['profile'], 'fit')
+        self.assertEqual(decision['jev_task_fit'], .9)
+        card = captured[0]['state']['models'][0]
+        self.assertEqual(card['billing_mode'], 'unknown')
+        self.assertIsNone(card['estimated_api_usd'])
+        self.assertIsNone(card['measured_success_rate'])
+        self.assertIn('strengths', card)
+        self.config['profiles'][1]['cost_rank'] = 3
+        r.save(r.root() / 'routing.json', self.config)
+        decision = r.route(core, 'Implement a complex change', self.args,
+                           transport=transport, available=self.available)
+        self.assertEqual(decision['profile'], 'cheap')
+
+    def test_model_cards_are_bounded_allowlisted_and_honor_effort(self):
+        self.config['profiles'][0]['secret'] = 'DO-NOT-SEND'
+        self.available['codex']['auth'] = 'DO-NOT-SEND'
+        with patch.dict(os.environ, {'ALLOY_CODEX_EFFORT': 'low'}):
+            cards = r.model_context(core, self.config, self.available, {},
+                                    dict(failed_profiles=[]))
+        self.assertNotIn('DO-NOT-SEND', json.dumps(cards))
+        self.assertEqual(cards[0]['effort'], 'low')
+        self.assertEqual(cards[0]['evidence_status'], 'effort-unverified')
+        self.assertEqual(r.model_fits(dict(answers={'fit_0':dict(type='noul',noul=.99)}), cards), {})
+        self.config['profiles'] = [dict(self.config['profiles'][0], id=str(i)) for i in range(100)]
+        self.assertEqual(len(r.model_context(core, self.config, self.available, {},
+                         dict(failed_profiles=[]))), 32)
+
+    def test_invalid_model_fit_fails_closed(self):
+        for value in (True, -1, float('nan'), 1.1):
+            reply = response(); reply['answers']['fit_0'] = dict(type='noul', noul=value)
+            with self.assertRaisesRegex(r.RoutingError, 'model-fit'):
+                self.decide(reply)
 
     def test_task_fit_prefers_documented_debugger_with_bounded_premium(self):
         self.evidence_pair(); r.save(r.root() / 'routing.json', self.config)
@@ -228,9 +288,10 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(before, (r.root() / 'routing.json').read_bytes())
 
     def test_small_and_large_choose_different_profiles(self):
-        self.assertEqual(self.decide()['profile'], 'codex-small')
+        small = self.decide()
+        self.assertEqual(small['required_tier'], 'small')
         self.assertEqual(self.decide(response('large'))['required_tier'], 'large')
-        self.assertNotEqual(self.decide(response('large'))['profile'], 'codex-small')
+        self.assertNotEqual(self.decide(response('large'))['profile'], small['profile'])
 
     def test_uncertainty_and_risk_raise_floor(self):
         for reply in (response(confidence=.2), response(risk=.9), response(ambiguous=.9), response('unknown')):
@@ -477,6 +538,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
 
     def test_route_adapter_does_not_mutate_default(self):
+        self.args.profile = 'codex-small'
         before = core.ADAPTERS['codex'].model()
         decision = self.decide()
         ad = r.routed_adapter(core, decision)
@@ -484,6 +546,28 @@ class RouterTests(unittest.TestCase):
         self.assertIn(decision['model'], argv)
         self.assertIn('model_reasoning_effort=medium', argv)
         self.assertEqual(core.ADAPTERS['codex'].model(), before)
+
+    def test_shipped_defaults_refresh_is_additive_private_and_idempotent(self):
+        original = dict(self.config['profiles'][0], model='custom-pinned',
+                        enabled=False, billing_mode='subscription', cost_rank=17)
+        disabled = dict(self.config['profiles'][1], model='gpt-6-sol',
+                        enabled=False, effort='low', billing_mode='subscription')
+        self.config['profiles'] = [original, disabled]
+        r.save(r.root() / 'routing.json', self.config)
+        args = argparse.Namespace(non_interactive=True, skip_live_test=True,
+                                  billing=[], refresh_defaults=True)
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, args)
+            first = r.load()
+            r.setup(core, args)
+        self.assertEqual(first, r.load())
+        self.assertEqual(first['profiles'][:2], [original, disabled])
+        self.assertEqual(sum(p['model'] == 'gpt-6-sol' for p in first['profiles']), 1)
+        self.assertTrue(any(p['model'] == 'claude-opus-5-5' for p in first['profiles']))
+        self.assertTrue(all(p['billing_mode'] == 'subscription' for p in first['profiles'] if p['adapter'] == 'codex'))
+        self.assertEqual((r.root() / 'routing.json').stat().st_mode & 0o777, 0o600)
+        self.assertFalse((r.root() / 'jev-key').exists())
+        self.assertFalse((r.root() / 'openrouter-key').exists())
 
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'
@@ -513,7 +597,7 @@ class RouterTests(unittest.TestCase):
         task = Path(self.tmp.name) / 'task'; task.write_text('Rename README heading')
         output = io.StringIO()
         with patch.dict(os.environ, {'ALLOY_BIN_CODEX': str(executable), 'CODEX_API_KEY': 'test', 'TYPESAFE_API_KEY': 'private', 'OPENROUTER_API_KEY': 'private-router', 'ALLOY_REPO': 'none'}), patch.object(r, 'inventory', return_value=self.available), patch.object(r, 'request', return_value=(response(), 1)), contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
-            code = core.main(['panel', '--route', '--prompt-file', str(task), '--no-repo', '--run-dir', str(Path(self.tmp.name) / 'runs')])
+            code = core.main(['panel', '--route', '--profile', 'codex-small', '--prompt-file', str(task), '--no-repo', '--run-dir', str(Path(self.tmp.name) / 'runs')])
         self.assertEqual(code, 0)
         manifest = json.loads(Path(output.getvalue().strip().splitlines()[-1]).read_text())
         self.assertEqual(manifest['routing']['model'], 'gpt-5.6-luna')

@@ -444,3 +444,22 @@ updating cannot replace instructions already loaded in its context automatically
 - `alloy update-check --force`: bypass the daily timer, keeping every safety check.
 
 Offline or failed checks are cached for 24 hours and do not block skill use.
+
+
+### Shared routing defaults, your own API key
+
+Alloy ships [model profiles and policy](data/routing-defaults.json) and
+[dated model evidence](data/model-evidence.json). Every user supplies their own
+TypeSafe or OpenRouter key; no API keys are included. Run `alloy setup --skip-live-test`
+(or add `--jev-provider openrouter`) to configure routing without paid inference.
+Existing users can add the latest shipped models without replacing personal
+settings:
+
+```sh
+alloy setup --refresh-defaults --non-interactive --skip-live-test
+alloy models advise
+```
+
+Existing profiles, disabled models, pins and billing remain intact. A model pin
+may still exclude new profiles. Keys stay in private local files or environment
+variables, never in the shared defaults. See [routing setup](docs/routing.md).
