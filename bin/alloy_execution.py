@@ -182,8 +182,7 @@ def readiness(core, args, repo):
         config = r.load()
         available = r.inventory(core)
         snapshot = r.usage.get(core, config)
-        answers = dict(kind=dict(choice='implementation', confidence=1),
-                       complexity=dict(choice='small', confidence=1), risk=dict(noul=0), ambiguous=dict(noul=0))
+        answers = host_assessment(args)
         if not args.route and (not args.maker_profile or not args.checker_profile):
             blockers.append('profiles: Supply --route or both --maker-profile and --checker-profile')
         permission_checks = {}
@@ -262,6 +261,14 @@ def review_packet(core, task, record, tip, diff, spec):
     return encoded, packet_id
 
 
+def host_assessment(args):
+    # Explicit host judgments; confidence=1 means supplied, not calibrated truth.
+    return dict(kind=dict(choice=getattr(args, 'task_kind', 'implementation'), confidence=1),
+                complexity=dict(choice=getattr(args, 'task_tier', 'small'), confidence=1),
+                risk=dict(noul=int(getattr(args, 'task_risk', False))),
+                ambiguous=dict(noul=int(getattr(args, 'task_ambiguous', False))))
+
+
 def select(core, args, prompt):
     r = core.routing
     if args.max_estimated_usd is not None and not r.number(args.max_estimated_usd):
@@ -282,8 +289,7 @@ def select(core, args, prompt):
     else:
         if not args.maker_profile or not args.checker_profile:
             raise ExecutionError('Supply --route or both --maker-profile and --checker-profile')
-        answers = dict(kind=dict(choice='implementation', confidence=1),
-                       complexity=dict(choice='small', confidence=1), risk=dict(noul=0), ambiguous=dict(noul=0))
+        answers = host_assessment(args)
         maker = r.resolve(core, config, answers, available, maker_args, snapshot)
     review_args = copy.copy(maker_args)
     review_args.mode = 'review'
@@ -755,6 +761,10 @@ def register(sub, core):
     p.add_argument('--maker-profile')
     p.add_argument('--checker-profile')
     p.add_argument('--route', action='store_true')
+    p.add_argument('--task-tier', choices=core.routing.TIERS, default='small', help='host-assessed complexity for explicit profiles')
+    p.add_argument('--task-kind', choices=core.routing.evidence.KINDS, default='implementation')
+    p.add_argument('--task-risk', action='store_true', help='host assessment requires large-tier workers')
+    p.add_argument('--task-ambiguous', action='store_true', help='host assessment requires large-tier workers')
     p.add_argument('--max-estimated-usd', type=float)
     p.add_argument('--allow-path', action='append', required=True)
     p.add_argument('--test', action='append', required=True)

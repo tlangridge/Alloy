@@ -1,4 +1,4 @@
-# Jev routing
+# Host or Jev routing
 
 Alloy can ask Jev to assess a task, then choose a configured model through
 Codex, Claude, Grok or Antigravity (`agy`). Routing is opt-in. Regular panels
@@ -266,3 +266,26 @@ remain unchanged. New profiles inherit subscription billing only when that CLI's
 existing profiles all agree on it; metered or mixed billing requires explicit
 configuration. No key is created and no model inference occurs. Repeating the
 command is idempotent. `models advise` reports any model-pin conflicts afterward.
+
+
+## Keyless host routing
+
+Jev is an optional acceleration layer. `alloy setup --keyless` skips both the
+credential prompt and synthetic inference test, even without `--skip-live-test`.
+It preserves existing credentials and provider selection. Add `--non-interactive`
+for unattended setup; explicit `--billing` settings are still accepted.
+
+`alloy models context` returns safe model cards and public quota information for
+the host, with no Jev inference or credential access. The host reads the bundled
+model evidence, assesses the task and chooses explicit profiles. Execute accepts
+`--maker-profile`, `--checker-profile`, `--task-tier`, `--task-kind`, `--task-risk`
+and `--task-ambiguous` without `--route`. Risk/ambiguity require large-tier workers;
+explicit tiers apply to Maker and Checker. Host-provided confidence records an
+explicit assessment, not a measured probability. Old manual callers retain the
+small default; the skill requires an explicit tier.
+
+Host decisions remain subject to live eligibility, quotas, budget limits, model
+pins and three-family review. Keyless does not mean free provider execution or
+unauthenticated CLIs. No paid fallback runs automatically if Jev fails: the host
+reports the failure and chooses explicit profiles. Jev-enabled routing remains
+available through `--route` with the user's own key.

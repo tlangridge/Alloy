@@ -569,6 +569,24 @@ class RouterTests(unittest.TestCase):
         self.assertFalse((r.root() / 'jev-key').exists())
         self.assertFalse((r.root() / 'openrouter-key').exists())
 
+    def test_keyless_setup_and_context_never_read_key_or_call_jev(self):
+        args = argparse.Namespace(non_interactive=False, skip_live_test=False,
+                                  billing=[], keyless=True)
+        unavailable = {name:dict(status='missing', compatible=False) for name in r.FAMILIES}
+        with patch.object(r, 'inventory', return_value=unavailable), patch.object(r.sys.stdin, 'isatty', return_value=True), patch.object(r.getpass, 'getpass') as prompt, patch.object(r, 'key') as key, patch.object(r, 'request') as request, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(r.setup(core, args), 0)
+            self.assertEqual(core.main(['models', 'context']), 0)
+        prompt.assert_not_called(); key.assert_not_called(); request.assert_not_called()
+        self.assertFalse((r.root() / 'jev-key').exists())
+        self.assertFalse((r.root() / 'openrouter-key').exists())
+
+    def test_host_assessment_enforces_large_floor_without_jev(self):
+        self.args.profile = 'codex-small'
+        for assessment in (dict(task_tier='large'), dict(task_risk=True), dict(task_ambiguous=True)):
+            answers = core.execution.host_assessment(argparse.Namespace(**assessment))
+            with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+                r.resolve(core, self.config, answers, self.available, self.args, {})
+
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'
         r.save(r.root() / 'routing.json', self.config)

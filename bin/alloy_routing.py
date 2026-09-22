@@ -675,11 +675,12 @@ def setup(core, args):
     if getattr(args, "jev_provider", None):
         config["jev_provider"] = args.jev_provider
     settings = provider_settings(config.get("jev_provider", "typesafe"))
+    keyless = getattr(args, 'keyless', False)
     interactive = not args.non_interactive and sys.stdin.isatty()
     available = inventory(core)
     for name, status in available.items():
         print("%s: %s%s" % (name, status["status"], " (compatibility check failed)" if not status.get("compatible") else ""), file=sys.stderr)
-    if not os.environ.get(settings["key_env"]) and not (root() / settings["key_file"]).exists() and interactive:
+    if not keyless and not os.environ.get(settings["key_env"]) and not (root() / settings["key_file"]).exists() and interactive:
         secret = getpass.getpass(config.get("jev_provider", "typesafe") + " API key (hidden; Enter to configure later): ").strip()
         if secret:
             save(root() / settings["key_file"], secret + "\n")
@@ -710,9 +711,11 @@ def setup(core, args):
     save(path, config)
     print("Saved " + str(path), file=sys.stderr)
     print("Starter capability/cost ranks are editable assumptions; unknown billing is not a dollar estimate.", file=sys.stderr)
-    if not args.skip_live_test:
+    if not args.skip_live_test and not keyless:
         print("Testing a synthetic task with Jev only; no coding CLI will execute a task.", file=sys.stderr)
         print(json.dumps(route(core, "Correct a spelling mistake in one README heading.", argparse.Namespace(mode="consult")), indent=2))
+    elif keyless:
+        print('Keyless setup saved. Next: alloy models context; the host selects explicit worker profiles.')
     else:
         print("Setup saved. Next: alloy route --prompt-file task.txt")
     return 0
@@ -738,11 +741,12 @@ def register(sub, core):
     p.add_argument("--jev-provider", choices=sorted(JEV_PROVIDERS), help="Jev credential provider; preserves existing model pins and billing")
     p.add_argument("--non-interactive", action="store_true")
     p.add_argument("--skip-live-test", action="store_true")
+    p.add_argument("--keyless", action="store_true", help="configure host-selected workers without prompting for a Jev key or calling Jev")
     p.add_argument("--refresh-defaults", action="store_true", help="add missing shipped profiles without replacing user settings")
     p.add_argument("--billing", action="append", default=[], metavar="CLI=MODE")
     p.set_defaults(func=lambda a: setup(core, a))
     p = sub.add_parser("models", help="inspect model profiles or refresh discovery")
-    p.add_argument("action", choices=["list", "refresh", "advise", "add", "disable", "enable"], default="list", nargs="?")
+    p.add_argument("action", choices=["list", "refresh", "advise", "context", "add", "disable", "enable"], default="list", nargs="?")
     p.add_argument("--id", help="profile ID to add/update/disable")
     p.add_argument("--cli", choices=sorted(FAMILIES))
     p.add_argument("--model")
@@ -799,6 +803,13 @@ def models_command(core, args):
     if args.action == "refresh":
         return emit(refresh(core))
     config = load()
+    if args.action == 'context':
+        available = inventory(core)
+        snapshot = usage.get(core, config)
+        return emit(dict(router='host', models=model_context(core, config, available,
+                         snapshot, dict(failed_profiles=[])),
+                         subscription_usage=usage.public(snapshot),
+                         note='No Jev inference. Host chooses explicit profiles using bundled guidance; dispatch rechecks eligibility.'))
     if args.action == "advise":
         return emit(evidence.advise(core, config, evidence.catalog(), read_json(root() / "models-cache.json", {})))
     if args.action == "list":
