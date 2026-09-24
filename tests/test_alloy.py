@@ -405,6 +405,19 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("--prompt-file", cmd)           # prompt from a real file
         self.assertNotIn("--disable-web-search", cmd)  # web on by default
 
+    def test_grok_panel_offers_only_read_only_tools(self):
+        # A tool needing approval cancels grok's whole headless turn.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        args = by_name(m, "grok")["command"]
+        self.assertEqual(args[args.index("--tools") + 1], "read_file,list_dir,grep,glob,web_search,web_fetch")
+        self.assertIn("WebFetch", args)
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x", "ALLOY_WEB": "0"})
+        args = by_name(m, "grok")["command"]
+        self.assertEqual(args[args.index("--tools") + 1], "read_file,list_dir,grep,glob")
+        self.assertNotIn("WebFetch", args)
+
     def test_grok_web_can_be_disabled(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
                          env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x",

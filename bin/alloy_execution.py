@@ -131,7 +131,11 @@ def worker_adapter(core, decision, write=False):
             argv += ['--allowedTools' if ad.name == 'claude' else '--allow', 'Bash']
             if ad.name == 'grok':
                 # Headless grok (1.0.30) cancels the turn at the first edit under
-                # acceptEdits alone; edits need explicit allow rules too.
+                # acceptEdits alone; edits need explicit allow rules too. The
+                # read-only panel toolset is replaced by the Maker's below.
+                while '--tools' in argv:
+                    i = argv.index('--tools')
+                    del argv[i:i + 2]
                 argv += ['--allow', 'Edit', '--allow', 'Write']
             argv += ['--tools', 'Read,Glob,Grep,Edit,Write,Bash']
         else:

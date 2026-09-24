@@ -1021,6 +1021,16 @@ class GrokAdapter(Adapter):
         # Never use --always-approve or --permission-mode bypassPermissions.
         args = ["--permission-mode", "plan", "--output-format", "plain",
                 "--prompt-file", prompt_path]
+        # Headless grok (1.0.30) cancels the WHOLE turn when the model calls a
+        # tool that needs approval (e.g. run_terminal_command to "just check"),
+        # returning a half-sentence with exit 0. Offer only read-only built-ins
+        # and pre-approve page fetches. (MCP servers in the user's grok config
+        # can still trigger this; grok has no per-call switch to drop them.)
+        tools = ["read_file", "list_dir", "grep", "glob"]
+        if web_enabled():
+            tools += ["web_search", "web_fetch"]
+            args += ["--allow", "WebFetch"]
+        args += ["--tools", ",".join(tools)]
         # Name the session up front so a killed (timed-out) Maker can be
         # resumed with its full context instead of restarted from zero. (grok
         # has no headless deadline flag to mirror alloy's timeout; --max-turns

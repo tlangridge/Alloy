@@ -413,7 +413,9 @@ else:
             if name=='grok':
                 # Headless grok needs explicit edit allow rules beyond acceptEdits.
                 allowed=[args[i+1] for i,a in enumerate(args) if a=='--allow']
-                self.assertEqual(set(allowed),{'Bash','Edit','Write'})
+                self.assertEqual(set(allowed),{'Bash','Edit','Write','WebFetch'})
+                self.assertEqual(args.count('--tools'),1)
+                self.assertEqual(args[args.index('--tools')+1],'Read,Glob,Grep,Edit,Write,Bash')
 
     def test_real_subprocess_writes_worktree_and_records_boundary(self):
         binary = self.base / 'mock-cli'
