@@ -446,6 +446,69 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertIn("--model opus", cmd)
 
+    # -- token usage capture (opt-in) ----------------------------------------- #
+    def _usage_panel(self, name, env):
+        env = dict(env, ALLOY_CAPTURE_USAGE="1")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", name], env_extra=env)
+        p = by_name(m, name)
+        self.assertEqual(p["status"], "ok")
+        with open(p["result_path"]) as f:
+            answer = f.read()
+        self.assertTrue(answer.startswith("MOCK "), answer)  # text, not raw JSON
+        return p, " ".join(p["command"])
+
+    def test_usage_capture_off_by_default(self):
+        _proc, m = panel(self.tmp)
+        for name in ("codex", "claude"):
+            p = by_name(m, name)
+            self.assertNotIn("usage", p)
+            self.assertNotIn("--json", p["command"])
+            self.assertNotIn("json", " ".join(p["command"]))
+
+    def test_usage_capture_codex(self):
+        p, cmd = self._usage_panel("codex", {})
+        self.assertIn("--json", p["command"])
+        self.assertIn("-s read-only", cmd)  # permissions unchanged
+        self.assertEqual(p["usage"], {"input_tokens": 600, "cache_read_tokens": 400,
+            "cache_write_tokens": 0, "output_tokens": 50, "reasoning_tokens": 20,
+            "reported_cost_usd": None, "turns": 1, "source": "codex-jsonl"})
+
+    def test_usage_capture_claude(self):
+        p, cmd = self._usage_panel("claude", {})
+        self.assertIn("--output-format json", cmd)
+        self.assertNotIn("--output-format text", cmd)
+        self.assertIn("--permission-mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 5, "cache_read_tokens": 2000,
+            "cache_write_tokens": 3000, "output_tokens": 60, "reasoning_tokens": 25,
+            "reported_cost_usd": 0.05, "turns": 4, "source": "claude-json"})
+
+    def test_usage_capture_grok(self):
+        p, cmd = self._usage_panel("grok", {"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        self.assertIn("--output-format json", cmd)
+        self.assertIn("--permission-mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 900, "cache_read_tokens": 100,
+            "cache_write_tokens": 0, "output_tokens": 30, "reasoning_tokens": 10,
+            "reported_cost_usd": 0.0123, "turns": 2, "source": "grok-json"})
+
+    def test_usage_capture_antigravity(self):
+        p, cmd = self._usage_panel("antigravity", self._agy_env())
+        self.assertIn("--output-format json", cmd)
+        self.assertIn("--mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 500, "cache_read_tokens": 300,
+            "cache_write_tokens": 0, "output_tokens": 40, "reasoning_tokens": 15,
+            "reported_cost_usd": None, "turns": 3, "source": "agy-json"})
+
+    def test_usage_capture_tolerates_plain_output(self):
+        # A CLI that ignores the JSON request still yields its plain answer.
+        _proc, m = panel(self.tmp, env_extra={"ALLOY_CAPTURE_USAGE": "1",
+                                              "MOCK_IGNORE_JSON": "1"})
+        for name in ("codex", "claude"):
+            p = by_name(m, name)
+            self.assertEqual(p["status"], "ok")
+            self.assertIsNone(p["usage"])
+            with open(p["result_path"]) as f:
+                self.assertTrue(f.read().startswith("MOCK "))
+
     # -- agy / antigravity: read-only is gated on the installed CLI version ---- #
     def _agy_env(self, **extra):
         # MOCK_VERSION >= 1.1.0 => the release whose headless mode auto-DENIES

@@ -23,6 +23,7 @@ Two env knobs sit outside the behavior switch: MOCK_VERSION overrides what
   secret    emit a fake API key (to test redaction)
   nonutf8   emit invalid UTF-8 bytes (to test decode safety)
 """
+import json
 import os
 import subprocess
 import sys
@@ -130,6 +131,35 @@ def main():
         payload = (
             f"MOCK {role} answer (read {n} bytes of prompt): the sky is blue.\n"
         ).encode()
+
+    # Machine-readable output modes (ALLOY_CAPTURE_USAGE): wrap the answer the
+    # way each real CLI does, with fixed token counts the tests can assert.
+    # MOCK_IGNORE_JSON impersonates an older CLI that prints plain text anyway.
+    plain = bool(os.environ.get("MOCK_IGNORE_JSON"))
+    fmt = argv[argv.index("--output-format") + 1] if "--output-format" in argv and not plain else None
+    text = payload.decode("utf-8", errors="replace")
+    if "--json" in argv and not plain:  # codex exec --json: JSONL events; -o still gets the answer
+        events = [{"type": "thread.started", "thread_id": "t"},
+                  {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+                  {"type": "turn.completed", "usage": {
+                      "input_tokens": 1000, "cached_input_tokens": 400,
+                      "cache_write_input_tokens": 0, "output_tokens": 50,
+                      "reasoning_output_tokens": 20}}]
+        sys.stdout.write("\n".join(json.dumps(e) for e in events) + "\n")
+    elif fmt == "json" and "--prompt-file" in argv:  # grok
+        payload = json.dumps({"text": text, "usage": {
+            "input_tokens": 900, "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 0, "output_tokens": 30, "reasoning_tokens": 10},
+            "num_turns": 2, "total_cost_usd": 0.0123}).encode()
+    elif fmt == "json" and "--mode" in argv:  # agy
+        payload = json.dumps({"status": "SUCCESS", "response": text, "num_turns": 3, "usage": {
+            "input_tokens": 800, "output_tokens": 40, "thinking_tokens": 15,
+            "cache_read_tokens": 300, "total_tokens": 840}}).encode()
+    elif fmt == "json":  # claude
+        payload = json.dumps({"type": "result", "result": text, "num_turns": 4,
+            "total_cost_usd": 0.05, "usage": {"input_tokens": 7},
+            "modelUsage": {"m": {"inputTokens": 5, "outputTokens": 60, "cacheReadInputTokens": 2000,
+                                 "cacheCreationInputTokens": 3000, "thinkingTokens": 25}}}).encode()
 
     if target:
         with open(target, "wb") as f:
