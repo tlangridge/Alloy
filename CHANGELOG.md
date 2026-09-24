@@ -3,6 +3,22 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [Unreleased]
+
+Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
+
+- Fix managed execution on current CLIs: Antigravity (agy 1.2) Makers could not run
+  their test commands, and Grok Makers could not edit files; both failed every task.
+- Run `claude` panelists and workers with a lean context (no global MCP connectors,
+  skills or user settings; project instructions still load). Paired bench run:
+  cost −67%, wall time −24%, quality within noise. `ALLOY_CLAUDE_LEAN=0` opts out.
+- Accept a Checker verdict wrapped in prose or a code fence (Claude plan mode does
+  this); exactly one verdict is required and the packet receipt still applies.
+  Recovered 4 of 12 correct Claude reviews that previously failed closed.
+- `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.
+- Add `bench/`: 48 tasks with hidden tests, seeded-bug reviews and answer keys;
+  production-path runners, list-price costing, quota floors and routing replay.
+
 ## [0.8.1] - 2026-09-22
 
 - Add keyless setup and host model-context inspection; the skill selects explicit workers without requiring Jev.
