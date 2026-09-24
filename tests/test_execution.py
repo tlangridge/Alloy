@@ -610,6 +610,8 @@ else:
             env=ad.prepare_env(ctx)
         self.assertTrue(Path(env['HOME']).is_relative_to(self.base) if hasattr(Path,'is_relative_to') else str(env['HOME']).startswith(str(self.base)))
         self.assertIn('command',ad._settings()['permissions']['allow'])
+        self.assertIn('command(*)',ad._settings()['permissions']['allow'])  # agy >= 1.2 grammar
+        self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
 
 

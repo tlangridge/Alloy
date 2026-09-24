@@ -642,6 +642,12 @@ class AntigravityAdapter(Adapter):
     # Only denied when the user turns web research off (ALLOY_WEB=0). Hosted
     # search is read-only and on by default, matching the other panelists.
     WEB_TOOLS = ("search_web", "read_url_content", "browser_navigate")
+    # agy >= 1.2 only accepts grants of the form action(target) and ignores the
+    # bare names above with a warning (reads of --add-dir workspaces are allowed
+    # by default there). These keep the same posture in the new grammar; each
+    # release ignores the other's entries.
+    WRITE_GRANTS = ("command(*)", "write_file(*)")
+    WEB_GRANTS = ("read_url(*)", "execute_url(*)")
 
     def _agy_version(self) -> "tuple[int, int, int] | None":
         cached = getattr(self, "_ver_cache", "unset")
@@ -772,9 +778,9 @@ class AntigravityAdapter(Adapter):
                 "</dict>\n</plist>\n")
 
     def _settings(self) -> dict:
-        deny = list(self.WRITE_TOOLS)
+        deny = list(self.WRITE_TOOLS) + list(self.WRITE_GRANTS)
         if not web_enabled():
-            deny += list(self.WEB_TOOLS)
+            deny += list(self.WEB_TOOLS) + list(self.WEB_GRANTS)
         return {
             # No toolPermission key on purpose -- see the class comment.
             "allowNonWorkspaceAccess": False,

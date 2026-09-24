@@ -586,6 +586,11 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("write_file", s["permissions"]["deny"])
         self.assertIn("command", s["permissions"]["deny"])
         self.assertNotIn("write_file", s["permissions"]["allow"])
+        # agy >= 1.2 grammar: bare names are ignored there, so the same posture
+        # is also expressed as action(target) grants.
+        self.assertIn("command(*)", s["permissions"]["deny"])
+        self.assertIn("write_file(*)", s["permissions"]["deny"])
+        self.assertFalse(any("(" in a for a in s["permissions"]["allow"]))
         self.assertFalse(s["allowNonWorkspaceAccess"])
         # Containment invariant the macOS keychain config leans on: the agy
         # HOME itself (where the generated com.apple.security.plist lives) is
@@ -617,6 +622,7 @@ class AlloyTests(unittest.TestCase):
                           env_extra=self._agy_env(ALLOY_WEB="0"))
         deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
         self.assertIn("search_web", deny)
+        self.assertIn("read_url(*)", deny)
 
     def test_antigravity_model_override(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
