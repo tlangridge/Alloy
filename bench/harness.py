@@ -453,10 +453,24 @@ def sut_revision():
 
 
 def append(path, row):
+    """Append one JSON line; safe across threads and concurrent runner processes."""
+    import fcntl
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _WRITE_LOCK, path.open('a') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(row, sort_keys=True) + '\n')
+        f.flush()
+        fcntl.flock(f, fcntl.LOCK_UN)
+
+
+# Provider-side failures that say nothing about the model's ability; the runner
+# records these as infra errors and a resumed matrix retries them.
+INFRA = re.compile(r'no capacity|UNAVAILABLE|\b503\b|\b529\b|overloaded|rate.?limit|RESOURCE_EXHAUSTED|quota', re.I)
+
+
+def infra_failure(row):
+    return any(d.get('status') != 'ok' and INFRA.search(d.get('error') or '') for d in row.get('dispatches') or [])
 
 
 def read_runs(path):

@@ -107,7 +107,7 @@ def cmd_matrix(args, core):
             work.mkdir(parents=True)
             try:
                 row = h.RUNNERS[task['type']](core, task, profile, work)
-                row.update(outcome='done', work=str(work), **base)
+                row.update(outcome='infra_error' if h.infra_failure(row) else 'done', work=str(work), **base)
             except Exception as exc:
                 row = dict(h._record(task, profile), outcome='harness_error', error=repr(exc)[:500],
                            trace=traceback.format_exc()[-2000:], work=str(work), **base)
