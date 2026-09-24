@@ -30,9 +30,16 @@ providers** (Codex, Claude, Grok, Antigravity).
 
 ## The metric
 
-`python3 bench/score.py replay --tags <measurement tags>` routes every **dev**
-task through PRODUCTION `resolve()` (for two hosts: an Anthropic host and an
-OpenAI host) and scores the choices against measured outcomes:
+`python3 bench/score.py replay --tags <measurement tags> --answers
+bench/results/jev-answers.json` routes every **dev** task through PRODUCTION
+`resolve()` using the classifier's real judgments of each task (for two hosts:
+an Anthropic host and an OpenAI host) and scores the choices against measured
+outcomes. Run it without `--answers` too: true-label routing isolates policy
+from classifier error. Regenerate the answers when the Jev model or rubric
+changes (48 calls, about one cent). The literature is clear that difficulty
+prediction is the weak link of pre-generation routers, so the realistic score
+is the primary one. The report includes 90% bootstrap intervals and single-
+profile baselines (best, cheapest); a change inside the noise is not a win.
 
 - **q** — routed mean solve probability per task type (`make`, `review`, `consult`).
   `make` counts only hidden-test success; `review` counts a correct verdict
@@ -47,6 +54,19 @@ OpenAI host) and scores the choices against measured outcomes:
 
 Lower `cost_per_solve` with `gate=PASS` wins. The quality reference moves only
 when new measurements arrive, never because a change was made.
+
+## Lessons so far (read before proposing routing changes)
+
+- Execute cascades (cheap Maker, escalate on gate failure) lost to tier routing:
+  the visible gate caught only 54% of failures and cheap models fail slowly and
+  expensively on hard tasks. Revisit only with a stronger verifier.
+- Lowering `confidence_floor` below .75 made routing worse: over-escalating to
+  large-tier Gemini is cheap; under-escalating to weak models is not.
+- Same-family agreement is not independent evidence: Gemini variants made the
+  same mistakes on consult questions.
+- Quota exchange rates differ by >10x across pools (Gemini via Antigravity is
+  the cheapest capacity; agy's Claude/GPT pool the most expensive) and are
+  plan-specific: calibrate a user's private config, not shipped defaults.
 
 ## What you CAN change (the mutable surface)
 
