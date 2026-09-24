@@ -439,6 +439,17 @@ class AlloyTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", cmd)
         self.assertNotIn("bypassPermissions", cmd)
 
+    def test_claude_lean_context_by_default(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"])
+        cmd = " ".join(by_name(m, "claude")["command"])
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertIn("--setting-sources project,local", cmd)  # project instructions still load
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"], env_extra={"ALLOY_CLAUDE_LEAN": "0"})
+        cmd = " ".join(by_name(m, "claude")["command"])
+        self.assertNotIn("--strict-mcp-config", cmd)
+        self.assertNotIn("--setting-sources", cmd)
+
     def test_claude_model_override(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"],
                          env_extra={"ALLOY_BIN_CLAUDE": MOCK, "ANTHROPIC_API_KEY": "x",

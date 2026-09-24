@@ -1098,6 +1098,14 @@ class ClaudeAdapter(Adapter):
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
         args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
+        # Lean context: a panelist or worker needs the repository and its project
+        # instructions (CLAUDE.md, .claude/ settings), not the user's global MCP
+        # connectors, skills or user-level settings/plugins, which are re-read
+        # on every turn. Measured by alloy-bench (r1): ~90% fewer tokens.
+        # ALLOY_CLAUDE_LEAN=0 restores the full user context.
+        if (setting("ALLOY_CLAUDE_LEAN", "1") or "1").lower() not in ("0", "false", "no", "off"):
+            args += ["--strict-mcp-config", "--disable-slash-commands",
+                     "--setting-sources", "project,local"]
         # Name the session up front (resumable after a timeout kill; see grok).
         # claude -p has no headless deadline flag to mirror alloy's timeout.
         sid = (ctx or {}).get("session_id")
