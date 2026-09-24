@@ -354,6 +354,20 @@ def gate(core, task, command, output):
     return dict(command=command, exit_code=code, log=str(output), duration_ms=round((time.monotonic() - started) * 1000))
 
 
+def verdict_objects(text):
+    """Distinct JSON objects with a "verdict" key embedded anywhere in text."""
+    decoder, found = json.JSONDecoder(), []
+    for i, ch in enumerate(text):
+        if ch == '{':
+            try:
+                value, _ = decoder.raw_decode(text, i)
+            except ValueError:
+                continue
+            if isinstance(value, dict) and 'verdict' in value and value not in found:
+                found.append(value)
+    return found
+
+
 def review_json(text, packet=None):
     text = text.strip()
     if text.startswith('```json') and text.endswith('```'):
@@ -361,7 +375,13 @@ def review_json(text, packet=None):
     try:
         value = json.loads(text)
     except ValueError:
-        raise ExecutionError('Checker did not return valid JSON; no pass inferred')
+        # Checkers sometimes wrap the verdict in a sentence or code fence (Claude
+        # plan mode). Accept exactly one distinct embedded verdict; conflicting or
+        # absent verdicts still fail closed, and the receipt checks below apply.
+        found = verdict_objects(text)
+        if len(found) != 1:
+            raise ExecutionError('Checker did not return valid JSON; no pass inferred')
+        value = found[0]
     if (not isinstance(value, dict) or value.get('verdict') not in ('pass', 'fail')
         or not isinstance(value.get('findings'), list) or len(value['findings']) > 5):
         raise ExecutionError('Invalid Checker verdict')

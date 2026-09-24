@@ -145,6 +145,17 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
         verdict.update(revision=receipt['revision'], context_complete=False)
         with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
+        # A verdict wrapped in prose or a fence is accepted only with a valid receipt.
+        verdict.update(context_complete=True)
+        wrapped = 'ExitPlanMode is disabled, so here is the result:\n```json\n' + json.dumps(verdict) + '\n```\nDone.'
+        self.assertEqual(e.review_json(wrapped, receipt)['verdict'], 'pass')
+        with self.assertRaises(e.ExecutionError):
+            e.review_json(wrapped.replace(receipt['revision'], 'wrong'), receipt)
+        # Two different embedded verdicts, or none, fail closed.
+        other = dict(verdict, verdict='fail', findings=[dict(path='a', evidence='b', fix='c')])
+        with self.assertRaises(e.ExecutionError):
+            e.review_json('First ' + json.dumps(verdict) + ' then ' + json.dumps(other), receipt)
+        with self.assertRaises(e.ExecutionError): e.review_json('Looks good to me, pass.', receipt)
 
     def test_review_packet_contains_actual_code_and_gate_output(self):
         self.args.test += ['echo acceptance-evidence']
