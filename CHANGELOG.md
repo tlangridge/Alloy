@@ -15,6 +15,10 @@ Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
 - Accept a Checker verdict wrapped in prose or a code fence (Claude plan mode does
   this); exactly one verdict is required and the packet receipt still applies.
   Recovered 4 of 12 correct Claude reviews that previously failed closed.
+- Keep Grok panelists from cancelling their own answers: headless grok aborted the
+  whole turn (exit 0, half a sentence) whenever the model reached for a tool needing
+  approval. Read-only panels now get only read/search tools plus pre-approved page
+  fetches. Grok dev reviews and consults went from 1/12 to 11/12.
 - `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.
 - Add `bench/`: 48 tasks with hidden tests, seeded-bug reviews and answer keys;
   production-path runners, list-price costing, quota floors and routing replay.
