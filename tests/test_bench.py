@@ -29,7 +29,7 @@ def write(path, text):
 def make_task(root, tid='make-x'):
     d = Path(root) / tid
     write(d / 'task.json', json.dumps(dict(
-        id=tid, type='make', tier='small', kind='implementation', split='dev', title='t',
+        id=tid, type='make', tier='medium', kind='implementation', split='dev', title='t',
         allow_paths=['.'], visible_test='python3 -m unittest discover -s tests -v',
         hidden_test='python3 -m unittest discover -s _hidden_tests -v', hidden_checks='c')))
     write(d / 'spec.md', 'Goal: implement f() returning 2.')

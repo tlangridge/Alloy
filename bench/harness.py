@@ -304,11 +304,12 @@ def bench_profiles():
     return {p['id']: p for p in json.loads((BENCH / 'profiles.json').read_text())['profiles']}
 
 
-def decide(core, profile_id, mode, tier='small', kind='implementation', exclude=''):
-    """The production resolver's decision for one explicit profile."""
+def decide(core, profile_id, mode, kind='implementation', exclude=''):
+    """The production resolver's decision for one explicit profile. The bench
+    measures every profile on every task, so the tier gate is not applied."""
     r = core.routing
     config = r.load()
-    answers = core.execution.host_assessment(argparse.Namespace(task_kind=kind, task_tier=tier,
+    answers = core.execution.host_assessment(argparse.Namespace(task_kind=kind, task_tier='small',
                                                                 task_risk=False, task_ambiguous=False))
     args = argparse.Namespace(mode=mode, profile=profile_id, panelists=None, host_family='bench',
                               exclude_family=exclude, prior_failures=0, failed_profile=[], max_estimated_usd=None)
@@ -342,7 +343,7 @@ def run_make(core, task, profile, work, timeout=1200, max_rounds=3):
     wt = Path(work) / 'wt'
     base = materialize(task, wt)
     rec = _new_task(core, wt, base, task['allow_paths'], [task['visible_test']], timeout)
-    rec['maker'] = decide(core, profile, 'make', task['tier'], task['kind'])
+    rec['maker'] = decide(core, profile, 'make', task['kind'])
     spec = (Path(task['dir']) / 'spec.md').read_text()
     folder = ex.taskdir(core, rec['id'])
     usage, rounds, failure, gates_ok = None, [], None, False
@@ -383,9 +384,10 @@ def run_review(core, task, profile, work, timeout=900):
     tip = commit_overlay(task, wt, 'change', 'change under review')
     rec = _new_task(core, wt, base, ['.'], [task['visible_test']], timeout)
     rec['maker'] = dict(family='none', answers=None)
-    rec['checker'] = decide(core, profile, 'review', task['tier'], 'review', exclude='bench,none')
+    rec['checker'] = decide(core, profile, 'review', 'review', exclude='bench,none')
     rec['maker']['answers'] = rec['checker']['answers']
     folder = ex.taskdir(core, rec['id'])
+    folder.mkdir(parents=True, exist_ok=True)
     record = dict(index=0, gates=[ex.gate(core, rec, task['visible_test'], folder / 'gate-0.log')])
     diff = ex.git(wt, 'diff', '--binary', '--no-ext-diff', '--no-textconv', base, tip)
     packet, packet_id = ex.review_packet(core, rec, record, tip, diff, task['claimed_change'])
@@ -419,7 +421,7 @@ def run_consult(core, task, profile, work, timeout=600):
     if (Path(task['dir']) / 'repo').exists():
         repo = work / 'wt'
         materialize(task, repo)
-    decision = decide(core, profile, 'consult', task['tier'], task['kind'])
+    decision = decide(core, profile, 'consult', task['kind'])
     ad = core.routing.routed_adapter(core, decision)
     prompt_path = work / 'prompt.md'
     prompt_path.write_text(task['prompt'] + CONSULT_SUFFIX)
