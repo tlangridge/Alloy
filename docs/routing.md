@@ -193,6 +193,12 @@ Optional `routing.json` policy fields:
 {"use_model_evidence": true, "task_fit_cost_slack": 0.25, "kind_confidence_floor": 0.65}
 ```
 
+`min_tier_by_mode` sets a minimum tier per mode. The shipped default is
+`{"consult": "medium"}`: a panel question's difficulty lives in the repository,
+which the classifier never sees. On alloy-bench, Jev rated such questions "small"
+and the router's cheapest model answered a third of them wrongly; the floor
+raised routed consult accuracy from 0.67 to 0.83 at lower cost per correct answer.
+
 Set `use_model_evidence` to false for cost-only ranking. Exact model/effort matching
 and catalog expiry prevent old research from silently applying to new models.
 Existing profile tiers stay authoritative; `models advise` suggests adjustments.

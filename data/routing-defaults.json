@@ -191,6 +191,9 @@
     "risk_threshold": 0.5,
     "estimated_input_tokens": 10000,
     "estimated_output_tokens": 2000,
-    "discovery_ttl_seconds": 86400
+    "discovery_ttl_seconds": 86400,
+    "min_tier_by_mode": {
+      "consult": "medium"
+    }
   }
 }

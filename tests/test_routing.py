@@ -48,6 +48,8 @@ class RouterTests(unittest.TestCase):
             if k.startswith('ALLOY_') and k not in ('ALLOY_ROUTING_HOME', 'ALLOY_CONFIG', 'ALLOY_USAGE'):
                 os.environ.pop(k)
         self.config = r.starter(core)
+        # Generic tier tests use consult mode; the shipped consult floor has its own test.
+        self.config['policy'].pop('min_tier_by_mode', None)
         r.save(r.root() / 'routing.json', self.config)
         self.available = {n: dict(status='ready', compatible=True, version='test') for n in r.FAMILIES}
         r.save(r.root() / 'models-cache.json', dict(refreshed_at=r.time.time(), adapters=self.available))
@@ -586,6 +588,21 @@ class RouterTests(unittest.TestCase):
             answers = core.execution.host_assessment(argparse.Namespace(**assessment))
             with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
                 r.resolve(core, self.config, answers, self.available, self.args, {})
+
+    def test_min_tier_by_mode_floors_only_that_mode(self):
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='small', task_kind='research'))
+        self.config['policy']['min_tier_by_mode'] = {'consult': 'medium'}
+        self.args.mode = 'consult'
+        d = r.resolve(core, self.config, answers, self.available, self.args, {})
+        self.assertEqual(d['required_tier'], 'medium')
+        self.assertIn('mode consult requires at least medium', d['reason'])
+        self.assertEqual(r.starter(core)['policy']['min_tier_by_mode'], {'consult': 'medium'})
+        self.args.mode = 'review'
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['required_tier'], 'small')
+        for bad in ({'consult': 'huge'}, {'chat': 'large'}, ['consult']):
+            self.config['policy']['min_tier_by_mode'] = bad
+            with self.assertRaises(r.RoutingError):
+                r.validate(self.config)
 
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'

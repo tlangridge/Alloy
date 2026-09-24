@@ -19,6 +19,9 @@ Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
   whole turn (exit 0, half a sentence) whenever the model reached for a tool needing
   approval. Read-only panels now get only read/search tools plus pre-approved page
   fetches. Grok dev reviews and consults went from 1/12 to 11/12.
+- Routed consults require at least a medium-tier model (`policy.min_tier_by_mode`):
+  Jev cannot see the repository a question is about and under-rated such questions.
+  Existing configs keep their policy until they add the key.
 - `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.
 - Add `bench/`: 48 tasks with hidden tests, seeded-bug reviews and answer keys;
   production-path runners, list-price costing, quota floors and routing replay.

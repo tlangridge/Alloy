@@ -155,6 +155,10 @@ def validate(config):
             raise RoutingError("Invalid policy " + field)
     if type(policy.get('use_model_evidence', True)) is not bool:
         raise RoutingError("use_model_evidence must be boolean")
+    floors = policy.get("min_tier_by_mode", {})
+    if not isinstance(floors, dict) or any(m not in ("consult", "review", "make", "debate") or t not in TIERS
+                                           for m, t in floors.items()):
+        raise RoutingError("min_tier_by_mode maps consult/review/make/debate to small|medium|large")
     usage_options = config.get("usage", {})
     if not isinstance(usage_options, dict):
         raise RoutingError("usage configuration must be an object")
@@ -484,6 +488,12 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
     exclude = set(filter(None, getattr(args, "exclude_family", "").split(",")))
     host = getattr(args, "host_family", None)
     mode = getattr(args, "mode", "consult")
+    # A mode whose difficulty the task text hides (a consult reads the repo) can
+    # set a floor; alloy-bench: Jev rated repo questions "small" and lost 1/3 of them.
+    floor = policy.get("min_tier_by_mode", {}).get(mode)
+    if floor and TIERS.index(tier) < TIERS.index(floor):
+        tier = floor
+        reasons.append("mode %s requires at least %s" % (mode, floor))
     if mode == "make":
         if not host:
             raise RoutingError("Routed make requires --host-family for independent Maker selection")
