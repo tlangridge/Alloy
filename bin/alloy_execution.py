@@ -129,6 +129,10 @@ def worker_adapter(core, decision, write=False):
         elif ad.name in ('claude', 'grok'):
             argv[argv.index('--permission-mode') + 1] = 'acceptEdits'
             argv += ['--allowedTools' if ad.name == 'claude' else '--allow', 'Bash']
+            if ad.name == 'grok':
+                # Headless grok (1.0.30) cancels the turn at the first edit under
+                # acceptEdits alone; edits need explicit allow rules too.
+                argv += ['--allow', 'Edit', '--allow', 'Write']
             argv += ['--tools', 'Read,Glob,Grep,Edit,Write,Bash']
         else:
             argv[argv.index('--mode') + 1] = 'accept-edits'

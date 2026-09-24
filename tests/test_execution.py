@@ -399,6 +399,10 @@ else:
             if name=='codex':self.assertIn('workspace-write',args)
             elif name in ('claude','grok'):self.assertIn('acceptEdits',args)
             else:self.assertIn('accept-edits',args)
+            if name=='grok':
+                # Headless grok needs explicit edit allow rules beyond acceptEdits.
+                allowed=[args[i+1] for i,a in enumerate(args) if a=='--allow']
+                self.assertEqual(set(allowed),{'Bash','Edit','Write'})
 
     def test_real_subprocess_writes_worktree_and_records_boundary(self):
         binary = self.base / 'mock-cli'
