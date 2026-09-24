@@ -1,0 +1,117 @@
+{
+  "id": "make-l-taskq-leases",
+  "type": "make",
+  "tier": "large",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Lease-based job queue + deterministic worker pool: heartbeat/extend, expiry dead-lettering and dedupe-key defects",
+  "allow_paths": [
+    "taskq",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_claim_order_priority_age_id",
+      "spec": "Rule 3: highest priority, then earliest available_at, then lowest id among available jobs; rule 1 delay."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_delay_available_exactly_at_time",
+      "spec": "Rules 1/3: available at now + delay (available_at <= now)."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_lease_valid_strictly_before_expiry",
+      "spec": "Rule 4: valid while now < expires_at; at now >= expires_at the attempt is used and the job is ready with available_at = expires_at; rule 5 LeaseLost."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_stale_lease_rejected_after_reclaim",
+      "spec": "Rules 4/5: a lease whose job was re-leased under a new token raises LeaseLost for ack/nack/extend and changes nothing."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_extend_counts_from_now",
+      "spec": "Rule 5: extend sets the expiry to now + seconds and returns it."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_extend_of_expired_lease_changes_nothing",
+      "spec": "Rules 4/5: extend on an expired lease raises LeaseLost; expiry processing makes the job ready."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_expiry_dead_letters_at_max_attempts",
+      "spec": "Rule 4: expiry with attempts >= max_attempts -> dead with 'lease-expired'; expiry applied by stats/job/claim."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_expired_job_available_from_its_expiry",
+      "spec": "Rule 4: an expired job becomes ready with available_at = expires_at; rule 3 ordering by available_at."
+    },
+    {
+      "test": "test_hidden_taskq.ClaimAndLeaseTests.test_nack_after_expiry",
+      "spec": "Rules 4/5: nack after expiry raises LeaseLost; the expired last attempt dead-letters with 'lease-expired'."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_key_released_on_first_claim",
+      "spec": "Rule 2 / INC-2: a claimed job no longer holds its key; the next enqueue creates a new job that then dedupes."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_new_holder_keeps_key_when_old_job_finishes",
+      "spec": "Rule 2: finishing an older job never affects which job holds a key."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_retry_does_not_reacquire_key",
+      "spec": "Rule 2: once claimed, a job never holds a key again, even after a retry."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_dead_or_failed_old_job_does_not_release_new_key",
+      "spec": "Rule 2: dead-lettering an older job never affects which job holds a key; rule 3 lowest id tie-break."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_expired_old_job_does_not_release_new_key",
+      "spec": "Rules 2 and 4: expiry dead-lettering of an older job does not release the key of a newer (delayed) job."
+    },
+    {
+      "test": "test_hidden_taskq.DedupeTests.test_delayed_job_holds_key",
+      "spec": "Rule 2: delayed jobs hold their key too."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_inc1_long_export_completes_once",
+      "spec": "INC-1 expected result; rule 12: completes once on the claiming worker with no lost lease."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_long_jobs_under_several_timings",
+      "spec": "Rule 12 for lease/margin/round = 30/10/10, 25/5/5, 30/10/7, 40/20/10 with two workers."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_heartbeat_fires_once_margin_is_reached",
+      "spec": "Rule 9: heartbeat when now >= expiry - heartbeat_margin, extending to now + lease_seconds (rule 5)."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_inc3_crashing_job_is_dead_lettered",
+      "spec": "INC-3 expected result; rule 10 WorkerCrash drops without ack/nack; rule 4 dead after 3 attempts; rule 11 round count."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_failing_job_retry_timing",
+      "spec": "Rules 8 and 10: handler exception -> nack with retry_delay; first step in the claim turn; rule 5 'failed' at max attempts."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_reindex_requested_during_run_runs_again",
+      "spec": "INC-2 via the pool: rule 2 new job for a request made while the keyed job runs; duplicate requests before its claim are deduped."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_lost_leases_without_timely_heartbeat",
+      "spec": "Rules 4, 9 and 10: late heartbeats lose the lease (abandon + pool.lost with attempt), reclaim by the other worker, dead after max attempts."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_round_order_and_first_step_in_claim_turn",
+      "spec": "Rules 7 and 8: workers take turns in order; the first handler step runs in the claim turn; rule 10 results format."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_run_until_idle_waits_for_delayed_jobs",
+      "spec": "Rule 11: run while ready (incl. delayed) or leased jobs exist; returns the number of rounds."
+    },
+    {
+      "test": "test_hidden_taskq.PoolTests.test_max_rounds",
+      "spec": "Rule 11: RuntimeError when max_rounds is reached."
+    }
+  ]
+}

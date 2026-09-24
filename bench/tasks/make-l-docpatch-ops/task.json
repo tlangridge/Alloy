@@ -1,0 +1,185 @@
+{
+  "id": "make-l-docpatch-ops",
+  "type": "make",
+  "tier": "large",
+  "kind": "implementation",
+  "split": "dev",
+  "title": "Pointer-addressed document patches: 7 ops, up-front validation, atomicity, JSON equality and diff",
+  "allow_paths": [
+    "docpatch",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_docpatch.PointerTests.test_parse_edge_tokens",
+      "spec": "Rule 1: \"/\" is [\"\"], \"/a//b\" is [\"a\", \"\", \"b\"]; ~1 -> / and ~0 -> ~ decoded left to right in a single pass (\"/~01\" is [\"~1\"])."
+    },
+    {
+      "test": "test_hidden_docpatch.PointerTests.test_parse_invalid",
+      "spec": "Rule 1: a ~ not followed by 0/1, non-strings and strings not starting with / raise invalid-pointer with index None and pointer = the argument."
+    },
+    {
+      "test": "test_hidden_docpatch.PointerTests.test_format_is_exact_inverse",
+      "spec": "Rule 2: format_pointer is the exact inverse: [] -> \"\"; ~ -> ~0, / -> ~1, each token prefixed with /."
+    },
+    {
+      "test": "test_hidden_docpatch.PointerTests.test_resolve_array_index_rules",
+      "spec": "Rule 3: list tokens must be 0 or [1-9][0-9]*; -, 01, +1, 1.0, ' 1' -> invalid-index; index >= len -> path-not-found; \"01\" and \"-\" are ordinary dict keys. Rule 4: index None, pointer = argument."
+    },
+    {
+      "test": "test_hidden_docpatch.PointerTests.test_resolve_through_scalars",
+      "spec": "Rule 3: traversal through any scalar or a missing key -> path-not-found; rule 1/4: \"\" is the whole document."
+    },
+    {
+      "test": "test_hidden_docpatch.EqualityTests.test_booleans_are_not_numbers",
+      "spec": "Rule 5: a bool equals only a bool (True != 1, False != 0), None only None, numbers numerically (1 == 1.0), recursively."
+    },
+    {
+      "test": "test_hidden_docpatch.EqualityTests.test_structures",
+      "spec": "Rule 5: lists order matters, dicts same key set (key order irrelevant), strings by value."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_add_object_key",
+      "spec": "Rule 11: parent dict -> set the key, replacing an existing value; rule 3: \"01\" is an ordinary key."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_add_array_positions",
+      "spec": "Rule 11: '-' appends; 0 <= i <= len inserts before i; i > len -> path-not-found; non-index token -> invalid-index."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_add_root_replaces_document",
+      "spec": "Rule 11: add with path \"\" replaces the whole document."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_add_missing_or_scalar_parent",
+      "spec": "Rule 11: parent located with rule 3 (missing -> path-not-found, '-' in the middle -> invalid-index); parent scalar -> path-not-found; rule 10 pointer = path."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_null_value_is_present",
+      "spec": "Rule 7: presence of value is what counts; \"value\": None is a valid value for add/replace/test."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_remove",
+      "spec": "Rule 12: target must exist (missing -> path-not-found, '-' -> invalid-index), later elements shift left; path \"\" -> cannot-remove-root."
+    },
+    {
+      "test": "test_hidden_docpatch.AddRemoveReplaceTests.test_replace",
+      "spec": "Rule 13: path \"\" replaces the whole document; otherwise the target must exist (rule 3)."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_move_array_semantics_after_removal",
+      "spec": "Rule 14(d): value removed from `from` then added at `path` using add rules on the document after removal ([a,b,c] /l/0 -> /l/2 gives [b,c,a])."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_move_into_self_is_token_wise",
+      "spec": "Rule 14(c): from tokens a proper prefix of path tokens -> move-into-self (token-wise: /a/b -> /a/bc allowed, /a -> /a/b not, \"\" -> non-empty not)."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_move_to_same_path_is_noop_but_source_must_exist",
+      "spec": "Rule 14(a)/(b): the from location must exist; identical tokens do nothing."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_move_errors_report_the_right_pointer",
+      "spec": "Rule 10/14: failures locating from report pointer = from; add failures after removal report pointer = path."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_move_to_root",
+      "spec": "Rule 14(d) + rule 11: adding at \"\" after removal replaces the whole document."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_copy_is_deep",
+      "spec": "Rule 15: a deep copy of the from value is added at path with the add rules; rule 8 sequential ops; rule 9 no sharing."
+    },
+    {
+      "test": "test_hidden_docpatch.MoveCopyTests.test_copy_errors",
+      "spec": "Rule 15: from must exist (errors report the from pointer); add rules at path (rule 11)."
+    },
+    {
+      "test": "test_hidden_docpatch.TestAndIncTests.test_test_uses_json_equality",
+      "spec": "Rule 16: target must exist; value not json_equal -> test-failed (rule 5 equality)."
+    },
+    {
+      "test": "test_hidden_docpatch.TestAndIncTests.test_inc_result_types",
+      "spec": "Rule 17: target replaced by target + by; int when both int, otherwise float."
+    },
+    {
+      "test": "test_hidden_docpatch.TestAndIncTests.test_inc_target_rules",
+      "spec": "Rule 17: target must exist and be an int/float that is not a bool, else type-mismatch."
+    },
+    {
+      "test": "test_hidden_docpatch.TestAndIncTests.test_inc_by_must_be_a_number",
+      "spec": "Rule 7: inc must have a `by` that is int or float but not bool, else invalid-op."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_structural_validation_precedes_application",
+      "spec": "Rule 7: the whole patch is validated structurally before any operation is applied; invalid path -> invalid-pointer with pointer = that path."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_lowest_invalid_operation_is_reported",
+      "spec": "Rule 7: if several operations are structurally invalid, the one with the lowest index is reported."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_required_members",
+      "spec": "Rule 7: op must be one of the seven names; path present and a string; add/replace/test need value; move/copy need a string from."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_invalid_from_pointer",
+      "spec": "Rule 7: from must be a valid pointer, else invalid-pointer with pointer = that from."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_extra_members_ignored",
+      "spec": "Rule 7: unknown extra members are ignored."
+    },
+    {
+      "test": "test_hidden_docpatch.ValidationTests.test_patch_shape",
+      "spec": "Rule 6: patch must be a list (index None) of dicts (element index)."
+    },
+    {
+      "test": "test_hidden_docpatch.AtomicityTests.test_failure_leaves_input_untouched",
+      "spec": "Rule 8: on failure PatchError with the failing op index and nothing is changed; apply_patch never mutates document."
+    },
+    {
+      "test": "test_hidden_docpatch.AtomicityTests.test_success_does_not_mutate_or_share",
+      "spec": "Rules 8/9: never mutates document or patch; the result shares no mutable containers with the input or the patch."
+    },
+    {
+      "test": "test_hidden_docpatch.AtomicityTests.test_operations_see_previous_results",
+      "spec": "Rule 8: operations are applied in order; each sees the result of the previous ones."
+    },
+    {
+      "test": "test_hidden_docpatch.AtomicityTests.test_store_patch_is_atomic",
+      "spec": "Rule 23: DocumentStore.patch leaves the stored document and revision unchanged when the patch fails (relies on rule 8)."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_equal_documents_produce_empty_patch",
+      "spec": "Rule 20: json_equal documents -> [] (diff(1, 1.0) is []); diff(True, 1) is not; rule 21 root replace."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_type_change_is_single_replace",
+      "spec": "Rule 21: differing JSON types (int/float both number) or unequal scalars -> a single replace of that location."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_object_diff_order",
+      "spec": "Rule 22: removes for source-only keys (ascending), then recursive diffs of common keys (ascending), then adds for target-only keys (ascending); rule 19 members."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_keys_are_escaped",
+      "spec": "Rule 19: keys containing / or ~ and the empty key are escaped per rule 2; rule 22 ordering; rule 18 round trip."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_array_round_trips",
+      "spec": "Rule 18: apply_patch(source, diff(source, target)) is json_equal to target (arrays of differing lengths)."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_random_round_trips",
+      "spec": "Rules 18-20: round trip for arbitrary documents, diff does not mutate its arguments, only add/remove/replace with exactly op/path(/value) members, equal documents give []."
+    },
+    {
+      "test": "test_hidden_docpatch.DiffTests.test_diff_values_are_copies",
+      "spec": "Rule 19: values in emitted operations are deep copies."
+    }
+  ]
+}

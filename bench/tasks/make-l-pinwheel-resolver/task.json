@@ -1,0 +1,141 @@
+{
+  "id": "make-l-pinwheel-resolver",
+  "type": "make",
+  "tier": "large",
+  "kind": "implementation",
+  "split": "holdout",
+  "title": "Version constraints (^ ~ wildcards partials ||), fewest-candidates backtracking resolver with locks/yanks, install order with cycle members",
+  "allow_paths": [
+    "pinwheel",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_caret",
+      "spec": "Rule 3: ^P bounds for M > 0, ^0, ^0.m, ^0.0, ^0.0.p; rule 1 whitespace between operator and version."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_tilde",
+      "spec": "Rule 3: ~P below M.(m+1).0 when m is given, else below (M+1).0.0."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_wildcards_and_partial_equality",
+      "spec": "Rule 3: *, M.*, M.m.*; =P / bare P: full exact, partial covers (1.2 = 1.2.*, =1 = 1.*)."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_comparisons_with_partials",
+      "spec": "Rules 2-3: >= floor, < floor, > partial = >= next-up, <= partial = < next-up, full versions strict/inclusive."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_not_equal",
+      "spec": "Rule 3: != is the negation of =P (partial and full); rule 1 terms in a group are ANDed."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_groups_and_whitespace",
+      "spec": "Rule 1: || groups ORed, comma terms ANDed, whitespace ignored."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_invalid_constraints",
+      "spec": "Rules 1 and 4: empty constraint/group/term, bad operators, operator with wildcard (incl. != with wildcard), ^*, ~*, inner wildcard, 4 parts, leading zeros, v prefix -> InvalidConstraint."
+    },
+    {
+      "test": "test_hidden_pinwheel.ConstraintTests.test_allows_version_objects",
+      "spec": "Constraint.allows accepts a Version or a version string."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_highest_version_satisfying_all_constraints",
+      "spec": "Rule 7: candidates satisfy every active constraint, highest first; rule 8."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_backtracks_to_older_version",
+      "spec": "Rule 8: fewest candidates first, ties alphabetical; zero candidates fails and backtracks to the previous decision's next candidate."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_fewest_candidates_first",
+      "spec": "Rule 8.2: choose the undecided package with the fewest candidates (y before x), which determines the chosen solution."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_choice_recomputed_after_each_decision",
+      "spec": "Rule 8.2: candidate counts are computed at each choice from the then-active requirements (r before q after p's decision)."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_ties_break_alphabetically",
+      "spec": "Rule 8.2: ties on the candidate count go to the alphabetically smallest name; rule 9 requirement key order irrelevant."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_deep_backtracking_leaves_no_undone_packages",
+      "spec": "Rule 8.4 chronological backtracking across several decisions; rule 9: packages only required by undone decisions are not in the result."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_unsatisfiable",
+      "spec": "Rule 8.4: when the first choice fails, raise ResolutionError."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_unknown_root_package",
+      "spec": "Rule 5: unknown root package -> UnknownPackage (a ResolutionError) with .name the alphabetically smallest."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_unknown_dependency_forces_backtrack",
+      "spec": "Rule 7: an unknown package has no candidates, so the dependent version is abandoned (rule 8)."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_invalid_root_constraint",
+      "spec": "Rule 5: root requirements are parsed first; invalid -> InvalidConstraint."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_yanked_versions_skipped_unless_locked",
+      "spec": "Rule 7: yanked versions are excluded except the locked version, which is a candidate even if yanked."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_locked_version_preferred_when_allowed",
+      "spec": "Rule 7: the locked version is tried first when it exists and satisfies every active constraint; otherwise highest first."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_locked_version_falls_back_when_it_conflicts",
+      "spec": "Rule 7: a locked version failing an active constraint is not a candidate; locks for packages that are not required have no effect (rule 8.1 result = decided packages)."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_locked_counts_as_candidate_for_choice",
+      "spec": "Rules 7 and 8.2: the locked (yanked) release counts as a candidate when choosing the next package; tie -> alphabetical."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_candidate_inconsistent_with_decided_package_is_skipped",
+      "spec": "Rule 8.3: a candidate whose dependency does not allow an already-decided version is skipped."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_self_dependency",
+      "spec": "Rule 8.3: a dependency naming the package itself must allow the candidate."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_independent_of_insertion_and_requirement_order",
+      "spec": "Rule 9: result does not depend on registry insertion order or requirement key order."
+    },
+    {
+      "test": "test_hidden_pinwheel.ResolveTests.test_plan_integration",
+      "spec": "Acceptance: pinwheel/install.py works unchanged (rules 8 and 10 via plan)."
+    },
+    {
+      "test": "test_hidden_pinwheel.InstallOrderTests.test_dependencies_first_alphabetical_ties",
+      "spec": "Rule 10: dependencies first; when several are ready, alphabetically smallest first."
+    },
+    {
+      "test": "test_hidden_pinwheel.InstallOrderTests.test_uses_dependencies_of_the_resolved_version",
+      "spec": "Rule 10: only dependencies of the resolved version that are in the resolution count."
+    },
+    {
+      "test": "test_hidden_pinwheel.InstallOrderTests.test_cycle_members",
+      "spec": "Rule 11: CycleError.members = sorted packages on at least one cycle (incl. self-dependency), not mere dependents."
+    },
+    {
+      "test": "test_hidden_pinwheel.InstallOrderTests.test_long_cycle_and_dependents",
+      "spec": "Rule 11: members of a 3-cycle only; rule 10 ordering with another resolved version."
+    },
+    {
+      "test": "test_hidden_pinwheel.InstallOrderTests.test_resolve_accepts_cycles",
+      "spec": "Rule 11: resolve does not reject cycles; install_order raises CycleError with the members."
+    }
+  ]
+}

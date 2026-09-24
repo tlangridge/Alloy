@@ -1,0 +1,157 @@
+{
+  "id": "make-l-cadence-cron",
+  "type": "make",
+  "tier": "large",
+  "kind": "implementation",
+  "split": "holdout",
+  "title": "Cron-like schedules: wrap-around weekday ranges, L/#/L-n items, explicit DOM/DOW OR rule, next/previous with 8-year horizon",
+  "allow_paths": [
+    "cadence",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_field_count",
+      "spec": "Rule 1: exactly five fields, otherwise CronSyntaxError with field=None."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_macros",
+      "spec": "Rule 2: macros matched case-insensitively with their expansions; unknown @text -> field None, item = stripped expression; rule 11 next/previous."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_out_of_range_values",
+      "spec": "Rule 3: field ranges (minute 0-59, hour 0-23, dom 1-31, month 1-12, dow 0-7); rule 12 field/item."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_names_only_in_their_field",
+      "spec": "Rule 3: month names only in month, day names only in day_of_week, case-insensitive."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_reversed_ranges",
+      "spec": "Rule 4: V > W is an error except in day_of_week (wraps)."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_steps",
+      "spec": "Rule 4: S must be a decimal integer >= 1; a step larger than the sequence yields its first element; V/S means V-max/S; lists combine items."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_empty_items",
+      "spec": "Rule 4: an empty item is an error; rule 12 item ''."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_last_day_items",
+      "spec": "Rule 5: L / L-n (1 <= n <= 30) only in day_of_month, never with a step, allowed in lists."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_nth_weekday_items",
+      "spec": "Rule 6: V#K with 1 <= K <= 5 and VL only in day_of_week, never with a step or range, allowed in lists."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_question_mark",
+      "spec": "Rule 7: ? only as the entire day_of_month or day_of_week field."
+    },
+    {
+      "test": "test_hidden_cadence.SyntaxTests.test_whitespace",
+      "spec": "Rule 1: leading/trailing spaces and tabs stripped; fields separated by one or more spaces/tabs."
+    },
+    {
+      "test": "test_hidden_cadence.ExpansionTests.test_zero_and_seven_are_sunday",
+      "spec": "Rule 3: both 0 and 7 mean Sunday."
+    },
+    {
+      "test": "test_hidden_cadence.ExpansionTests.test_day_of_week_ranges_wrap",
+      "spec": "Rule 4: day_of_week V > W wraps V..6,0..W; a range start of 7 is 0, an end of 7 stays 7 (5-7 = Fri, Sat, Sun)."
+    },
+    {
+      "test": "test_hidden_cadence.ExpansionTests.test_day_of_week_steps",
+      "spec": "Rule 4: * in day_of_week means 0-6 for steps; V/S = V-6/S; steps apply to the (wrapped) sequence (MON-SUN/2 = Mon, Wed, Fri, Sun)."
+    },
+    {
+      "test": "test_hidden_cadence.ExpansionTests.test_month_steps",
+      "spec": "Rule 4: */S takes every S-th value starting at the first (months 1, 4, 7, 10)."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_both_restricted_is_or",
+      "spec": "Rule 9: both day fields restricted -> a day matches when either matches."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_star_step_counts_as_restricted",
+      "spec": "Rule 8: only exactly * or ? is unrestricted; */2, 0-7 and 1-31 are restricted (so OR applies)."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_question_and_star_are_unrestricted",
+      "spec": "Rules 7-9: ? means *; with one restricted field only that field decides."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_or_rescues_impossible_day_of_month",
+      "spec": "Rule 9: OR semantics with an impossible day_of_month still matches the weekday; month must match."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_last_day_or_weekday",
+      "spec": "Rules 5 and 9: L OR MON."
+    },
+    {
+      "test": "test_hidden_cadence.DaySemanticsTests.test_month_always_applies",
+      "spec": "Rule 9: the month field must always match."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_next_after_is_strict_and_truncates_seconds",
+      "spec": "Rule 11: earliest matching datetime with second=0/microsecond=0 strictly later than when."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_previous_before_is_strict",
+      "spec": "Rule 11: latest match strictly earlier than when (from 10:00:30 it can return 10:00:00)."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_matches_ignores_seconds",
+      "spec": "Rule 10: matches ignores seconds and microseconds."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_short_months_are_skipped",
+      "spec": "Rules 3/11: day 31 only matches months that have it (forward and backward)."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_last_day_of_month",
+      "spec": "Rule 5: L is the last day of the month (leap years); rule 11 previous_before."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_last_day_offsets",
+      "spec": "Rule 5: L-n is n days before the last day; before the 1st it matches nothing that month."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_nth_weekday",
+      "spec": "Rule 6: V#K is the K-th such weekday; #5 only in months that have one; 7 is Sunday."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_last_weekday",
+      "spec": "Rule 6: VL is the last such weekday of the month (5L, friL, 7L)."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_leap_day_across_2100",
+      "spec": "Rule 11: search window through year when.year + 8 (backward when.year - 8); 2100 is not a leap year."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_search_horizon_is_eight_years",
+      "spec": "Rule 11: matches in year when.year + 8 are found, none beyond -> None (same backward with when.year - 8)."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_impossible_schedules_return_none",
+      "spec": "Rule 11: no match in the window -> None (next and previous)."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_business_hours_step",
+      "spec": "Rule 4 range steps (9-17/4 = 9, 13, 17) and rule 11 across a weekend."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_occurrences",
+      "spec": "Rule 11: occurrences returns up to count consecutive next_after results, stopping at None."
+    },
+    {
+      "test": "test_hidden_cadence.OccurrenceTests.test_aware_datetimes_are_rejected",
+      "spec": "Public API: a datetime with tzinfo raises ValueError for matches, next_after and previous_before."
+    }
+  ]
+}

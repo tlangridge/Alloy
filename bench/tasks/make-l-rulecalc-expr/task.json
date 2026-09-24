@@ -1,0 +1,217 @@
+{
+  "id": "make-l-rulecalc-expr",
+  "type": "make",
+  "tier": "large",
+  "kind": "implementation",
+  "split": "dev",
+  "title": "Rule expression language: tokenizer, precedence parser, exact-decimal evaluator with positioned errors",
+  "allow_paths": [
+    "rulecalc",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_power_is_right_associative_and_takes_unary_exponent",
+      "spec": "Rule 3 table level 10: ** is right-associative; the right operand may start with unary -/+; 2 ** 3 ** 2 is 2 ** 9; rule 4.3: 2 ** -2 is 0.25."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_unary_minus_binds_looser_than_power",
+      "spec": "Rule 3: -2 ** 2 is -(2 ** 2)."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_unary_minus_binds_tighter_than_multiplication",
+      "spec": "Rule 3 table: unary -/+ (level 9) binds tighter than * (level 8) and binary - (level 7)."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_not_binds_looser_than_comparison",
+      "spec": "Rule 3: not a == b is not (a == b); not (level 5) binds tighter than and (level 4)."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_not_in_versus_not_prefix",
+      "spec": "Rule 3: not x in y is not (x in y) while x not in y is the two-word comparison operator."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_coalesce_binds_looser_than_or_and_arithmetic",
+      "spec": "Rule 3 table: ?? (level 2) is below or (level 3) and + (level 7); rule 4.9."
+    },
+    {
+      "test": "test_hidden_rulecalc.PrecedenceTests.test_conditional_is_right_associative_and_lowest",
+      "spec": "Rule 3 table level 1: a ? b : c ? d : e = a ? b : (c ? d : e); x ?? y ? p : q is (x ?? y) ? p : q."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_exact_decimals_and_result_type",
+      "spec": "Rule 4.1: numbers are exact decimal.Decimal, 0.1 + 0.2 == 0.3 is true; rule 4.3: 7 / 2 is 3.5; rule 5: numbers returned as Decimal."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_floored_division",
+      "spec": "Rule 4.3: // is floored division (-7 // 2 is -4, 7 // -2 is -4)."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_floored_modulo",
+      "spec": "Rule 4.3: % is floored modulo with the sign of the divisor (-7 % 3 is 2, 7 % -3 is -2, 5.5 % 2 is 1.5)."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_division_by_zero_positions",
+      "spec": "Rule 4.3: /, // and % with a zero divisor raise EvalError at the operator."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_power_rules",
+      "spec": "Rule 4.3: the exponent must be integer-valued (2 ** 0.5 is an EvalError at **); 0 ** n with negative n is an EvalError at **."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_plus_concatenates_strings_and_lists_only",
+      "spec": "Rule 4.3: + also concatenates two strings or two lists; other combinations are an EvalError at the operator; unary - requires a number."
+    },
+    {
+      "test": "test_hidden_rulecalc.ArithmeticTests.test_booleans_are_not_numbers_in_arithmetic",
+      "spec": "Rule 4.2/4.3: a boolean is never treated as a number; arithmetic accepts numbers only (EvalError at the operator)."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_no_cross_type_equality_numbers_by_value",
+      "spec": "Rule 4.4: values of different types are never equal (true == 1 is false); numbers compare by value (1 == 1.00)."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_deep_equality",
+      "spec": "Rule 4.4: lists/maps compare recursively with the same rules ([true] == [1] is false); map key order irrelevant; rule 4.2 conversion."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_comparison_chains",
+      "spec": "Rule 4.6: a op1 b op2 c means (a op1 b) and (b op2 c); 1 < 2 < 3 true, 1 < 3 < 2 false."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_chain_short_circuits_later_operands",
+      "spec": "Rule 4.6: evaluation stops at the first false comparison (2 < 1 < x is false even if x is undefined); operands are evaluated when reached."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_chain_error_reported_at_failing_operator",
+      "spec": "Rule 4.6: an error in a chain is reported at the operator of the failing comparison; rule 4.5."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_ordering_rules",
+      "spec": "Rule 4.5: ordering requires two numbers or two strings (code point order); anything else is an EvalError at the operator."
+    },
+    {
+      "test": "test_hidden_rulecalc.EqualityAndComparisonTests.test_in_operator",
+      "spec": "Rule 4.7: list membership uses rule 4.4 equality (true in [1] is false); string substring and map key tests need a string left operand; other combinations EvalError at the operator (for not in, at the not)."
+    },
+    {
+      "test": "test_hidden_rulecalc.LogicTests.test_short_circuit",
+      "spec": "Rule 4.8: and/or short-circuit: false and x and true or x never evaluate x."
+    },
+    {
+      "test": "test_hidden_rulecalc.LogicTests.test_non_boolean_operands_and_conditions_are_errors",
+      "spec": "Rule 4.8: and, or, not and the condition of ? : require booleans; EvalError at the and/or/not keyword or at the ?."
+    },
+    {
+      "test": "test_hidden_rulecalc.LogicTests.test_only_selected_branch_is_evaluated",
+      "spec": "Rule 4.8: only the selected branch of ? : is evaluated."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_coalesce_replaces_only_null",
+      "spec": "Rule 4.9: a ?? b is a unless a is null (false ?? 1 is false, 0 ?? 1 is 0); b not evaluated when a is not null."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_member_access_on_null_propagates",
+      "spec": "Rule 4.10: member access on null yields null."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_coalesce_does_not_suppress_errors",
+      "spec": "Rule 4.9: ?? never suppresses errors raised while evaluating a; rule 4.10: missing key is an EvalError at the member name."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_member_errors_point_at_member_name",
+      "spec": "Rule 4.10: missing key or non-map receiver is an EvalError at the position of name (the name token, not the dot)."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_indexing",
+      "spec": "Rule 4.11: list/string integer indexes, negative from the end, string indexing yields a one-character string, map string keys, null[i] is null."
+    },
+    {
+      "test": "test_hidden_rulecalc.NullAndAccessTests.test_index_errors_point_at_bracket",
+      "spec": "Rule 4.11: out-of-range, non-integer, boolean, missing-key, wrong-key-type and non-indexable failures are EvalErrors at the [."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_unknown_variable_fails_at_evaluation_not_compile",
+      "spec": "Rule 4.2: an unknown root name raises EvalError at the name when evaluated; compiling never fails because of unknown names."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_keywords_are_case_sensitive",
+      "spec": "Rule 2.4: keywords are case-sensitive (True is an ordinary name); rule 4.2 unknown name."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_bool_variables_stay_booleans",
+      "spec": "Rule 4.2: bool stays a boolean (never treated as a number); tuples become lists."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_int_and_float_conversion",
+      "spec": "Rule 4.2: int becomes Decimal(int); float becomes Decimal(repr(value)); rule 5 returns Decimal."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_unsupported_values_error_at_root_name",
+      "spec": "Rule 4.2: any other value anywhere inside the variable (non-finite floats, dicts with non-string keys) is an EvalError at the root name."
+    },
+    {
+      "test": "test_hidden_rulecalc.VariableTests.test_variables_property",
+      "spec": "Public API: Rule.variables is the sorted list of distinct root names, including untaken branches; member and function names excluded; rule 2.1 comments."
+    },
+    {
+      "test": "test_hidden_rulecalc.FunctionTests.test_round_ties_away_from_zero",
+      "spec": "Rule 6: round rounds ties away from zero (round(2.5) 3, round(-2.5) -3, round(1.005, 2) 1.01)."
+    },
+    {
+      "test": "test_hidden_rulecalc.FunctionTests.test_round_places_validation",
+      "spec": "Rule 6: places must be an integer-valued number from 0 to 28; x must be a number; runtime argument errors are EvalErrors at the function name."
+    },
+    {
+      "test": "test_hidden_rulecalc.FunctionTests.test_len_counts_code_points",
+      "spec": "Rule 6: len counts code points / elements / keys; bad argument is an EvalError at the function name."
+    },
+    {
+      "test": "test_hidden_rulecalc.FunctionTests.test_min_max_lower_upper_abs",
+      "spec": "Rule 6: min/max over all numbers or all strings; lower/upper/abs; runtime argument errors at the function name."
+    },
+    {
+      "test": "test_hidden_rulecalc.FunctionTests.test_unknown_function_and_arity_are_compile_errors",
+      "spec": "Rule 3.3: unknown functions and wrong argument counts are ParseErrors at the function name, detected by compile_rule."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_string_escapes",
+      "spec": "Rule 2.3: escapes \\\\ \\\" \\' \\n \\t and \\u{H} with 1-6 hex digits."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_bad_escapes_point_at_backslash",
+      "spec": "Rule 2.3: any other escape or malformed/invalid \\u{...} (surrogate, > 10FFFF, empty, no braces) is a LexError at the backslash."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_unterminated_string_points_at_opening_quote",
+      "spec": "Rule 2.3: a string reaching end of input or a raw newline is a LexError at its opening quote."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_unexpected_characters",
+      "spec": "Rule 2.6: any other character (=, lone !, e-acute outside strings) is a LexError at that character; rule 1.1 code point columns."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_comments_and_multiline_positions",
+      "spec": "Rule 2.1 comments; rule 1.1 line increments after \\n and tabs occupy one column; rule 3.2 ParseError at the first bad token."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_columns_count_code_points",
+      "spec": "Rule 1.1: columns count code points (astral characters are one column each)."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_eof_parse_error_position",
+      "spec": "Rule 1.2 / 3.2: ParseError at the end-of-input position including trailing whitespace and comments; \"\" is 1:1."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_parse_error_positions",
+      "spec": "Rule 3.2: extra tokens error at the first extra token; rule 3.1: trailing comma errors at the closing bracket, member names must not be keywords; missing : errors at end of input."
+    },
+    {
+      "test": "test_hidden_rulecalc.LexerTests.test_maximal_munch",
+      "spec": "Rule 2.5: operators matched longest-first (//, **, <=, ??, ?)."
+    }
+  ]
+}
