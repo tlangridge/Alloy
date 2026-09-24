@@ -1,0 +1,14 @@
+{
+  "id": "consult-resplit-tag-parser",
+  "type": "consult",
+  "tier": "medium",
+  "kind": "research",
+  "split": "dev",
+  "title": "Length of a re.split result for a tag-list pattern",
+  "prompt": "Our tag parser splits free-text tag lists with\n\n    parts = re.split(r'\\s*([,;])\\s*|\\s+and\\s+', text)\n\nand then walks `parts` two items at a time as (tag, separator) pairs, which is going wrong for some inputs. For\n\n    text = 'red, green;blue and  yellow'\n\n(note the two spaces after `and`), how many elements does that `re.split(...)` call return on CPython 3.8 or newer?\n\nAnswer with a single integer.",
+  "match": "number",
+  "answers": [
+    "7"
+  ],
+  "verify": "python3 -c 'import re; print(len(re.split(r\"\\s*([,;])\\s*|\\s+and\\s+\", \"red, green;blue and  yellow\")))'"
+}

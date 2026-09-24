@@ -1,0 +1,14 @@
+{
+  "id": "consult-textpipe-audit-steps",
+  "type": "consult",
+  "tier": "medium",
+  "kind": "research",
+  "split": "holdout",
+  "title": "Step order printed for the textpipe audit pipeline",
+  "prompt": "Compliance wants to know exactly which cleaning steps our audit-log pipeline runs, and in which order. In this repository, what line does\n\n    python3 -m textpipe steps audit\n\nprint?\n\nAnswer with that line exactly as it is printed.",
+  "match": "regex",
+  "answers": [
+    "\\[?\\s*'?dedupe'?\\s*(>|->|→|,)\\s*'?truncate'?\\s*(>|->|→|,)\\s*'?normalize'?\\s*(>|->|→|,)\\s*'?strip'?\\s*(>|->|→|,)\\s*'?redact'?\\s*(>|->|→|,)\\s*'?audit'?\\s*\\]?"
+  ],
+  "verify": "python3 -m textpipe steps audit"
+}

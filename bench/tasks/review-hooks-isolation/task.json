@@ -1,0 +1,11 @@
+{
+  "id": "review-hooks-isolation",
+  "type": "review",
+  "tier": "medium",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: subscriber failure isolation in the event bus",
+  "bug": false,
+  "claimed_change": "Isolate subscriber failures in hooks.bus.EventBus.publish(topic, payload, strict=False), which now returns hooks.bus.Delivery(topic, delivered, failed). The bus is used from a single thread, as before.\n- Every handler subscribed to the topic when publish starts is called once, in subscription order, even if earlier ones raise; subscribe/unsubscribe calls made during a publish take effect from the next publish.\n- By design a handler raising any Exception must not stop the others or reach the publisher: log it with logger.exception on the 'hooks.bus' logger (message names the handler and topic), increment bus.failures[topic] (a collections.Counter, cumulative), and append handler_name(handler) (module-qualified __qualname__, else repr) to Delivery.failed. delivered counts handlers that returned normally.\n- BaseExceptions that are not Exceptions (KeyboardInterrupt, SystemExit) propagate immediately.\n- strict=True: once every handler has run, if any failed raise DeliveryError (attribute .delivery) chained from the first handler exception.\n- Update hooks.signals.emit for the new return value (warn only when the topic has no subscribers at all; pass strict through) and add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v"
+}

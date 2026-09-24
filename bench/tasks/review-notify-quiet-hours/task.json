@@ -1,0 +1,17 @@
+{
+  "id": "review-notify-quiet-hours",
+  "type": "review",
+  "tier": "medium",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: next_delivery() for per-user quiet hours",
+  "bug": true,
+  "claimed_change": "Add notify/schedule.py with next_delivery(now, tz, quiet) -> datetime.\n- now is an aware datetime (ValueError if naive); tz is a tzinfo such as notify.tz.EASTERN; quiet is a notify.quiet.QuietHours.\n- If the user's local time at now is outside quiet hours, return now converted to UTC.\n- Otherwise return, as an aware UTC datetime, the first instant after now at which the user's local wall clock reads quiet.end. This must hold across daylight-saving changes: with quiet hours 22:00-07:00, a notification created the evening before a DST switch goes out at 07:00 local time on the user's clock the next morning.\n- Quiet-hour boundaries never fall inside the 01:00-03:00 transition window.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "notify/schedule.py",
+    "keywords": ["dst", "daylight", "wall-clock", "wall clock", "utcoffset", "same tzinfo", "naive", "fall back", "fall-back", "spring forward", "spring-forward", "transition", "one hour", "an hour", "1 hour", "1h", "offset change", "release - local", "astimezone(timezone.utc)", "release.astimezone"],
+    "description": "next_delivery returns now + (release - local). Both operands share the same tzinfo, so Python subtracts them as naive wall-clock times and ignores the UTC offset change; on a DST-transition night the result is one hour off (06:00 EST instead of 07:00 after fall-back, 08:00 EDT after spring-forward). Fix: return release.astimezone(timezone.utc)."
+  }
+}

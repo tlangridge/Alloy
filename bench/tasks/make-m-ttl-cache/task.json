@@ -1,0 +1,133 @@
+{
+  "id": "make-m-ttl-cache",
+  "type": "make",
+  "tier": "medium",
+  "kind": "implementation",
+  "split": "dev",
+  "title": "Bounded LRU cache with TTL boundary, purge-before-evict, sliding expiry, loader and stats",
+  "allow_paths": [
+    "memo",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_cache_rules.ValidationTests.test_constructor_rejects_non_positive_default_ttl",
+      "spec": "Rule 1: default_ttl must be None or a number > 0; otherwise the constructor raises ValueError."
+    },
+    {
+      "test": "test_cache_rules.ValidationTests.test_set_rejects_non_positive_ttl_and_leaves_cache_unchanged",
+      "spec": "Rule 1: set raises ValueError for a ttl <= 0, and in that case the cache is left completely unchanged."
+    },
+    {
+      "test": "test_cache_rules.ValidationTests.test_get_or_load_rejects_non_positive_ttl",
+      "spec": "Rule 1: set/get_or_load raise ValueError for a ttl that is not None and is <= 0 ... nothing changed."
+    },
+    {
+      "test": "test_cache_rules.ExpiryTests.test_entry_is_expired_exactly_at_expires_at",
+      "spec": "Rule 3: live while clock() < expires_at; at clock() == expires_at it is expired."
+    },
+    {
+      "test": "test_cache_rules.ExpiryTests.test_boundary_applies_to_in_len_and_peek",
+      "spec": "Rule 3 (treated as absent by every operation) + rule 9 (in/len/peek consider only live entries)."
+    },
+    {
+      "test": "test_cache_rules.ExpiryTests.test_explicit_ttl_overrides_default",
+      "spec": "Rule 2: effective TTL is the ttl argument if not None, else default_ttl."
+    },
+    {
+      "test": "test_cache_rules.ExpiryTests.test_no_ttl_means_never_expires",
+      "spec": "Rule 2: an effective TTL of None means the entry never expires."
+    },
+    {
+      "test": "test_cache_rules.ExpiryTests.test_update_restarts_expiry_with_new_ttl",
+      "spec": "Rule 5: set on a stored key replaces its value and restarts its expiry using the new effective TTL."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_get_hit_refreshes_recency",
+      "spec": "Rule 4: a get hit makes the key most recently used; rule 6 evicts the least recently used."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_set_of_existing_key_refreshes_recency",
+      "spec": "Rule 4: set of an existing key makes it most recently used."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_updating_existing_key_at_capacity_evicts_nothing",
+      "spec": "Rule 5: updating a stored key never evicts or expires any other entry."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_peek_and_contains_do_not_refresh_recency",
+      "spec": "Rule 4: peek, in and len never change recency."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_expired_entries_are_purged_before_evicting_live_lru",
+      "spec": "Rule 6: first removes every expired entry; only if still full evicts the LRU entry; rule 12 counts expirations vs evictions."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_purge_removes_every_expired_entry",
+      "spec": "Rule 6: removes **every** expired entry before considering eviction."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_no_purge_when_cache_not_full",
+      "spec": "Rule 6: No purging happens when the cache is not full."
+    },
+    {
+      "test": "test_cache_rules.RecencyAndCapacityTests.test_lru_eviction_when_nothing_expired",
+      "spec": "Rule 6: evicts the single least recently used entry; rule 12 evictions count."
+    },
+    {
+      "test": "test_cache_rules.SlidingTests.test_sliding_get_extends_by_entry_own_ttl",
+      "spec": "Rule 7: every hit resets expires_at to clock() + d, d = the entry's own effective TTL (not default_ttl)."
+    },
+    {
+      "test": "test_cache_rules.SlidingTests.test_sliding_peek_and_contains_do_not_extend",
+      "spec": "Rule 7: peek and in never extend expiry."
+    },
+    {
+      "test": "test_cache_rules.SlidingTests.test_sliding_get_or_load_hit_extends",
+      "spec": "Rule 7: every hit from get or get_or_load resets expires_at."
+    },
+    {
+      "test": "test_cache_rules.SlidingTests.test_without_sliding_reads_do_not_extend",
+      "spec": "Rule 7: with sliding=False reads never change expiry."
+    },
+    {
+      "test": "test_cache_rules.PeekDeleteLenTests.test_peek_does_not_remove_or_count_expired",
+      "spec": "Rule 9: peek changes nothing (no removal of expired entries, no statistics); rule 8/12: get removes it and counts an expiration."
+    },
+    {
+      "test": "test_cache_rules.PeekDeleteLenTests.test_len_counts_only_live_entries",
+      "spec": "Rule 9: len(cache) is the number of live entries at the current clock time."
+    },
+    {
+      "test": "test_cache_rules.PeekDeleteLenTests.test_delete",
+      "spec": "Rule 10: True if a live entry was removed, False if absent or expired (expired entry still removed); rule 12 expirations."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_get_or_load_miss_loads_once_then_hits",
+      "spec": "Rule 11: on a miss calls loader(key) exactly once, stores and returns the result; later calls hit."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_get_or_load_caches_none",
+      "spec": "Rule 11: a stored value of None is a valid cached value."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_get_or_load_uses_ttl_argument",
+      "spec": "Rule 11: stores the result with effective TTL from ttl/default_ttl (rule 2)."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_loader_exception_propagates_and_stores_nothing",
+      "spec": "Rule 11: if loader raises, the exception propagates unchanged and nothing is stored for key."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_get_or_load_miss_respects_capacity",
+      "spec": "Rule 11: a miss stores via rule 6 (capacity/LRU eviction); rule 4 recency."
+    },
+    {
+      "test": "test_cache_rules.LoaderAndStatsTests.test_stats_count_hits_and_misses",
+      "spec": "Rule 12: stats() returns a new dict with exactly hits/misses/evictions/expirations; peek and in not counted."
+    }
+  ]
+}

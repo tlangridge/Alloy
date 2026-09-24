@@ -1,0 +1,1 @@
+"""Transactional helpers over SQLite."""

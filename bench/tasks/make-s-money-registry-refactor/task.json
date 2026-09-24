@@ -1,0 +1,108 @@
+{
+  "id": "make-s-money-registry-refactor",
+  "type": "make",
+  "tier": "small",
+  "kind": "refactoring",
+  "split": "holdout",
+  "title": "Refactor per-currency branches into one registry, preserving output, and add register_currency",
+  "allow_paths": [
+    "ledger",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_money_refactor.PreservationTests.test_builtins_match_previous_implementation",
+      "spec": "Rule 1: for USD/GBP/EUR/CHF/JPY, output identical to the current implementation for every int amount (checked against a frozen copy of it)."
+    },
+    {
+      "test": "test_money_refactor.PreservationTests.test_documented_examples",
+      "spec": "Current behavior table: $1,234.56 / -£0.05 / -1.234,56 € / CHF -1'234.56 / ¥1,234,567."
+    },
+    {
+      "test": "test_money_refactor.PreservationTests.test_codes_case_insensitive",
+      "spec": "Rule 1: every letter case of the code gives the current output."
+    },
+    {
+      "test": "test_money_refactor.PreservationTests.test_type_errors_unchanged",
+      "spec": "Rule 1: non-int amount (including bool) raises TypeError, unchanged."
+    },
+    {
+      "test": "test_money_refactor.PreservationTests.test_unknown_currency_unchanged",
+      "spec": "Rule 1: unsupported code raises UnknownCurrencyError (subclass of ValueError), unchanged."
+    },
+    {
+      "test": "test_money_refactor.RegistryTests.test_builtins_cannot_be_registered_again",
+      "spec": "Rule 2: registering any built-in code again (any letter case) raises ValueError."
+    },
+    {
+      "test": "test_money_refactor.RegistryTests.test_duplicate_registration_rejected_case_insensitively",
+      "spec": "Rule 3: code is case-insensitive and must not already be registered."
+    },
+    {
+      "test": "test_money_refactor.RegisterValidationTests.test_bad_codes",
+      "spec": "Rule 3: code must be exactly three ASCII letters, else ValueError."
+    },
+    {
+      "test": "test_money_refactor.RegisterValidationTests.test_empty_symbol",
+      "spec": "Rule 3: symbol must be non-empty; failure leaves the registry unchanged."
+    },
+    {
+      "test": "test_money_refactor.RegisterValidationTests.test_decimals_out_of_range",
+      "spec": "Rule 3: decimals must be an int from 0 to 4; failure leaves the registry unchanged."
+    },
+    {
+      "test": "test_money_refactor.RegisterValidationTests.test_bad_position",
+      "spec": "Rule 3: position must be 'prefix' or 'suffix'; failure leaves the registry unchanged."
+    },
+    {
+      "test": "test_money_refactor.RegisterValidationTests.test_failed_registration_can_be_retried",
+      "spec": "Rule 3: each failure leaves the registry unchanged (the code is still free)."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_suffix_with_space",
+      "spec": "Rule 4: suffix body with a space; negative sign at the very start; code case-insensitive."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_suffix_without_space",
+      "spec": "Rule 4: suffix body without space; grouping with thousands_sep; sign at start."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_prefix_without_space",
+      "spec": "Rule 4: prefix body without space; sign at the very start."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_prefix_with_space_puts_sign_before_number",
+      "spec": "Rule 4: for a prefix symbol with space=True the - goes directly before the number."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_three_decimals",
+      "spec": "Rule 4: fraction zero-padded to decimals digits (divmod by 10 ** decimals)."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_four_decimals",
+      "spec": "Rule 4: decimals up to 4; prefix+space sign placement."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_zero_decimals_has_no_separator",
+      "spec": "Rule 4: decimals == 0 means no decimal separator at all."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_empty_thousands_separator_means_no_grouping",
+      "spec": "Rule 3: an empty thousands_sep means no grouping."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_multi_character_separators",
+      "spec": "Rule 4: groups joined by thousands_sep, followed by decimal_sep (strings used verbatim)."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_type_error_applies_to_registered",
+      "spec": "Rule 1: TypeError behavior for non-int amounts unchanged (applies before currency lookup)."
+    },
+    {
+      "test": "test_money_refactor.RegisteredFormattingTests.test_returns_none",
+      "spec": "Rule 3: register_currency(...) -> None."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "consult-salesreport-q3-total",
+  "type": "consult",
+  "tier": "medium",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "What TOTAL the salesreport CLI prints for the Q3 export",
+  "prompt": "Finance says the Q3 summary produced by this repository doesn't match their spreadsheet. Before I start digging: when I run\n\n    python3 -m salesreport data/q3.csv\n\nwhat value is printed on the `TOTAL` line?\n\nAnswer with the number only.",
+  "match": "number",
+  "answers": [
+    "1835.99"
+  ],
+  "verify": "python3 -m salesreport data/q3.csv 2>/dev/null | awk '$1==\"TOTAL\" {print $2}'"
+}

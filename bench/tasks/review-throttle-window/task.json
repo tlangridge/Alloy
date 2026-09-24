@@ -1,0 +1,11 @@
+{
+  "id": "review-throttle-window",
+  "type": "review",
+  "tier": "small",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: sliding-log rate limiter",
+  "bug": false,
+  "claimed_change": "Add throttle.limiter.SlidingLogLimiter(limit, window_ms, clock) next to FixedWindowLimiter. clock() returns integer milliseconds from a monotonic (non-decreasing) source; limit and window_ms must be positive ints (ValueError otherwise, bools rejected), as for FixedWindowLimiter.\n- allow(key) returns True and records the request iff fewer than limit requests for that key were allowed in the half-open interval (now - window_ms, now]; a request made exactly window_ms ago no longer counts. Rejected requests are never recorded.\n- retry_after(key) returns the number of milliseconds until allow(key) would succeed (0 if it would succeed now), without recording anything.\n- Pruning is lazy: a key's expired timestamps are dropped when that key is next used, and a key whose log becomes empty is removed. The limiter must be safe to call from several threads.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v"
+}

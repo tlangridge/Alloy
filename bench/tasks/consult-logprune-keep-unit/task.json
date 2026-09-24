@@ -1,0 +1,14 @@
+{
+  "id": "consult-logprune-keep-unit",
+  "type": "consult",
+  "tier": "small",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Which exception terminates logprune.py for --keep 90m",
+  "prompt": "Our ops runbook (and the README in this repository) says that any bad `--keep` value passed to `logprune.py` is rejected by argparse with its usual usage error. Last night someone ran\n\n    python3 logprune.py --keep 90m /var/log/app\n\nmeaning 90 minutes. Going by the code in this repository, which exception class actually terminates the program for that command? (For reference: when argparse rejects an argument it prints the usage error and raises `SystemExit`.)\n\nAnswer with just the exception class name.",
+  "match": "regex",
+  "answers": [
+    "(builtins\\.)?keyerror"
+  ],
+  "verify": "python3 logprune.py --keep 90m /tmp 2>&1 | tail -n 1 | cut -d: -f1"
+}

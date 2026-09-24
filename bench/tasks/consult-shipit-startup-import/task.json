@@ -1,0 +1,14 @@
+{
+  "id": "consult-shipit-startup-import",
+  "type": "consult",
+  "tier": "large",
+  "kind": "architecture",
+  "split": "holdout",
+  "title": "Which module pulls the expensive PDF renderer into shipit start-up",
+  "prompt": "`python3 -m shipit --help` has become slow. Profiling shows most of the time goes into importing `shipit.render.pdf`, even though the README says only commands that actually produce a PDF should load it. I want to fix this at the source, so I need to know which module's import-time (top-level) code is pulling it in during start-up.\n\nPrecisely: when `python3 -m shipit --help` runs from the root of this repository, at the moment `shipit.render.pdf` is first imported, which is the innermost module on the call stack that is still in the middle of executing its own top-level code (not counting `shipit.render.pdf` itself)?\n\nAnswer with its dotted module name (e.g. `shipit.something`).",
+  "match": "regex",
+  "answers": [
+    "((shipit[./])?render[./])?notes(\\.py)?"
+  ],
+  "verify": "python3 - <<'EOF'\nimport contextlib, io, runpy, sys\nTARGET = 'shipit.render.pdf'\nfound = []\n\nclass Spy:\n    \"\"\"On the first import of TARGET, record the innermost module still running top-level code.\"\"\"\n    def find_spec(self, name, path=None, target=None):\n        if name == TARGET and not found:\n            frame = sys._getframe(1)\n            while frame is not None:\n                mod = frame.f_globals.get('__name__', '')\n                if frame.f_code.co_name == '<module>' and mod.startswith('shipit') and mod != TARGET:\n                    found.append(mod)\n                    break\n                frame = frame.f_back\n        return None\n\nsys.meta_path.insert(0, Spy())\nsys.argv = ['shipit', '--help']\nwith contextlib.redirect_stdout(io.StringIO()):\n    try:\n        runpy.run_module('shipit', run_name='__main__')\n    except SystemExit:\n        pass\nassert TARGET in sys.modules, 'pdf was not imported'\nprint(found[0])\nEOF"
+}

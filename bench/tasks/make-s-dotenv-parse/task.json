@@ -1,0 +1,148 @@
+{
+  "id": "make-s-dotenv-parse",
+  "type": "make",
+  "tier": "small",
+  "kind": "implementation",
+  "split": "dev",
+  "title": ".env parser: export prefix, key validation, inline comments, double/single quote semantics, line numbers",
+  "allow_paths": [
+    "envfile",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_dotenv_rules.LineTests.test_empty_text",
+      "spec": "Rule 1: empty and whitespace-only lines are ignored."
+    },
+    {
+      "test": "test_dotenv_rules.LineTests.test_comments_and_blank_lines_ignored",
+      "spec": "Rule 1: lines whose first non-whitespace character is # are ignored."
+    },
+    {
+      "test": "test_dotenv_rules.LineTests.test_crlf_line_endings",
+      "spec": "Rule 1: text is split on \\n and a \\r at the end of a line is removed."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_whitespace_around_key_and_equals",
+      "spec": "Rule 2: whitespace allowed before the key, between key and =, and after =; rule 3 strips surrounding whitespace."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_export_prefix_discarded",
+      "spec": "Rule 2: optional `export` followed by at least one space or tab is discarded."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_key_starting_with_export",
+      "spec": "Rule 2: a key may itself start with the letters export (exporter=1 sets exporter)."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_valid_key_shapes",
+      "spec": "Rule 2: key must match [A-Za-z_][A-Za-z0-9_]*."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_invalid_keys_rejected",
+      "spec": "Rule 2: an invalid key raises DotenvError; rule 7: lineno is the 1-based line number."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_missing_equals_rejected",
+      "spec": "Rule 2: a line with no = raises DotenvError."
+    },
+    {
+      "test": "test_dotenv_rules.AssignmentTests.test_value_may_contain_equals",
+      "spec": "Rule 3: the raw value is the text after the FIRST =."
+    },
+    {
+      "test": "test_dotenv_rules.UnquotedTests.test_spec_examples",
+      "spec": "Rule 3 examples: A=b # note -> b; A=b#c -> b#c; COLOR=#fff -> #fff; EMPTY= # nothing -> \"\"; A= -> \"\"; MSG=hello world -> hello world."
+    },
+    {
+      "test": "test_dotenv_rules.UnquotedTests.test_tab_before_hash_starts_comment",
+      "spec": "Rule 3: a # immediately following a space OR TAB starts a comment."
+    },
+    {
+      "test": "test_dotenv_rules.UnquotedTests.test_only_first_comment_marker_matters",
+      "spec": "Rule 3: comment starts at the first # that follows a space or tab; a # not following whitespace is part of the value."
+    },
+    {
+      "test": "test_dotenv_rules.UnquotedTests.test_url_fragment_kept",
+      "spec": "Rule 3: a # that does not immediately follow a space or tab is part of the value."
+    },
+    {
+      "test": "test_dotenv_rules.UnquotedTests.test_inner_whitespace_kept",
+      "spec": "Rule 3: only surrounding whitespace is stripped (MSG=hello world -> hello world)."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_hash_and_spaces_kept",
+      "spec": "Rule 4: whitespace and # inside double quotes are kept verbatim."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_escapes",
+      "spec": "Rule 4: \\n -> newline, \\t -> tab, \\\" -> \", \\\\ -> single backslash."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_unknown_escape_kept",
+      "spec": "Rule 4: a backslash followed by any other character is kept unchanged (\"\\d\" -> \\d)."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_escaped_backslash_before_closing_quote",
+      "spec": "Rule 4: value extends to the next \" not escaped by a backslash; \\\\ is a single backslash."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_leading_space_before_quote",
+      "spec": "Rule 4: quote detection ignores leading spaces and tabs of the raw value."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_empty_quotes",
+      "spec": "Rule 4: the value is the text between the quotes (empty here)."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_comment_after_closing_quote",
+      "spec": "Rule 6: after a closing quote only whitespace, optionally followed by a # comment, may appear."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_unterminated_rejected",
+      "spec": "Rule 4: a missing closing quote raises DotenvError (an escaped \\\" does not close)."
+    },
+    {
+      "test": "test_dotenv_rules.DoubleQuotedTests.test_value_does_not_span_lines",
+      "spec": "Rule 4: values never span lines; rule 7: lineno of the offending line."
+    },
+    {
+      "test": "test_dotenv_rules.SingleQuotedTests.test_literal_content",
+      "spec": "Rule 5: single-quoted content is literal, no escape processing ('a\\nb' is a, \\, n, b)."
+    },
+    {
+      "test": "test_dotenv_rules.SingleQuotedTests.test_hash_and_double_quotes_kept",
+      "spec": "Rule 5: value extends to the next single quote and is taken literally."
+    },
+    {
+      "test": "test_dotenv_rules.SingleQuotedTests.test_comment_after_closing_quote",
+      "spec": "Rule 6: whitespace then a # comment may follow a closing quote."
+    },
+    {
+      "test": "test_dotenv_rules.SingleQuotedTests.test_unterminated_rejected",
+      "spec": "Rule 5: a missing closing quote raises DotenvError."
+    },
+    {
+      "test": "test_dotenv_rules.TrailingTextTests.test_text_after_closing_quote_rejected",
+      "spec": "Rule 6: anything other than whitespace/comment after a closing quote raises DotenvError; rule 7 lineno."
+    },
+    {
+      "test": "test_dotenv_rules.DuplicateAndErrorTests.test_last_value_wins",
+      "spec": "Rule 7: when a key appears more than once, the last value wins."
+    },
+    {
+      "test": "test_dotenv_rules.DuplicateAndErrorTests.test_lineno_counts_blank_and_comment_lines",
+      "spec": "Rule 7: lineno is 1-based, counting blank and comment lines."
+    },
+    {
+      "test": "test_dotenv_rules.DuplicateAndErrorTests.test_error_is_value_error",
+      "spec": "Desired behavior: DotenvError is the existing ValueError subclass."
+    },
+    {
+      "test": "test_dotenv_rules.LoaderTests.test_load_env_uses_new_rules",
+      "spec": "Goal: load_env must keep working (it calls parse_env); override semantics unchanged (non-goal)."
+    }
+  ]
+}

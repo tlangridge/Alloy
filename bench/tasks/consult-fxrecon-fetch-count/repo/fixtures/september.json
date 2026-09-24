@@ -1,0 +1,26 @@
+{
+  "month": "2026-09",
+  "batches": [
+    {
+      "source": "card",
+      "transactions": [
+        {"id": "c-101", "ccy": "EUR", "amount": "120.00", "day": "2026-09-01"},
+        {"id": "c-102", "ccy": "eur", "amount": "35.00", "day": "2026-09-01"},
+        {"id": "c-103", "ccy": "GBP", "amount": "80.00", "day": "2026-09-01"},
+        {"id": "c-104", "ccy": "USD", "amount": "50.00", "day": "2026-09-01"},
+        {"id": "c-105", "ccy": "EUR", "amount": "900.00", "day": "2026-09-02"},
+        {"id": "c-106", "ccy": "EUR", "amount": "250.00", "day": "2026-09-01"},
+        {"id": "c-107", "ccy": "Eur", "amount": "410.00", "day": "2026-09-01"}
+      ]
+    },
+    {
+      "source": "bank",
+      "transactions": [
+        {"id": "b-201", "ccy": "EUR", "amount": "40.00", "day": "2026-09-01"},
+        {"id": "b-202", "ccy": "GBP", "amount": "150.00", "day": "2026-09-02"},
+        {"id": "b-203", "ccy": "usd", "amount": "300.00", "day": "2026-09-02"},
+        {"id": "b-204", "ccy": "EUR", "amount": "75.00", "day": "2026-09-01"}
+      ]
+    }
+  ]
+}

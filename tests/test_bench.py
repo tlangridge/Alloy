@@ -73,6 +73,9 @@ class ParsingTests(unittest.TestCase):
         wrong_file = dict(verdict='fail', findings=[dict(path='src/other.py', evidence='last page', fix='x')])
         wrong_issue = dict(verdict='fail', findings=[dict(path='src/pager.py', evidence='style nit', fix='rename')])
         self.assertTrue(h.grade_review(bug, hit)['passed'])
+        for loc in ('src/pager.py:84', 'src/pager.py:84:3', '`src/pager.py#L84-L90`', 'src/pager.py (line 84)'):
+            located = dict(verdict='fail', findings=[dict(path=loc, evidence='drops the last page', fix='x')])
+            self.assertTrue(h.grade_review(bug, located)['passed'], loc)
         self.assertFalse(h.grade_review(bug, wrong_file)['passed'])
         self.assertFalse(h.grade_review(bug, wrong_issue)['passed'])
         self.assertFalse(h.grade_review(bug, dict(verdict='pass', findings=[]))['passed'])

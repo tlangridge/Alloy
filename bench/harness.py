@@ -162,8 +162,12 @@ def grade_make(task, worktree, timeout=120):
                 hidden_tail=out[-1500:])
 
 
+_LOCATION = re.compile(r'(?:[:#]L?\d+(?:[-:]L?\d+)*|\s*\(line[^)]*\))$', re.I)
+
+
 def finding_matches(finding, truth):
-    path = str(finding.get('path', '')).strip().lstrip('./')
+    # Reviewers often append a location: "pkg/x.py:84", "pkg/x.py#L84-L90", "x.py (line 84)".
+    path = _LOCATION.sub('', str(finding.get('path', '')).strip().strip('`')).lstrip('./')
     want = truth['path'].lstrip('./')
     if not (path.endswith(want) or want.endswith(path) and path):
         return False

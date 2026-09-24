@@ -1,0 +1,17 @@
+{
+  "id": "review-ledger-retry",
+  "type": "review",
+  "tier": "medium",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: retry transient SQLite failures in run_in_transaction",
+  "bug": true,
+  "claimed_change": "Make ledger.tx.run_in_transaction(pool, work, attempts=3, backoff=0.05, sleep=time.sleep) retry transient SQLite failures (ledger.errors.is_transient).\n- attempts is the total number of tries (positive int, else ValueError). Sleep backoff * 2**(n-1) after the n-th failed attempt, never after the last; when attempts run out, re-raise the last transient error. Non-transient errors roll back and propagate immediately without retry.\n- Every attempt runs on its own connection from the pool. A connection whose attempt failed transiently must not be reused: close it so the pool creates a fresh one for the next attempt. Connections from successful or non-transient-failed attempts are rolled back as needed and returned for reuse.\n- The pool must end every call with the same capacity it started with (no connection or slot is lost, on any path), including pools of size 1.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "ledger/tx.py",
+    "keywords": ["discard", "capacity", "_created", "created count", "slot", "leak", "exhaust", "never returned", "not returned", "conn.close()", "shrink", "size=1", "size 1", "in_use", "replacement"],
+    "description": "On the transient-failure path the change calls conn.close() directly instead of pool.discard(conn). ConnectionPool counts live connections in _created and only discard() (or release()) gives the slot back, so every transient failure permanently consumes a slot: a size-1 pool raises PoolExhausted on the retry, and repeated retries exhaust any pool. Fix: pool.discard(conn)."
+  }
+}

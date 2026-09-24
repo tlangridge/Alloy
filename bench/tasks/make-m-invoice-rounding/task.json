@@ -1,0 +1,92 @@
+{
+  "id": "make-m-invoice-rounding",
+  "type": "make",
+  "tier": "medium",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Credit notes a cent off their invoices: add-half-then-floor rounding duplicated in money and VAT code",
+  "allow_paths": [
+    "billing",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_rounding_regression.RoundHalfUpTests.test_negative_halves_go_away_from_zero",
+      "spec": "Rule 1: halves go away from zero: -0.125 -> -0.13, -2.5 -> -3 for places=0."
+    },
+    {
+      "test": "test_rounding_regression.RoundHalfUpTests.test_positive_halves_unchanged",
+      "spec": "Rule 1 (0.125 -> 0.13, 2.5 -> 3) and rule 7: positive amounts must not change."
+    },
+    {
+      "test": "test_rounding_regression.RoundHalfUpTests.test_non_half_values_round_to_nearest",
+      "spec": "Rule 1: non-half values round to the nearest step."
+    },
+    {
+      "test": "test_rounding_regression.RoundHalfUpTests.test_symmetry_grid",
+      "spec": "Rule 1: for every Decimal x, round_half_up(-x, p) == -round_half_up(x, p); halves away from zero."
+    },
+    {
+      "test": "test_rounding_regression.LineTaxTests.test_negative_half_cent_vat",
+      "spec": "Rule 3: line_tax is net * rate rounded by rule 1 for positive and negative nets alike."
+    },
+    {
+      "test": "test_rounding_regression.LineTaxTests.test_vat_is_symmetric_and_half_up_for_every_cent",
+      "spec": "Rule 3 + acceptance: every place the package rounds money follows rule 1."
+    },
+    {
+      "test": "test_rounding_regression.LineTaxTests.test_unknown_category",
+      "spec": "Rule 3: an unknown category still raises billing.tax.UnknownTaxCategory."
+    },
+    {
+      "test": "test_rounding_regression.InvoiceTests.test_bulk_priced_invoice",
+      "spec": "Reproduction: invoice total prints 25.97 (rule 2 net rounding; rule 7 positives unchanged)."
+    },
+    {
+      "test": "test_rounding_regression.InvoiceTests.test_adjustment_line_with_half_cent",
+      "spec": "Rule 2: unit prices may be negative (adjustment lines), net rounded by rule 1; rule 3 VAT."
+    },
+    {
+      "test": "test_rounding_regression.InvoiceTests.test_reduced_rate_adjustment",
+      "spec": "Rules 3/4: VAT per line by rule 1; breakdown() sums per category as today."
+    },
+    {
+      "test": "test_rounding_regression.InvoiceTests.test_discounted_line",
+      "spec": "Rule 2: net = qty * unit_price * (1 - discount) rounded by rule 1; quantities may be negative."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_reported_example",
+      "spec": "Acceptance: the reproduction prints 25.97 and -25.97; rule 5 full mirror."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_mixed_categories_discounts_and_adjustments",
+      "spec": "Rule 5: every line net/tax/gross, subtotal, tax_total, total and breakdown value is the exact negative."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_split_of_credit_note_mirrors_invoice_split",
+      "spec": "Rule 5: every split(weights) share of a full credit note is the exact negative of the invoice's."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_partial_credit_equals_negated_invoice_for_those_units",
+      "spec": "Rule 6: partial credit note amounts equal the negatives of an invoice for those n units."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_credit_of_adjustment_line_is_positive",
+      "spec": "Rules 2 and 6: refunding an adjustment line (negative unit price) negates it exactly."
+    },
+    {
+      "test": "test_rounding_regression.CreditNoteTests.test_seeded_random_invoices_mirror",
+      "spec": "Rules 1-5 and 7 for any inputs, not just the example (acceptance criteria)."
+    },
+    {
+      "test": "test_rounding_regression.AllocateRegressionTests.test_ties_go_to_earlier_payers",
+      "spec": "Rule 7: no change to how ties are allocated in billing.split.allocate (existing behavior)."
+    },
+    {
+      "test": "test_rounding_regression.AllocateRegressionTests.test_negative_total_mirrors",
+      "spec": "Rule 5/7: split of a negative total mirrors the positive split (existing documented behavior)."
+    }
+  ]
+}

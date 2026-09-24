@@ -1,0 +1,11 @@
+{
+  "id": "review-tabs-split",
+  "type": "review",
+  "tier": "medium",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: proportional expense splitting in integer cents",
+  "bug": false,
+  "claimed_change": "Add tabs/split.py with split_cents(total, weights) -> dict, and Ledger.add_split_expense(payer, amount_cents, weights, description='') in tabs/ledger.py.\n- total is an int number of cents (TypeError for non-int or bool). weights maps participant names (str, else TypeError) to non-negative int weights (TypeError for non-int/bool, ValueError if negative); ValueError for empty weights or an all-zero total weight.\n- Largest-remainder method: each participant first gets floor(|total| * w / W) cents (W = sum of weights); the leftover cents go one each to the participants with the largest remainders (|total| * w mod W), ties broken by name in ascending Python string order. The result sums exactly to total, each share is within one cent of the exact proportion, and zero-weight participants get 0.\n- Negative totals (refunds) mirror the charge: split_cents(-t, w) equals split_cents(t, w) with every share negated. Result keys follow the order of weights.\n- add_split_expense computes shares with split_cents and records them through add_expense (so its validation of payer and members still applies). Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v"
+}
