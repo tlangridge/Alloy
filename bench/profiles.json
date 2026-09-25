@@ -17,6 +17,13 @@
       "family": "openai"
     },
     {
+      "id": "codex-sol56-high",
+      "cli": "codex",
+      "model": "gpt-5.6-sol",
+      "effort": "high",
+      "family": "openai"
+    },
+    {
       "id": "codex-sol6-high",
       "cli": "codex",
       "model": "gpt-6-sol",
