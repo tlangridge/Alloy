@@ -284,7 +284,11 @@ For existing installations, run:
 alloy setup --refresh-defaults --non-interactive --skip-live-test
 ```
 
-This backs up the private config and adds missing adapter/model pairs. Existing
+This backs up the private config and adds missing adapter/model pairs.
+To adopt a release's measured profiles and policy wholesale instead, run
+`alloy setup --reset-defaults --non-interactive --skip-live-test`: it backs up
+`routing.json`, then rebuilds profiles and policy from the shipped defaults while
+keeping the Jev provider and model, billing modes and quota pools. Existing
 profiles, disabled models, effort settings, pins, provider selection and policy
 remain unchanged. New profiles inherit subscription billing only when that CLI's
 existing profiles all agree on it; metered or mixed billing requires explicit

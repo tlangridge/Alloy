@@ -3,9 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
-## [Unreleased]
+## [0.9.0] - 2026-09-25
 
-Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
+Measured with the new `bench/` autoresearch evaluator: 48 tasks with hidden tests,
+seeded-bug reviews and answer keys; every change kept only if quality held and
+cost fell; final routing validated on a held-out split (q 0.917, all gates pass).
+Details: `bench/RESULTS.md`.
+
+**Upgrading:** existing `routing.json` files keep their profiles and policy. To adopt
+the measured defaults, run `alloy setup --reset-defaults --non-interactive
+--skip-live-test` (backs up the file; keeps Jev provider, billing modes and quota
+pools). If you pinned `ALLOY_CODEX_MODEL=gpt-6-sol` with ChatGPT sign-in, that pin
+makes the Codex panelist fail: use `gpt-5.6-sol` or remove the pin. Any Codex pin
+also blocks the cheap Luna reviewer from routing.
+
+- Prefer Jev routing (`--route`) when a configured key is available; host routing is
+  the fallback or an explicit keyless choice.
+- `alloy setup --reset-defaults` adopts the shipped profiles and policy wholesale.
 
 - Fix managed execution on current CLIs: Antigravity (agy 1.2) Makers could not run
   their test commands, and Grok Makers could not edit files; both failed every task.

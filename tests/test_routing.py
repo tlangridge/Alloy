@@ -656,6 +656,28 @@ class RouterTests(unittest.TestCase):
         with self.assertRaises(r.RoutingError):
             r.validate(self.config)
 
+    def test_reset_defaults_adopts_shipped_routing_and_keeps_account_choices(self):
+        self.config['profiles'][0]['model'] = 'gpt-custom'
+        self.config['profiles'].append(dict(self.config['profiles'][0], id='mine'))
+        for p in self.config['profiles']:
+            if p['adapter'] == 'codex':
+                p['billing_mode'] = 'subscription'
+        self.config['jev_provider'] = 'openrouter'
+        self.config['quota_pools'] = {'plan': dict(remaining_fraction=.5, reserve_fraction=.1)}
+        r.save(r.root() / 'routing.json', self.config)
+        args = argparse.Namespace(non_interactive=True, skip_live_test=True, billing=[], reset_defaults=True)
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, args)
+        new = r.load()
+        shipped = r.starter(core)
+        self.assertEqual([p['id'] for p in new['profiles']], [p['id'] for p in shipped['profiles']])
+        self.assertEqual(new['policy'], shipped['policy'])
+        self.assertEqual(new['jev_provider'], 'openrouter')
+        self.assertIn('plan', new['quota_pools'])
+        self.assertTrue(all(p['billing_mode'] == 'subscription' for p in new['profiles'] if p['adapter'] == 'codex'))
+        self.assertTrue(all(p['billing_mode'] == 'unknown' for p in new['profiles'] if p['adapter'] == 'claude'))
+        self.assertIn('gpt-custom', (r.root() / 'routing.json.bak').read_text())
+
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'
         r.save(r.root() / 'routing.json', self.config)

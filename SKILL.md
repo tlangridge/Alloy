@@ -154,6 +154,9 @@ upgrading models, run `alloy setup --refresh-defaults --non-interactive --skip-l
 This adds absent shipped models, backs up the config, and preserves existing
 profiles (including disabled models), effort choices, pins and billing. Check
 `alloy models advise` for pin conflicts; don't remove user pins automatically.
+To adopt a release's measured routing defaults wholesale (with the user's consent),
+run `alloy setup --reset-defaults --non-interactive --skip-live-test`; it backs up
+the file and keeps provider, billing and quota pools.
 Setup with `--skip-live-test` makes no inference call and needs no API key yet.
 Only run a paid live test when authorized. Defaults are versioned with releases;
 update the shared files as model evidence changes.

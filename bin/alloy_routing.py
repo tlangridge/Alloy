@@ -230,6 +230,25 @@ def refresh_defaults(core, config):
     return config
 
 
+def reset_defaults(core, old):
+    """Adopt the shipped profiles and policy wholesale (an explicit upgrade step).
+    Account choices survive: Jev provider/model, quota pools, usage options, and
+    each CLI's billing mode where all of its old profiles agreed. Model pins live
+    in the separate config file and are untouched."""
+    config = starter(core)
+    for field in ("jev_provider", "jev_model", "openrouter_model", "quota_pools", "usage"):
+        if field in old:
+            config[field] = copy.deepcopy(old[field])
+    for name in FAMILIES:
+        modes = {p["billing_mode"] for p in old.get("profiles", []) if p["adapter"] == name}
+        if len(modes) == 1:
+            mode = modes.pop()
+            for p in config["profiles"]:
+                if p["adapter"] == name:
+                    p["billing_mode"] = mode
+    return config
+
+
 def key(provider="typesafe"):
     settings = provider_settings(provider)
     value = os.environ.get(settings["key_env"])
@@ -699,7 +718,9 @@ def read_prompt(args):
 def setup(core, args):
     path = root() / "routing.json"
     config = load() if path.exists() else starter(core)
-    if getattr(args, "refresh_defaults", False):
+    if getattr(args, "reset_defaults", False):
+        config = reset_defaults(core, config)
+    elif getattr(args, "refresh_defaults", False):
         refresh_defaults(core, config)
     if getattr(args, "jev_provider", None):
         config["jev_provider"] = args.jev_provider
@@ -772,6 +793,8 @@ def register(sub, core):
     p.add_argument("--skip-live-test", action="store_true")
     p.add_argument("--keyless", action="store_true", help="configure host-selected workers without prompting for a Jev key or calling Jev")
     p.add_argument("--refresh-defaults", action="store_true", help="add missing shipped profiles without replacing user settings")
+    p.add_argument("--reset-defaults", action="store_true", help="replace profiles and policy with the shipped defaults "
+                   "(backs up routing.json; keeps Jev provider, billing modes and quota pools)")
     p.add_argument("--billing", action="append", default=[], metavar="CLI=MODE")
     p.set_defaults(func=lambda a: setup(core, a))
     p = sub.add_parser("models", help="inspect model profiles or refresh discovery")
