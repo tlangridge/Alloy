@@ -1,0 +1,38 @@
+{
+  "id": "review-subs-proration",
+  "type": "review",
+  "tier": "large",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: proration lines for mid-period plan changes",
+  "bug": true,
+  "claimed_change": "Add subs/proration.py for mid-period plan changes.\n- remaining_days(period, change_date): days from change_date (inclusive) to period.end (exclusive); ValueError if change_date is outside the period.\n- plan_change_lines(old_plan, new_plan, period, change_date) returns [credit for the unused part of old_plan (negative), charge for the remaining part of new_plan], both kind 'proration'; [] when the plan code is unchanged; ValueError if the plans' currencies differ.\n- Each amount is plan.monthly_price * remaining_days / period.days computed with exact Decimal arithmetic and rounded once, per line, following the house rule in money.py: half-up to cents (ties such as 1.665 -> 1.67).\n- apply_plan_change(invoice, old_plan, new_plan, period, change_date) adds the lines to the invoice (ValueError on currency mismatch) and returns their net amount.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "subs/proration.py",
+    "keywords": [
+      "localcontext",
+      "quantize",
+      "round_half_even",
+      "half_even",
+      "half-even",
+      "half even",
+      "banker",
+      "round_money",
+      "rounding mode",
+      "default rounding",
+      "default context",
+      "outside the with",
+      "outside the context",
+      "1.665",
+      "1.66",
+      "8.325",
+      "6.225",
+      "exact half",
+      "half-cent",
+      "half cent"
+    ],
+    "description": "_prorated sets ctx.rounding = ROUND_HALF_UP inside localcontext() but calls exact.quantize(CENT) after the with block has exited, so the quantize uses the default context rounding (ROUND_HALF_EVEN). Exact half-cent prorations round to even instead of up: Starter 9.99 with 5 of 30 days gives -1.66 instead of -1.67. Fix: quantize inside the context or pass rounding=ROUND_HALF_UP / use money.round_money."
+  }
+}

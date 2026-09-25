@@ -1,0 +1,14 @@
+{
+  "id": "consult-eventbus-staging-route",
+  "type": "consult",
+  "tier": "medium",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Which channel receives invoice.paid in the staging eventbus demo",
+  "prompt": "We're validating the staging routing overrides in `eventbus/config.py` (this repository) before tomorrow's release. When\n\n    python3 -m eventbus.demo --env staging\n\npublishes its single `invoice.paid` event, which channel, other than `audit`, records a delivery?\n\nAnswer with the channel name only.",
+  "match": "regex",
+  "answers": [
+    "privacy[- _]review"
+  ],
+  "verify": "python3 -m eventbus.demo --env staging | grep -v '^audit:' | head -n 1 | cut -d: -f1"
+}

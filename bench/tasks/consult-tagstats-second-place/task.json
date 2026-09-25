@@ -1,0 +1,14 @@
+{
+  "id": "consult-tagstats-second-place",
+  "type": "consult",
+  "tier": "small",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Which tag tagstats.py prints second for the sample export",
+  "prompt": "I'm about to wire `tagstats.py` (in this repository) into our weekly digest email and want to double-check its output first. When I run\n\n    python3 tagstats.py data/posts.txt --top 3\n\nwhich tag is printed on the SECOND line of output?\n\nAnswer with the tag as it is printed, including the leading `#` (e.g. `#example`).",
+  "match": "regex",
+  "answers": [
+    "(2\\.\\s*)?#?rust(\\s*\\(3\\))?"
+  ],
+  "verify": "python3 tagstats.py data/posts.txt --top 3 | sed -n 2p | cut -d' ' -f2"
+}

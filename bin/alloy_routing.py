@@ -132,6 +132,10 @@ def validate(config):
             raise RoutingError("Invalid billing_mode")
         if type(p.get("enabled", True)) is not bool or not number(p.get("cost_rank", 1)):
             raise RoutingError("Invalid enabled/cost_rank")
+        roles = p.get("tier_by_mode", {})
+        if not isinstance(roles, dict) or any(m not in ("consult", "review", "make", "debate") or t not in TIERS
+                                              for m, t in roles.items()):
+            raise RoutingError("tier_by_mode maps consult/review/make/debate to small|medium|large")
         if 'task_preferences' in p and (not isinstance(p['task_preferences'], list)
             or any(k not in evidence.KINDS for k in p['task_preferences'])):
             raise RoutingError("task_preferences must contain known task kinds")
@@ -155,6 +159,12 @@ def validate(config):
             raise RoutingError("Invalid policy " + field)
     if type(policy.get('use_model_evidence', True)) is not bool:
         raise RoutingError("use_model_evidence must be boolean")
+    if type(policy.get("quota_pacing", False)) is not bool:
+        raise RoutingError("quota_pacing must be boolean")
+    floors = policy.get("min_tier_by_mode", {})
+    if not isinstance(floors, dict) or any(m not in ("consult", "review", "make", "debate") or t not in TIERS
+                                           for m, t in floors.items()):
+        raise RoutingError("min_tier_by_mode maps consult/review/make/debate to small|medium|large")
     usage_options = config.get("usage", {})
     if not isinstance(usage_options, dict):
         raise RoutingError("usage configuration must be an object")
@@ -217,6 +227,25 @@ def refresh_defaults(core, config):
             suffix += 1
         config['profiles'].append(p)
         ids.add(p['id']); known.add(identity)
+    return config
+
+
+def reset_defaults(core, old):
+    """Adopt the shipped profiles and policy wholesale (an explicit upgrade step).
+    Account choices survive: Jev provider/model, quota pools, usage options, and
+    each CLI's billing mode where all of its old profiles agreed. Model pins live
+    in the separate config file and are untouched."""
+    config = starter(core)
+    for field in ("jev_provider", "jev_model", "openrouter_model", "quota_pools", "usage"):
+        if field in old:
+            config[field] = copy.deepcopy(old[field])
+    for name in FAMILIES:
+        modes = {p["billing_mode"] for p in old.get("profiles", []) if p["adapter"] == name}
+        if len(modes) == 1:
+            mode = modes.pop()
+            for p in config["profiles"]:
+                if p["adapter"] == name:
+                    p["billing_mode"] = mode
     return config
 
 
@@ -458,6 +487,12 @@ def retry_context(args, config):
     return dict(verified_quality_failures=count, failed_profiles=failed)
 
 
+def role_tier(profile, mode):
+    """A profile's capability tier for a mode; tier_by_mode lets e.g. a strong,
+    cheap reviewer serve large reviews while it only makes small changes."""
+    return profile.get("tier_by_mode", {}).get(mode, profile["tier"])
+
+
 def resolve(core, config, answers, available, args, usage_snapshot=None, model_fit=None):
     usage_snapshot = usage_snapshot or {}
     policy = config["policy"]
@@ -484,6 +519,12 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
     exclude = set(filter(None, getattr(args, "exclude_family", "").split(",")))
     host = getattr(args, "host_family", None)
     mode = getattr(args, "mode", "consult")
+    # A mode whose difficulty the task text hides (a consult reads the repo) can
+    # set a floor; alloy-bench: Jev rated repo questions "small" and lost 1/3 of them.
+    floor = policy.get("min_tier_by_mode", {}).get(mode)
+    if floor and TIERS.index(tier) < TIERS.index(floor):
+        tier = floor
+        reasons.append("mode %s requires at least %s" % (mode, floor))
     if mode == "make":
         if not host:
             raise RoutingError("Routed make requires --host-family for independent Maker selection")
@@ -499,7 +540,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             or family(other) == maker_family
             or available.get(name, {}).get("status") != "ready"
             or not available[name].get("compatible")
-            or TIERS.index(other["tier"]) < TIERS.index(tier)):
+            or TIERS.index(role_tier(other, "review")) < TIERS.index(tier)):
             return False
         model_pin = core.setting(MODEL_KEYS[name])
         if model_pin and model_pin != other["model"]:
@@ -529,7 +570,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
         elif allowed and name not in allowed: why = "outside explicit panelists"
         elif available.get(name, {}).get("status") != "ready" or not available[name].get("compatible"): why = "CLI unavailable or incompatible"
         elif family(p) in exclude: why = "family excluded"
-        elif TIERS.index(p["tier"]) < TIERS.index(tier): why = "below required tier"
+        elif TIERS.index(role_tier(p, mode)) < TIERS.index(tier): why = "below required tier"
         elif core.setting(MODEL_KEYS[name]) and core.setting(MODEL_KEYS[name]) != p["model"]: why = "model override differs; add a matching profile"
         if mode == "make" and not why:
             # Preserve an independent non-host Checker, as required by execute.
@@ -571,6 +612,13 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             p["effective_cost_rank"] = (p["cost_rank"] / max(live_remaining, .05)
                 if live_remaining is not None else p["cost_rank"] *
                 (1.25 if usage_snapshot.get("enabled") and p["billing_mode"] != "metered" else 1))
+            # Opt-in pacing: quota that will reset unused is cheap, quota running
+            # short is dear. The host's own CLI keeps the conservative rule above,
+            # because the host's interactive use draws on the same subscription.
+            pressure = usage.pacing(p, usage_snapshot) if policy.get("quota_pacing") else None
+            p["quota_pressure"] = pressure
+            if pressure is not None and FAMILIES.get(name) != host:
+                p["effective_cost_rank"] = p["cost_rank"] * max(pressure, .1)
             eligible.append(p)
     if not eligible:
         raise RoutingError("No eligible profile for %s work; check model overrides, billing, availability and family constraints. No task dispatched." % tier)
@@ -670,7 +718,9 @@ def read_prompt(args):
 def setup(core, args):
     path = root() / "routing.json"
     config = load() if path.exists() else starter(core)
-    if getattr(args, "refresh_defaults", False):
+    if getattr(args, "reset_defaults", False):
+        config = reset_defaults(core, config)
+    elif getattr(args, "refresh_defaults", False):
         refresh_defaults(core, config)
     if getattr(args, "jev_provider", None):
         config["jev_provider"] = args.jev_provider
@@ -743,6 +793,8 @@ def register(sub, core):
     p.add_argument("--skip-live-test", action="store_true")
     p.add_argument("--keyless", action="store_true", help="configure host-selected workers without prompting for a Jev key or calling Jev")
     p.add_argument("--refresh-defaults", action="store_true", help="add missing shipped profiles without replacing user settings")
+    p.add_argument("--reset-defaults", action="store_true", help="replace profiles and policy with the shipped defaults "
+                   "(backs up routing.json; keeps Jev provider, billing modes and quota pools)")
     p.add_argument("--billing", action="append", default=[], metavar="CLI=MODE")
     p.set_defaults(func=lambda a: setup(core, a))
     p = sub.add_parser("models", help="inspect model profiles or refresh discovery")

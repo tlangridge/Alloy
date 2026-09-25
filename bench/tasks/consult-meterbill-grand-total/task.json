@@ -1,0 +1,14 @@
+{
+  "id": "consult-meterbill-grand-total",
+  "type": "consult",
+  "tier": "large",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Grand total printed by the meterbill September run",
+  "prompt": "Finance is reconciling the September usage invoices produced by this repository against their own spreadsheet, which applies the rules in the README by hand. Before we change anything I want to know exactly what the tool currently outputs: when I run\n\n    python3 -m meterbill fixtures/september.json\n\nwhat value is shown on the final `Grand total:` line?\n\nAnswer with the number exactly as the program prints it.",
+  "match": "number",
+  "answers": [
+    "12237.8"
+  ],
+  "verify": "python3 -m meterbill fixtures/september.json | sed -n 's/^Grand total: //p'"
+}

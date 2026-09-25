@@ -1,0 +1,17 @@
+{
+  "id": "review-quotes-cache",
+  "type": "review",
+  "tier": "large",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: TTL caching of price quotes",
+  "bug": true,
+  "claimed_change": "Cache quotes in quotes/service.py: QuoteService.quote(customer, sku, quantity) uses quotes.cache.TTLCache with ttl=300 s (overridable via a ttl argument) and the service's injected clock.\n- A cached result may be returned only if it is identical to what a fresh computation would return for that same call at that time.\n- To keep the hit rate high, customers whose pricing-relevant attributes are identical must share cache entries (do not key on customer.id).\n- Entries expire after the TTL. Add QuoteService.invalidate_sku(sku), which drops every cached quote for that SKU and returns how many; call sites run it after a catalog price change.\n- Invalid quantities still raise ValueError and are never cached. Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "quotes/service.py",
+    "keywords": ["contract", "discount_for", "contract discount", "negotiated", "different customers", "other customer", "another customer", "customer-specific", "collide", "collision", "missing from the key", "not in the key", "not part of the key", "omits", "acme"],
+    "description": "_cache_key is (sku, quantity, segment, region, currency) but pricing.unit_price also applies contracts.discount_for(customer.contract, category). Customers with different contracts (or none) collide on one entry, so a contract customer can be served a list-price quote cached for another customer and vice versa. Fix: include customer.contract in the key."
+  }
+}

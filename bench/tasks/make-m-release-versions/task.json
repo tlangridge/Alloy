@@ -1,0 +1,133 @@
+{
+  "id": "make-m-release-versions",
+  "type": "make",
+  "tier": "medium",
+  "kind": "implementation",
+  "split": "dev",
+  "title": "Firmware tag ordering (epochs, channels, hotfix post-releases) and ~/^ constraints with pre-release gating",
+  "allow_paths": [
+    "fwver",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_release_rules.OrderingTests.test_phase_order_including_hotfix_after_final",
+      "spec": "Rule 2: dev < alpha < beta < rc < final < hotfix; hotfix sorts after the final release. Rule 4: all six operators."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_channel_numbers_compare_numerically",
+      "spec": "Rule 2: channel numbers compare numerically (rc.2 < rc.10)."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_missing_channel_number_is_zero",
+      "spec": "Rule 2: a channel written without a number has number 0 (1.0-rc == 1.0-rc.0)."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_hotfix_sorts_below_next_patch_prerelease",
+      "spec": "Rule 1: compare (major, minor, patch) before phase."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_epoch_dominates",
+      "spec": "Rule 1: epoch first (higher epoch is always newer); epoch defaults to 0 (grammar)."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_build_prefix_and_patch_do_not_affect_equality",
+      "spec": "Rule 3: build metadata and v prefix never affect ordering or equality; missing patch is 0; equal versions have equal hashes."
+    },
+    {
+      "test": "test_release_rules.OrderingTests.test_comparison_with_non_version",
+      "spec": "Rule 4: comparing with a non-Version returns NotImplemented (== is False, ordering raises TypeError)."
+    },
+    {
+      "test": "test_release_rules.SortTests.test_sort_versions_returns_original_strings_stably",
+      "spec": "Rule 11: new list of the tag strings exactly as given, ascending; equal versions keep input order."
+    },
+    {
+      "test": "test_release_rules.SortTests.test_sort_versions_rejects_invalid",
+      "spec": "Rule 11: an invalid tag raises fwver.InvalidVersion."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_bare_version_means_equality",
+      "spec": "Rule 5: no operator means ==."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_equality_ignores_build_and_prefix",
+      "spec": "Rule 6: comparison clauses use the ordering, so ==1.2 matches 1.2.0+b3; satisfies accepts a Version."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_not_equal_and_conjunction",
+      "spec": "Rule 5: a version satisfies a spec only if it satisfies every clause; != operator."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_whitespace_is_ignored",
+      "spec": "Rule 5: whitespace around clauses and between operator and version is ignored."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_hotfix_against_comparison_clauses",
+      "spec": "Rule 6: <=1.2.0 does not match 1.2.0-hotfix.1; rule 9: hotfix versions match normally."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_invalid_specs",
+      "spec": "Rule 5: empty spec, empty clause, unknown operator or invalid tag in a clause raises InvalidConstraint (a ValueError subclass)."
+    },
+    {
+      "test": "test_release_rules.ClauseTests.test_invalid_version_argument",
+      "spec": "API: a bad tag string passed as version raises fwver.InvalidVersion."
+    },
+    {
+      "test": "test_release_rules.TildeCaretTests.test_tilde_two_and_three_components",
+      "spec": "Rule 7: ~1.4 and ~1.4.0 mean >=1.4.0,<1.5.0; ~1.4.2 means >=1.4.2,<1.5.0."
+    },
+    {
+      "test": "test_release_rules.TildeCaretTests.test_caret_major_nonzero",
+      "spec": "Rule 8: ^V is >=V and < (major+1).0.0 when major > 0."
+    },
+    {
+      "test": "test_release_rules.TildeCaretTests.test_caret_major_zero",
+      "spec": "Rule 8: 0.(minor+1).0 when major == 0; no special case for 0.0.x (^0.0.3 means >=0.0.3,<0.1.0)."
+    },
+    {
+      "test": "test_release_rules.TildeCaretTests.test_bounds_keep_the_epoch",
+      "spec": "Rules 7/8: upper bound has the same epoch as V; rule 1 epoch dominates."
+    },
+    {
+      "test": "test_release_rules.PrereleaseTests.test_prereleases_excluded_by_default",
+      "spec": "Rule 9: pre-releases never match unless a clause names a pre-release of the same release (^1.4.0 does not match 2.0.0-rc.1; >=1.0 does not match 1.5.0-rc.1)."
+    },
+    {
+      "test": "test_release_rules.PrereleaseTests.test_prerelease_allowed_when_clause_names_same_release",
+      "spec": "Rule 9: >=1.5.0-beta matches 1.5.0-rc.1 and not 1.6.0-alpha."
+    },
+    {
+      "test": "test_release_rules.PrereleaseTests.test_prerelease_match_requires_same_epoch",
+      "spec": "Rule 9: the clause pre-release must have the same epoch, major, minor and patch."
+    },
+    {
+      "test": "test_release_rules.PrereleaseTests.test_prerelease_on_upper_clause_counts",
+      "spec": "Rule 9: at least one clause's tag (any clause) is a pre-release with the same release."
+    },
+    {
+      "test": "test_release_rules.PrereleaseTests.test_hotfix_is_not_a_prerelease",
+      "spec": "Rule 9: hotfix versions are not pre-releases and match normally."
+    },
+    {
+      "test": "test_release_rules.MaxSatisfyingTests.test_returns_highest_original_string",
+      "spec": "Rule 10: returns the tag string exactly as given of the highest satisfying version; invalid tags ignored."
+    },
+    {
+      "test": "test_release_rules.MaxSatisfyingTests.test_tie_goes_to_first_in_input",
+      "spec": "Rule 10: when several satisfying tags are equal versions, the first in tags wins."
+    },
+    {
+      "test": "test_release_rules.MaxSatisfyingTests.test_none_when_nothing_matches_and_invalid_tags_ignored",
+      "spec": "Rule 10: ignores invalid tags; returns None if none satisfies."
+    },
+    {
+      "test": "test_release_rules.MaxSatisfyingTests.test_invalid_spec_raises_even_for_empty_list",
+      "spec": "Rule 10: an invalid spec raises InvalidConstraint even for an empty tags."
+    }
+  ]
+}

@@ -405,6 +405,19 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("--prompt-file", cmd)           # prompt from a real file
         self.assertNotIn("--disable-web-search", cmd)  # web on by default
 
+    def test_grok_panel_offers_only_read_only_tools(self):
+        # A tool needing approval cancels grok's whole headless turn.
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        args = by_name(m, "grok")["command"]
+        self.assertEqual(args[args.index("--tools") + 1], "read_file,list_dir,grep,glob,web_search,web_fetch")
+        self.assertIn("WebFetch", args)
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
+                         env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x", "ALLOY_WEB": "0"})
+        args = by_name(m, "grok")["command"]
+        self.assertEqual(args[args.index("--tools") + 1], "read_file,list_dir,grep,glob")
+        self.assertNotIn("WebFetch", args)
+
     def test_grok_web_can_be_disabled(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "grok"],
                          env_extra={"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x",
@@ -439,12 +452,86 @@ class AlloyTests(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", cmd)
         self.assertNotIn("bypassPermissions", cmd)
 
+    def test_claude_lean_context_by_default(self):
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"])
+        cmd = " ".join(by_name(m, "claude")["command"])
+        self.assertIn("--strict-mcp-config", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertIn("--setting-sources project,local", cmd)  # project instructions still load
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"], env_extra={"ALLOY_CLAUDE_LEAN": "0"})
+        cmd = " ".join(by_name(m, "claude")["command"])
+        self.assertNotIn("--strict-mcp-config", cmd)
+        self.assertNotIn("--setting-sources", cmd)
+
     def test_claude_model_override(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"],
                          env_extra={"ALLOY_BIN_CLAUDE": MOCK, "ANTHROPIC_API_KEY": "x",
                                     "ALLOY_CLAUDE_MODEL": "opus"})
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertIn("--model opus", cmd)
+
+    # -- token usage capture (opt-in) ----------------------------------------- #
+    def _usage_panel(self, name, env):
+        env = dict(env, ALLOY_CAPTURE_USAGE="1")
+        _proc, m = panel(self.tmp, extra_args=["--panelists", name], env_extra=env)
+        p = by_name(m, name)
+        self.assertEqual(p["status"], "ok")
+        with open(p["result_path"]) as f:
+            answer = f.read()
+        self.assertTrue(answer.startswith("MOCK "), answer)  # text, not raw JSON
+        return p, " ".join(p["command"])
+
+    def test_usage_capture_off_by_default(self):
+        _proc, m = panel(self.tmp)
+        for name in ("codex", "claude"):
+            p = by_name(m, name)
+            self.assertNotIn("usage", p)
+            self.assertNotIn("--json", p["command"])
+            self.assertNotIn("json", " ".join(p["command"]))
+
+    def test_usage_capture_codex(self):
+        p, cmd = self._usage_panel("codex", {})
+        self.assertIn("--json", p["command"])
+        self.assertIn("-s read-only", cmd)  # permissions unchanged
+        self.assertEqual(p["usage"], {"input_tokens": 600, "cache_read_tokens": 400,
+            "cache_write_tokens": 0, "output_tokens": 50, "reasoning_tokens": 20,
+            "reported_cost_usd": None, "turns": 1, "source": "codex-jsonl"})
+
+    def test_usage_capture_claude(self):
+        p, cmd = self._usage_panel("claude", {})
+        self.assertIn("--output-format json", cmd)
+        self.assertNotIn("--output-format text", cmd)
+        self.assertIn("--permission-mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 5, "cache_read_tokens": 2000,
+            "cache_write_tokens": 3000, "output_tokens": 60, "reasoning_tokens": 25,
+            "reported_cost_usd": 0.05, "turns": 4, "source": "claude-json"})
+
+    def test_usage_capture_grok(self):
+        p, cmd = self._usage_panel("grok", {"ALLOY_BIN_GROK": MOCK, "XAI_API_KEY": "x"})
+        self.assertIn("--output-format json", cmd)
+        self.assertIn("--permission-mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 900, "cache_read_tokens": 100,
+            "cache_write_tokens": 0, "output_tokens": 30, "reasoning_tokens": 10,
+            "reported_cost_usd": 0.0123, "turns": 2, "source": "grok-json"})
+
+    def test_usage_capture_antigravity(self):
+        p, cmd = self._usage_panel("antigravity", self._agy_env())
+        self.assertIn("--output-format json", cmd)
+        self.assertIn("--mode plan", cmd)
+        self.assertEqual(p["usage"], {"input_tokens": 500, "cache_read_tokens": 300,
+            "cache_write_tokens": 0, "output_tokens": 40, "reasoning_tokens": 15,
+            "reported_cost_usd": None, "turns": 3, "source": "agy-json"})
+
+    def test_usage_capture_tolerates_plain_output(self):
+        # A CLI that ignores the JSON request still yields its plain answer.
+        _proc, m = panel(self.tmp, env_extra={"ALLOY_CAPTURE_USAGE": "1",
+                                              "MOCK_IGNORE_JSON": "1"})
+        for name in ("codex", "claude"):
+            p = by_name(m, name)
+            self.assertEqual(p["status"], "ok")
+            self.assertIsNone(p["usage"])
+            with open(p["result_path"]) as f:
+                self.assertTrue(f.read().startswith("MOCK "))
 
     # -- agy / antigravity: read-only is gated on the installed CLI version ---- #
     def _agy_env(self, **extra):
@@ -523,6 +610,11 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("write_file", s["permissions"]["deny"])
         self.assertIn("command", s["permissions"]["deny"])
         self.assertNotIn("write_file", s["permissions"]["allow"])
+        # agy >= 1.2 grammar: bare names are ignored there, so the same posture
+        # is also expressed as action(target) grants.
+        self.assertIn("command(*)", s["permissions"]["deny"])
+        self.assertIn("write_file(*)", s["permissions"]["deny"])
+        self.assertFalse(any("(" in a for a in s["permissions"]["allow"]))
         self.assertFalse(s["allowNonWorkspaceAccess"])
         # Containment invariant the macOS keychain config leans on: the agy
         # HOME itself (where the generated com.apple.security.plist lives) is
@@ -554,6 +646,7 @@ class AlloyTests(unittest.TestCase):
                           env_extra=self._agy_env(ALLOY_WEB="0"))
         deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
         self.assertIn("search_web", deny)
+        self.assertIn("read_url(*)", deny)
 
     def test_antigravity_model_override(self):
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],

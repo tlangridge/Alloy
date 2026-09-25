@@ -1,0 +1,132 @@
+{
+  "id": "make-s-argv-bundling",
+  "type": "make",
+  "tier": "small",
+  "kind": "implementation",
+  "split": "holdout",
+  "title": "Tiny argv parser: --name=value, short-option bundles with attached values, and -- end-of-options",
+  "allow_paths": [
+    "bakctl",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_args_rules.LongEqualsTests.test_value_after_equals",
+      "spec": "Rule 1: a long option may be written --name=VALUE."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_empty_value",
+      "spec": "Rule 1: the value may be empty (--output= sets \"\")."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_value_split_on_first_equals_only",
+      "spec": "Rule 1: the value is everything after the first = and may contain further = (--output=a=b sets \"a=b\")."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_value_may_start_with_dash",
+      "spec": "Rule 1: the value is everything after the first = (verbatim)."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_option_without_short_name",
+      "spec": "Rule 1 applies to every long value option, including ones without a short name."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_flag_with_value_rejected",
+      "spec": "Rule 1: --flag=anything (including --flag=) raises UsageError."
+    },
+    {
+      "test": "test_args_rules.LongEqualsTests.test_unknown_name_with_value_rejected",
+      "spec": "Rule 1: the name is the text between -- and the first =; if unknown, UsageError."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_flags_bundle",
+      "spec": "Rule 2: -vn is equivalent to -v -n."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_attached_value",
+      "spec": "Rule 2: -oout.tar sets output to \"out.tar\"."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_flags_then_attached_value",
+      "spec": "Rule 2: -voout.tar sets verbose and output=\"out.tar\"."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_rest_of_bundle_is_value_not_flags",
+      "spec": "Rule 2: the rest of the bundle after a value option is its value (-ov sets output=\"v\", does not set verbose)."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_value_option_last_takes_next_argument",
+      "spec": "Rule 2: if the value letter is the last character, the next argument is its value (-vo out.tar)."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_next_argument_taken_even_if_dashed",
+      "spec": "Rule 2 (next argument is its value) + preserved behavior: the next argument is taken even if it begins with -."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_missing_value_at_end_rejected",
+      "spec": "Rule 2: if there is no next argument, UsageError."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_unknown_letter_rejected",
+      "spec": "Rule 2: any character processed as an option that is not a registered short option (-vz, -v-) raises UsageError."
+    },
+    {
+      "test": "test_args_rules.BundleTests.test_unknown_letter_after_value_option_is_value",
+      "spec": "Rule 2: the rest of the bundle after a value-taking letter is its value, not options."
+    },
+    {
+      "test": "test_args_rules.DoubleDashTests.test_everything_after_is_positional",
+      "spec": "Rule 3: -- is dropped and every following argument is a positional verbatim."
+    },
+    {
+      "test": "test_args_rules.DoubleDashTests.test_second_double_dash_is_positional",
+      "spec": "Rule 3: only the first -- is special; a later -- is a positional."
+    },
+    {
+      "test": "test_args_rules.DoubleDashTests.test_double_dash_alone",
+      "spec": "Rule 3: -- itself is dropped."
+    },
+    {
+      "test": "test_args_rules.DoubleDashTests.test_double_dash_as_option_value",
+      "spec": "Rule 3: an argument consumed as an option value is not an end-of-options marker (--output -- -v)."
+    },
+    {
+      "test": "test_args_rules.ConsistencyTests.test_repeat_across_spellings",
+      "spec": "Rule 4: repeatable options collect values from every spelling in command-line order."
+    },
+    {
+      "test": "test_args_rules.ConsistencyTests.test_last_wins_across_spellings",
+      "spec": "Rule 4: for a non-repeatable option the last occurrence wins whatever its spelling."
+    },
+    {
+      "test": "test_args_rules.ConsistencyTests.test_fresh_defaults_each_parse",
+      "spec": "Current behavior (preserved): every parse call starts from fresh defaults."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_existing_spellings",
+      "spec": "Current behavior (preserved): --name VALUE, -s VALUE, flags, interleaved positionals."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_next_argument_value_may_start_with_dash",
+      "spec": "Current behavior (preserved): --output -v sets output to \"-v\"."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_lone_dash_is_positional",
+      "spec": "Current behavior (preserved): a lone - is a positional argument."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_missing_value_rejected",
+      "spec": "Current behavior (preserved): a value option at the very end of argv raises UsageError."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_unknown_options_rejected",
+      "spec": "Current behavior (preserved): unknown options raise UsageError."
+    },
+    {
+      "test": "test_args_rules.PreservedBehaviorTests.test_defaults",
+      "spec": "Current behavior (preserved): flags default False, repeatable default [], value options default to their default."
+    }
+  ]
+}

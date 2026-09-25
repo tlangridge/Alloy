@@ -193,6 +193,30 @@ Optional `routing.json` policy fields:
 {"use_model_evidence": true, "task_fit_cost_slack": 0.25, "kind_confidence_floor": 0.65}
 ```
 
+`quota_pacing` (default `false`) prices subscription capacity by pace instead of
+by remaining fraction alone: pressure = (share of the window still to run) /
+(share of quota left), worst window wins. Capacity that will reset unused
+becomes cheap (a Codex window with 20% left and 9% of the week to run scores
+0.47 instead of 5.0); a window running short becomes dear. The host's own CLI
+keeps the conservative remaining-fraction rule, because the host session draws
+on the same subscription. Reserves still exclude a pool outright. Pacing
+assumes steady use; enable it if your own usage is not front-loaded.
+
+A profile's `tier` is its capability for every mode unless `tier_by_mode`
+overrides it for one mode. The starter Luna and Gemini Flash Low profiles are
+small-tier Makers with `{"review": "large"}`: on alloy-bench they found seeded
+bugs as reliably as large models (Luna 5/6, Flash Low 6/6) at 1–5% of the
+cost, while as Makers they fell behind on medium and large changes.
+The starter `gpt-6-sol` profile ships disabled: Codex with ChatGPT-account
+sign-in rejects that model. Enable it (`alloy models enable --id
+codex-large-gpt-6-sol`) only with API-key billing.
+
+`min_tier_by_mode` sets a minimum tier per mode. The shipped default is
+`{"consult": "medium"}`: a panel question's difficulty lives in the repository,
+which the classifier never sees. On alloy-bench, Jev rated such questions "small"
+and the router's cheapest model answered a third of them wrongly; the floor
+raised routed consult accuracy from 0.67 to 0.83 at lower cost per correct answer.
+
 Set `use_model_evidence` to false for cost-only ranking. Exact model/effort matching
 and catalog expiry prevent old research from silently applying to new models.
 Existing profile tiers stay authoritative; `models advise` suggests adjustments.
@@ -260,7 +284,11 @@ For existing installations, run:
 alloy setup --refresh-defaults --non-interactive --skip-live-test
 ```
 
-This backs up the private config and adds missing adapter/model pairs. Existing
+This backs up the private config and adds missing adapter/model pairs.
+To adopt a release's measured profiles and policy wholesale instead, run
+`alloy setup --reset-defaults --non-interactive --skip-live-test`: it backs up
+`routing.json`, then rebuilds profiles and policy from the shipped defaults while
+keeping the Jev provider and model, billing modes and quota pools. Existing
 profiles, disabled models, effort settings, pins, provider selection and policy
 remain unchanged. New profiles inherit subscription billing only when that CLI's
 existing profiles all agree on it; metered or mixed billing requires explicit
@@ -270,7 +298,10 @@ command is idempotent. `models advise` reports any model-pin conflicts afterward
 
 ## Keyless host routing
 
-Jev is an optional acceleration layer. `alloy setup --keyless` skips both the
+Jev is optional but preferred when its configured API key is available and
+routing is authorized. Use host routing when no key is configured, Jev is
+unavailable, or the user explicitly requests keyless mode.
+`alloy setup --keyless` skips both the
 credential prompt and synthetic inference test, even without `--skip-live-test`.
 It preserves existing credentials and provider selection. Add `--non-interactive`
 for unattended setup; explicit `--billing` settings are still accepted.

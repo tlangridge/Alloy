@@ -1,0 +1,14 @@
+{
+  "id": "consult-notifier-add-channel",
+  "type": "consult",
+  "tier": "small",
+  "kind": "architecture",
+  "split": "dev",
+  "title": "Which existing file to edit to add a notifier channel",
+  "prompt": "We want to add a Microsoft Teams channel to the notifier CLI in this repository. I'll create a new module `notifier/channels/teams.py` containing a `TeamsChannel` subclass of `notifier.channels.base.Channel` that implements `deliver()`.\n\nFollowing the codebase's existing design (no special-casing in the CLI), which ONE existing file must also be edited so that `python3 -m notifier send --channel teams --to ops \"hello\"` is accepted by the argument parser and dispatched to `TeamsChannel`?\n\nAnswer with the repository-relative path of that file.",
+  "match": "regex",
+  "answers": [
+    "(\\./)?(notifier/)?registry\\.py"
+  ],
+  "verify": "python3 - 2>/dev/null <<'EOF'\nimport io\nfrom notifier import cli, registry\nfrom notifier.channels.base import Channel\n\nclass TeamsChannel(Channel):\n    name = 'teams'\n    def deliver(self, recipient, message):\n        return 'teams %s: %s' % (recipient, message)\n\nargv = ['send', '--channel', 'teams', '--to', 'ops', 'hello']\ntry:\n    cli.main(argv, out=io.StringIO())\n    raise SystemExit('teams unexpectedly accepted before registering')\nexcept SystemExit as exc:\n    assert exc.code == 2, exc.code\nregistry._CHANNELS['teams'] = TeamsChannel   # the one-line edit to notifier/registry.py\nout = io.StringIO()\nassert cli.main(argv, out=out) == 0\nassert out.getvalue().strip() == 'teams ops: hello', out.getvalue()\nprint('notifier/registry.py')\nEOF"
+}

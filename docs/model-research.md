@@ -1,4 +1,22 @@
-# Model evidence and routing — refreshed 2026-09-22
+# Model evidence and routing — refreshed 2026-09-22; measured 2026-09-25
+
+## Measured on alloy-bench (2026-09-25)
+
+Unlike the vendor evidence below, these are local measurements of Alloy's own
+roles (execute Maker, execute Checker, read-only consult) on 48 original tasks
+with hidden tests, through each CLI's real Alloy invocation. Small samples (4–12
+tasks per cell): use them to rank, not as precise rates. Full tables: `bench/RESULTS.md`.
+
+- **Makers:** gpt-5.6-sol solved every coding task (24/24 across splits) at ~$0.5/task
+  list price; Gemini 3.8 Flash High 11/12 dev and 12/12 holdout at ~$0.3–0.4; Luna
+  10/12 at ~$0.02; Flash Low perfect on small tasks but slow and costly on large ones;
+  Grok 4.7 reasons heavily at default effort (20-minute timeouts on 7/8 harder tasks).
+- **Checkers:** Luna (5/6, 5/6) and Gemini Flash Low (6/6, 5/6) found seeded bugs as
+  reliably as large models at 1–5% of their cost; the starter profiles review at
+  every tier (`tier_by_mode`).
+- **Consult:** Gemini 3.1 Pro 6/6; routed consults are floored at medium tier because
+  the classifier cannot see the repository a question is about.
+- **Availability:** Codex with ChatGPT sign-in rejects gpt-6-sol; the profile ships disabled.
 
 ## What the evidence supports
 

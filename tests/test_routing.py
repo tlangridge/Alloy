@@ -48,6 +48,8 @@ class RouterTests(unittest.TestCase):
             if k.startswith('ALLOY_') and k not in ('ALLOY_ROUTING_HOME', 'ALLOY_CONFIG', 'ALLOY_USAGE'):
                 os.environ.pop(k)
         self.config = r.starter(core)
+        # Generic tier tests use consult mode; the shipped consult floor has its own test.
+        self.config['policy'].pop('min_tier_by_mode', None)
         r.save(r.root() / 'routing.json', self.config)
         self.available = {n: dict(status='ready', compatible=True, version='test') for n in r.FAMILIES}
         r.save(r.root() / 'models-cache.json', dict(refreshed_at=r.time.time(), adapters=self.available))
@@ -94,6 +96,11 @@ class RouterTests(unittest.TestCase):
                   'gemini-3.8-flash-low', 'gemini-3.8-flash-medium',
                   'gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'gemini-3.1-pro-high'}
         self.assertTrue(wanted <= {p['model'] for p in self.config['profiles']})
+        # gpt-6-sol ships disabled (ChatGPT-account Codex rejects it) but routes once enabled.
+        sol = next(p for p in self.config['profiles'] if p['model'] == 'gpt-6-sol')
+        self.assertFalse(sol['enabled'])
+        sol['enabled'] = True
+        r.save(r.root() / 'routing.json', self.config)
         for model in wanted:
             p = next(p for p in self.config['profiles'] if p['model'] == model)
             self.args.profile = p['id']
@@ -586,6 +593,90 @@ class RouterTests(unittest.TestCase):
             answers = core.execution.host_assessment(argparse.Namespace(**assessment))
             with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
                 r.resolve(core, self.config, answers, self.available, self.args, {})
+
+    def test_min_tier_by_mode_floors_only_that_mode(self):
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='small', task_kind='research'))
+        self.config['policy']['min_tier_by_mode'] = {'consult': 'medium'}
+        self.args.mode = 'consult'
+        d = r.resolve(core, self.config, answers, self.available, self.args, {})
+        self.assertEqual(d['required_tier'], 'medium')
+        self.assertIn('mode consult requires at least medium', d['reason'])
+        self.assertEqual(r.starter(core)['policy']['min_tier_by_mode'], {'consult': 'medium'})
+        self.args.mode = 'review'
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['required_tier'], 'small')
+        for bad in ({'consult': 'huge'}, {'chat': 'large'}, ['consult']):
+            self.config['policy']['min_tier_by_mode'] = bad
+            with self.assertRaises(r.RoutingError):
+                r.validate(self.config)
+
+    def live(self, **pools):
+        """A fresh usage snapshot: adapter -> (remaining fraction, share of a 7d window still to run)."""
+        now = r.time.time()
+        return dict(enabled=True, ttl_seconds=120, providers={
+            name: dict(status='fresh', observed_at=now, windows=[dict(
+                pool=name, window='7d', remaining_fraction=left, resets_at=now + share * 7 * 86400)])
+            for name, (left, share) in pools.items()})
+
+    def test_tier_by_mode_lets_a_small_maker_review_large_work(self):
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='large'))
+        for p in self.config['profiles']:
+            p['enabled'] = p['id'] in ('codex-small', 'codex-large')
+            p.pop('tier_by_mode', None)
+        self.args.mode = 'review'
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-large')
+        next(p for p in self.config['profiles'] if p['id'] == 'codex-small')['tier_by_mode'] = {'review': 'large'}
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-small')
+        self.args.mode = 'consult'  # other modes keep the base tier
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-large')
+        next(p for p in self.config['profiles'] if p['id'] == 'codex-small')['tier_by_mode'] = {'review': 'huge'}
+        with self.assertRaises(r.RoutingError):
+            r.validate(self.config)
+        shipped = {p['id']: p for p in r.starter(core)['profiles']}
+        self.assertEqual(shipped['codex-small']['tier_by_mode'], {'review': 'large'})
+        self.assertEqual(shipped['antigravity-small']['tier_by_mode'], {'review': 'large'})
+
+    def test_quota_pacing_is_opt_in_and_spares_the_host(self):
+        self.assertEqual(r.usage.window_seconds('5h'), 5 * 3600)
+        self.assertEqual(r.usage.window_seconds('weekly'), 7 * 86400)
+        self.assertIsNone(r.usage.window_seconds('someday'))
+        for p in self.config['profiles']:
+            p['enabled'] = p['id'] in ('codex-small', 'antigravity-small')
+            p['cost_rank'] = 1
+        # Codex: 30% left but resets in 5% of the window (surplus); agy: 60% left, 90% to run (deficit).
+        snap = self.live(codex=(.3, .05), antigravity=(.6, .9))
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='small'))
+        self.assertAlmostEqual(r.usage.pacing(dict(adapter='codex', model='x'), snap), .05 / .3, places=4)
+        choose = lambda: r.resolve(core, self.config, answers, self.available, self.args, snap)['profile']
+        self.assertEqual(choose(), 'antigravity-small')  # default: more headroom wins
+        self.config['policy']['quota_pacing'] = True
+        self.assertEqual(choose(), 'codex-small')        # pacing: use quota that will reset unused
+        self.args.host_family = 'openai'                 # ... but never discount the host's own CLI
+        self.assertEqual(choose(), 'antigravity-small')
+        self.config['policy']['quota_pacing'] = 'yes'
+        with self.assertRaises(r.RoutingError):
+            r.validate(self.config)
+
+    def test_reset_defaults_adopts_shipped_routing_and_keeps_account_choices(self):
+        self.config['profiles'][0]['model'] = 'gpt-custom'
+        self.config['profiles'].append(dict(self.config['profiles'][0], id='mine'))
+        for p in self.config['profiles']:
+            if p['adapter'] == 'codex':
+                p['billing_mode'] = 'subscription'
+        self.config['jev_provider'] = 'openrouter'
+        self.config['quota_pools'] = {'plan': dict(remaining_fraction=.5, reserve_fraction=.1)}
+        r.save(r.root() / 'routing.json', self.config)
+        args = argparse.Namespace(non_interactive=True, skip_live_test=True, billing=[], reset_defaults=True)
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, args)
+        new = r.load()
+        shipped = r.starter(core)
+        self.assertEqual([p['id'] for p in new['profiles']], [p['id'] for p in shipped['profiles']])
+        self.assertEqual(new['policy'], shipped['policy'])
+        self.assertEqual(new['jev_provider'], 'openrouter')
+        self.assertIn('plan', new['quota_pools'])
+        self.assertTrue(all(p['billing_mode'] == 'subscription' for p in new['profiles'] if p['adapter'] == 'codex'))
+        self.assertTrue(all(p['billing_mode'] == 'unknown' for p in new['profiles'] if p['adapter'] == 'claude'))
+        self.assertIn('gpt-custom', (r.root() / 'routing.json.bak').read_text())
 
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'

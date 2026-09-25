@@ -1,0 +1,96 @@
+{
+  "id": "make-m-ini-interpolation",
+  "type": "make",
+  "tier": "medium",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "INI loader: DEFAULT values memoised across sections and multi-line entries reporting their last line",
+  "allow_paths": [
+    "confkit",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_confkit_regressions.InheritedValueTests.test_reported_default_inheritance",
+      "spec": "Symptom 1 reproduction; rule 4: inherited [DEFAULT] values are interpolated in the context of the inheriting section."
+    },
+    {
+      "test": "test_confkit_regressions.InheritedValueTests.test_each_section_resolves_default_independently",
+      "spec": "Rule 4: for every section independently."
+    },
+    {
+      "test": "test_confkit_regressions.InheritedValueTests.test_chained_default_references",
+      "spec": "Rule 4 (chains of inherited values) + rule 3 lookup order."
+    },
+    {
+      "test": "test_confkit_regressions.InheritedValueTests.test_cross_section_reference_uses_target_context",
+      "spec": "Rule 4: including when it is reached through ${section:key}."
+    },
+    {
+      "test": "test_confkit_regressions.InheritedValueTests.test_own_keys_then_inherited_keys",
+      "spec": "Rule 1: sections() excludes [DEFAULT]; cfg[section] has own keys followed by inherited keys."
+    },
+    {
+      "test": "test_confkit_regressions.InterpolationRulesTests.test_dollar_escape_and_case_insensitive_keys",
+      "spec": "Rule 3: $$ is a literal $; rule 1: keys case-insensitive."
+    },
+    {
+      "test": "test_confkit_regressions.InterpolationRulesTests.test_section_names_are_case_sensitive",
+      "spec": "Rule 3: section names are case-sensitive; rule 6: undefined reference at the entry's line."
+    },
+    {
+      "test": "test_confkit_regressions.InterpolationRulesTests.test_undefined_section_and_key",
+      "spec": "Rule 3: ${section:key} section must exist; rule 6 lineno of the entry containing the reference."
+    },
+    {
+      "test": "test_confkit_regressions.InterpolationRulesTests.test_cycles",
+      "spec": "Rule 5: resolution order and cycles raise ConfigError; rule 6: lineno = start of the entry containing the offending reference."
+    },
+    {
+      "test": "test_confkit_regressions.ContinuationTests.test_joining_comments_and_blank_line",
+      "spec": "Rule 2: comment lines do not end a value, pieces joined with single spaces, inline comments need whitespace before #/;."
+    },
+    {
+      "test": "test_confkit_regressions.ContinuationTests.test_empty_first_line_value",
+      "spec": "Rule 2: indented lines continue the previous entry's value, joined with single spaces."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_reported_multiline_undefined_reference",
+      "spec": "Symptom 2 reproduction; rule 6: lineno is the first line of a multi-line value; str is 'line N: <message>'."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_bad_dollar_in_multiline_value",
+      "spec": "Rule 6: bad $ usage reported at the line where the entry starts."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_unterminated_reference_in_multiline_value",
+      "spec": "Rule 6: unterminated reference at the entry's first line (comment lines inside the value skipped, rule 2)."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_duplicate_key_spanning_lines",
+      "spec": "Rule 6: duplicate keys reported at the line where the second one starts."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_lines_after_multiline_value_unaffected",
+      "spec": "Rule 6: malformed lines and duplicate sections at their own line."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_structural_errors",
+      "spec": "Rule 6: keys outside a section, empty keys, continuation lines with no preceding entry (that line)."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_cycle_line_is_start_of_multiline_entry",
+      "spec": "Rule 6: cycles reported at the start line of the entry containing the offending reference."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_getint_reports_entry_start_line",
+      "spec": "Rule 6: getint on a non-integer reports the entry that defines the value (its first line)."
+    },
+    {
+      "test": "test_confkit_regressions.ErrorLineTests.test_getint_on_inherited_default_value",
+      "spec": "Rule 6: the defining entry may be in [DEFAULT]."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "review-cronlite-schedule",
+  "type": "review",
+  "tier": "large",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: local wall-clock schedules and catch-up policy",
+  "bug": false,
+  "claimed_change": "Add wall-clock schedules to cronlite/schedules.py: DailyAt(at, tz), WeeklyAt(at, weekdays, tz) (weekdays: non-empty collection of ints 0=Mon..6=Sun) and MonthlyAt(day, at, tz) (day 1-31; months shorter than day fire on their last day). at must be a naive datetime.time and tz a tzinfo such as cronlite.tz.EASTERN; invalid arguments raise ValueError (bools are not ints).\n- next_after(instant) returns the first fire time strictly after the aware instant (any zone; ValueError if naive) as an aware UTC datetime.\n- Fire times are local wall-clock times in tz: across DST changes the local time stays the same. A wall time that does not exist (spring-forward gap) fires at the instant given by the pre-transition offset (02:30 -> 03:30 EDT); a repeated wall time (fall-back) fires once, at its first occurrence, whatever fold the caller's time carries.\n- In cronlite/runner.py add due_times(schedule, last_run, now, catch_up='latest', limit=100) returning fire times in (last_run, now] in chronological order: 'latest' returns only the most recent one, 'all' every one but keeping only the latest limit. ValueError for an unknown policy, a non-positive-int limit or naive datetimes. Keep due_time() behaving as before. Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v"
+}

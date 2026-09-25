@@ -1,0 +1,217 @@
+{
+  "id": "make-l-tracker-paginate",
+  "type": "make",
+  "tier": "large",
+  "kind": "refactoring",
+  "split": "dev",
+  "title": "Issue tracker: filters, multi-key sort and keyset cursor pagination through handler/service/storage for two backends",
+  "allow_paths": [
+    "tracker",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_legacy_list_shape_and_order",
+      "spec": "Rule 11: without limit/cursor the response is exactly {\"items\": [...]} (no next_cursor), all matching items; rule 9 default order id; rule 18."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_existing_endpoints_unchanged",
+      "spec": "Rule 18: creation/validation, GET /issues/<id>, 404s unchanged."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_status_values_combine_with_or",
+      "spec": "Rule 4: status values OR; all = no filter; all with another value, empty or unknown values -> invalid_filter/status."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_labels_combine_with_and",
+      "spec": "Rule 5: an issue must carry every given label; empty label -> invalid_filter/label."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_assignee_filter",
+      "spec": "Rule 6: none = unassigned; otherwise exact case-sensitive match; empty -> invalid_filter/assignee."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_text_filter_casefolds",
+      "spec": "Rule 7: q.casefold() substring of title.casefold() (straße finds STRASSE, ÉMILE finds Émile); empty q applies no filter."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_filters_combine",
+      "spec": "Rules 4-7: all given filters must pass."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_sort_priority_with_implicit_id",
+      "spec": "Rule 8: priority ascending puts 1 first; id ascending appended as final key."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_sort_mixed_directions_and_updated",
+      "spec": "Rule 8: '-' prefix descending per key, created/updated map to created_at/updated_at, explicit id (any direction) suppresses the implicit one."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_sort_title_uses_casefold",
+      "spec": "Rule 8: title compares title.casefold() by code point; rule 17: SQLite NOCASE does not implement this."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_sort_validation",
+      "spec": "Rule 8: unknown key, empty entry or the same key twice -> invalid_sort/sort."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_limit_validation",
+      "spec": "Rule 10: decimal digits only and 1..100, else invalid_limit/limit."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_first_page_and_next_cursor_presence",
+      "spec": "Rules 12/13: paged mode returns items + next_cursor; next_cursor non-null iff more matching items exist after the last returned one."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_walk_reproduces_full_order",
+      "spec": "Rules 12-14: following next_cursor reproduces the full order for every sort without gaps, duplicates or empty trailing pages."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_walk_with_filters",
+      "spec": "Rules 4-8 and 14: pagination over filtered, multi-key sorted results."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_cursor_only_uses_default_page_size",
+      "spec": "Rule 12: page size is 25 when only cursor is given."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_limit_may_change_between_pages",
+      "spec": "Rule 15: limit may differ between pages; rule 14 keyset continuation."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_cursor_bound_to_filters_and_sort_status_all_is_no_status",
+      "spec": "Rule 15: different sort/status set/labels -> cursor_mismatch; status order/repetition and all vs no status do not matter; sort compared after rule 8."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_invalid_cursor_values",
+      "spec": "Rule 15: a value the server did not produce (garbage, empty) -> invalid_cursor/cursor."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_new_issues_do_not_duplicate_or_reappear",
+      "spec": "Rule 14: a new issue that sorts before the captured position is not returned and causes no duplicates (keyset, not offset)."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_new_issue_after_position_appears",
+      "spec": "Rule 14: issues created after the first page appear if they sort after the captured position."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_cursor_captures_values_of_last_item",
+      "spec": "Rule 14: the cursor captures the sort-key values; updating the item that produced it does not move the position; issues placed by current values."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_error_precedence",
+      "spec": "Rules 1-3: unknown_param first (alphabetically first name), then duplicate_param in the order assignee, q, sort, limit, cursor, then validation order status, label, assignee, q, sort, limit, cursor."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_export_default_order_is_legacy",
+      "spec": "Rule 9: export default order created then id; rule 16 filters apply."
+    },
+    {
+      "test": "test_hidden_tracker.MemoryBackendTests.test_export_filters_sort_and_rejected_params",
+      "spec": "Rules 1, 16: export applies filters/sort (casefold q), keeps the CSV format, rejects limit/cursor as unknown_param and validates sort/status."
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_legacy_list_shape_and_order",
+      "spec": "Rule 11: without limit/cursor the response is exactly {\"items\": [...]} (no next_cursor), all matching items; rule 9 default order id; rule 18. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_existing_endpoints_unchanged",
+      "spec": "Rule 18: creation/validation, GET /issues/<id>, 404s unchanged. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_status_values_combine_with_or",
+      "spec": "Rule 4: status values OR; all = no filter; all with another value, empty or unknown values -> invalid_filter/status. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_labels_combine_with_and",
+      "spec": "Rule 5: an issue must carry every given label; empty label -> invalid_filter/label. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_assignee_filter",
+      "spec": "Rule 6: none = unassigned; otherwise exact case-sensitive match; empty -> invalid_filter/assignee. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_text_filter_casefolds",
+      "spec": "Rule 7: q.casefold() substring of title.casefold() (straße finds STRASSE, ÉMILE finds Émile); empty q applies no filter. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_filters_combine",
+      "spec": "Rules 4-7: all given filters must pass. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_sort_priority_with_implicit_id",
+      "spec": "Rule 8: priority ascending puts 1 first; id ascending appended as final key. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_sort_mixed_directions_and_updated",
+      "spec": "Rule 8: '-' prefix descending per key, created/updated map to created_at/updated_at, explicit id (any direction) suppresses the implicit one. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_sort_title_uses_casefold",
+      "spec": "Rule 8: title compares title.casefold() by code point; rule 17: SQLite NOCASE does not implement this. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_sort_validation",
+      "spec": "Rule 8: unknown key, empty entry or the same key twice -> invalid_sort/sort. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_limit_validation",
+      "spec": "Rule 10: decimal digits only and 1..100, else invalid_limit/limit. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_first_page_and_next_cursor_presence",
+      "spec": "Rules 12/13: paged mode returns items + next_cursor; next_cursor non-null iff more matching items exist after the last returned one. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_walk_reproduces_full_order",
+      "spec": "Rules 12-14: following next_cursor reproduces the full order for every sort without gaps, duplicates or empty trailing pages. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_walk_with_filters",
+      "spec": "Rules 4-8 and 14: pagination over filtered, multi-key sorted results. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_cursor_only_uses_default_page_size",
+      "spec": "Rule 12: page size is 25 when only cursor is given. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_limit_may_change_between_pages",
+      "spec": "Rule 15: limit may differ between pages; rule 14 keyset continuation. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_cursor_bound_to_filters_and_sort_status_all_is_no_status",
+      "spec": "Rule 15: different sort/status set/labels -> cursor_mismatch; status order/repetition and all vs no status do not matter; sort compared after rule 8. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_invalid_cursor_values",
+      "spec": "Rule 15: a value the server did not produce (garbage, empty) -> invalid_cursor/cursor. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_new_issues_do_not_duplicate_or_reappear",
+      "spec": "Rule 14: a new issue that sorts before the captured position is not returned and causes no duplicates (keyset, not offset). (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_new_issue_after_position_appears",
+      "spec": "Rule 14: issues created after the first page appear if they sort after the captured position. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_cursor_captures_values_of_last_item",
+      "spec": "Rule 14: the cursor captures the sort-key values; updating the item that produced it does not move the position; issues placed by current values. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_error_precedence",
+      "spec": "Rules 1-3: unknown_param first (alphabetically first name), then duplicate_param in the order assignee, q, sort, limit, cursor, then validation order status, label, assignee, q, sort, limit, cursor. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_export_default_order_is_legacy",
+      "spec": "Rule 9: export default order created then id; rule 16 filters apply. (SQLite backend, rule 17)"
+    },
+    {
+      "test": "test_hidden_tracker.SqliteBackendTests.test_export_filters_sort_and_rejected_params",
+      "spec": "Rules 1, 16: export applies filters/sort (casefold q), keeps the CSV format, rejects limit/cursor as unknown_param and validates sort/status. (SQLite backend, rule 17)"
+    }
+  ]
+}

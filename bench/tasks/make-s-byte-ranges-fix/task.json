@@ -1,0 +1,104 @@
+{
+  "id": "make-s-byte-ranges-fix",
+  "type": "make",
+  "tier": "small",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Fix ByteRanges merging (multi-range spans, touching neighbours) and half-open membership",
+  "allow_paths": [
+    "fetchkit",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_ranges_contract.AddValidationTests.test_invalid_ranges_rejected",
+      "spec": "Rule 1: add raises ValueError if start < 0 or end < start."
+    },
+    {
+      "test": "test_ranges_contract.AddValidationTests.test_empty_range_is_noop",
+      "spec": "Rule 1: add(x, x) is a no-op."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_reported_case",
+      "spec": "Current behavior (bug report): ranges() [(0,45)], covered() 45, missing(50) [(45,50)]."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_span_many_ranges_from_before_first",
+      "spec": "Rule 2: a new range may overlap, bridge or contain any number of existing ranges; rule 3 covered()."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_span_many_ranges_stopping_in_gap",
+      "spec": "Rule 2: minimal, sorted, non-overlapping description after a range spanning several ranges."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_touching_following_range",
+      "spec": "Rule 2: [0,10) and [10,20) are merged whichever was added first (following range added first)."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_touching_previous_range",
+      "spec": "Rule 2: touching ranges are merged (previous range added first)."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_bridging_range_touching_both_sides",
+      "spec": "Rule 2: a new range may bridge existing ranges; touching ranges merge."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_touching_chain_added_backwards",
+      "spec": "Rule 2: no two ranges touch after any sequence of adds, in any order."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_new_range_ends_where_several_touch",
+      "spec": "Rule 2: touching ranges merge regardless of order."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_contained_range_is_absorbed",
+      "spec": "Rule 2: a range contained in existing ranges changes nothing; rule 3 covered()."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_same_start",
+      "spec": "Rule 2: overlapping ranges with the same start merge."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_gap_of_one_byte_is_kept",
+      "spec": "Rule 2: only overlapping or touching ranges merge (a 1-byte gap keeps them apart)."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_ranges_returns_tuples_sorted",
+      "spec": "Rule 2: list of (start, end) tuples sorted by start."
+    },
+    {
+      "test": "test_ranges_contract.MergeTests.test_randomized_against_model",
+      "spec": "Rules 2-4 checked against a set-of-bytes model (fixed seed)."
+    },
+    {
+      "test": "test_ranges_contract.ContainsTests.test_half_open_membership",
+      "spec": "Rule 4: offset in received iff start <= offset < end for some range."
+    },
+    {
+      "test": "test_ranges_contract.ContainsTests.test_empty",
+      "spec": "Rule 4: nothing is contained in an empty ByteRanges."
+    },
+    {
+      "test": "test_ranges_contract.MissingTests.test_gaps",
+      "spec": "Rule 5: sorted maximal gaps of [0, size)."
+    },
+    {
+      "test": "test_ranges_contract.MissingTests.test_nothing_received",
+      "spec": "Rule 5: with nothing received the gap is [0, size)."
+    },
+    {
+      "test": "test_ranges_contract.MissingTests.test_bytes_beyond_size_ignored",
+      "spec": "Rule 5: received bytes at or beyond size are ignored."
+    },
+    {
+      "test": "test_ranges_contract.MissingTests.test_after_out_of_order_touching_adds",
+      "spec": "Rules 2 and 5: missing/is_complete after out-of-order touching adds."
+    },
+    {
+      "test": "test_ranges_contract.MissingTests.test_is_complete_ignores_extra_bytes",
+      "spec": "Rule 5: is_complete(size) iff missing(size) is empty; bytes beyond size ignored."
+    }
+  ]
+}

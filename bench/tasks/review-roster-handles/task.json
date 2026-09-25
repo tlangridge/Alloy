@@ -1,0 +1,17 @@
+{
+  "id": "review-roster-handles",
+  "type": "review",
+  "tier": "small",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: Unicode-aware handle comparison in the roster registry",
+  "bug": true,
+  "claimed_change": "Make handle uniqueness Unicode-aware in roster/registry.py.\n- Add roster.registry.canonical(handle) returning unicodedata.normalize('NFKC', handle).casefold(), exported from the roster package.\n- Use canonical() as the comparison key everywhere HandleRegistry compares or stores handles (register, lookup, rename, release, and therefore mentions/__contains__), replacing str.lower().\n- Two handles collide exactly when their canonical forms are equal, so 'Straße'/'STRASSE' and fullwidth 'Ｊｏｅ'/'joe' are the same handle; register and rename raise HandleTaken on such collisions with another user.\n- handle_of still returns the spelling the user typed, and a user may rename to another spelling of their own handle.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "roster/registry.py",
+    "keywords": ["rename", "new_handle.lower", "current.lower", ".lower()", "lower()", "str.lower", "straße", "strasse", "fullwidth", "keyerror", "new_key"],
+    "description": "rename() was not converted: it still computes new_key = new_handle.lower() and deletes self._owners[current.lower()]. Renaming onto a casefold/NFKC variant of another user's handle is allowed (no HandleTaken), the renamed handle is stored under a non-canonical key so lookup/register no longer see it, and renaming a user whose handle's lower() differs from canonical() (e.g. fullwidth) raises KeyError."
+  }
+}

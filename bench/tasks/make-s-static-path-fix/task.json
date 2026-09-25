@@ -1,0 +1,84 @@
+{
+  "id": "make-s-static-path-fix",
+  "type": "make",
+  "tier": "small",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Fix document-root escape (string-prefix containment) and NUL bytes in a static file path resolver",
+  "allow_paths": [
+    "staticserve",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_paths_contract.FindingTests.test_sibling_with_same_prefix_rejected",
+      "spec": "Finding 1 + rule 3: /srv/www-private and /srv/wwwx are not below /srv/www (segment-wise comparison)."
+    },
+    {
+      "test": "test_paths_contract.FindingTests.test_nul_byte_rejected",
+      "spec": "Finding 2 + rule 5: a decoded path containing NUL raises PathTraversalError."
+    },
+    {
+      "test": "test_paths_contract.FindingTests.test_error_is_value_error",
+      "spec": "Desired behavior: PathTraversalError is the existing subclass of ValueError."
+    },
+    {
+      "test": "test_paths_contract.ContainmentTests.test_escapes_rejected",
+      "spec": "Rule 3: anything not root or below it raises PathTraversalError (rule 1: %2E%2E decodes to ..)."
+    },
+    {
+      "test": "test_paths_contract.ContainmentTests.test_dotdot_that_stays_inside_is_allowed",
+      "spec": "Rule 3: .. segments are fine as long as the resolved result stays inside (/docs/../index.html)."
+    },
+    {
+      "test": "test_paths_contract.ContainmentTests.test_resolving_to_root_itself",
+      "spec": "Rule 3: the result may be root itself; rule 6: root returned normalized; rule 2 leading slashes ignored."
+    },
+    {
+      "test": "test_paths_contract.ContainmentTests.test_names_containing_dots_are_ordinary",
+      "spec": "Rule 2: only . and .. segments are special; other names are ordinary."
+    },
+    {
+      "test": "test_paths_contract.DecodingTests.test_escapes_decoded",
+      "spec": "Rule 1: percent-escapes decoded as urllib.parse.unquote does (%20 -> space); rule 2 then interprets slashes."
+    },
+    {
+      "test": "test_paths_contract.DecodingTests.test_decoded_exactly_once",
+      "spec": "Rule 1: decoded exactly once; %252e becomes the literal %2e, an ordinary name."
+    },
+    {
+      "test": "test_paths_contract.NormalizationTests.test_repeated_slashes_and_dots",
+      "spec": "Rule 2: leading slashes ignored, repeated slashes collapse, . resolved; rule 6 normalized."
+    },
+    {
+      "test": "test_paths_contract.NormalizationTests.test_trailing_slash_removed",
+      "spec": "Rule 6: no trailing slash in the returned path."
+    },
+    {
+      "test": "test_paths_contract.RootFormTests.test_root_with_trailing_slash",
+      "spec": "Rule 4: /srv/www/ behaves exactly like /srv/www."
+    },
+    {
+      "test": "test_paths_contract.RootFormTests.test_filesystem_root",
+      "spec": "Rule 4: root may be /, in which case every request resolves inside it; rule 6 returns / for the root."
+    },
+    {
+      "test": "test_paths_contract.RootFormTests.test_filesystem_root_still_rejects_nul",
+      "spec": "Rule 5: NUL bytes are rejected regardless of root."
+    },
+    {
+      "test": "test_paths_contract.RootFormTests.test_nested_root",
+      "spec": "Rule 3: segment-wise containment for any root."
+    },
+    {
+      "test": "test_paths_contract.LexicalTests.test_symlink_inside_root_is_not_resolved",
+      "spec": "Rule 2: never consults the filesystem; a symlink inside the root is returned as the path inside the root."
+    },
+    {
+      "test": "test_paths_contract.LexicalTests.test_nonexistent_root_is_fine",
+      "spec": "Rule 2: must not check existence."
+    }
+  ]
+}

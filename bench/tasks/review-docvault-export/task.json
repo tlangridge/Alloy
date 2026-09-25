@@ -1,0 +1,17 @@
+{
+  "id": "review-docvault-export",
+  "type": "review",
+  "tier": "large",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: bulk export of documents as a zip archive",
+  "bug": true,
+  "claimed_change": "Add DocumentService.export(user, doc_ids=None, folder_id=None) -> bytes in docvault/service.py, plus bundle.make_zip for a deterministic archive (manifest.json first, then one <id>-<slug>.txt per document).\n- Pass exactly one of doc_ids / folder_id (ValueError otherwise; TypeError if doc_ids is a str). The user needs an export role (acl.can_export), else PermissionDenied.\n- doc_ids: documents in request order with duplicates dropped. Each id must pass the same checks as get_document: NotFound for missing ids or ids from another workspace, PermissionDenied for a document the user may not read. Archived documents may be selected explicitly.\n- folder_id: NotFound unless the folder belongs to the user's workspace; include the folder's non-archived documents the user can read, ordered by id, silently skipping the rest.\n- Record an 'export' audit event listing the exported ids. Refactor shared lookup code in the service as needed and add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "docvault/service.py",
+    "keywords": ["require_read", "can_read", "is_visible", "_load", "_selected", "read permission", "read access", "read check", "not readable", "unreadable", "cannot read", "can't read", "may not read", "shared_with", "idor", "same workspace", "any workspace member", "private document", "listing-level", "listing level"],
+    "description": "The explicit doc_ids path (_selected) only calls the new _load helper, which checks acl.is_visible (listing-level: same workspace) and never acl.require_read. Any exporter can export the body of any document in their workspace (e.g. another user's private, unshared document) even though get_document would raise PermissionDenied. Fix: call acl.require_read(user, doc, self._folder_of(doc)) for each selected document."
+  }
+}

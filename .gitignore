@@ -13,3 +13,5 @@
 alloy.config
 __pycache__/
 *.pyc
+bench/results/
+bench/results.tsv

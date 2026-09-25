@@ -1,0 +1,17 @@
+{
+  "id": "review-helpdesk-attachments",
+  "type": "review",
+  "tier": "small",
+  "kind": "review",
+  "split": "dev",
+  "title": "Review: attachment download read() for the helpdesk store",
+  "bug": true,
+  "claimed_change": "Add AttachmentStore.read(ticket_id, relpath) -> bytes to helpdesk/attachments.py for the download endpoint.\n- relpath comes from the client and may be any string; legacy attachments use names save() rejects, so do not validate it with _clean_relpath.\n- Resolve the path (following symlinks) relative to that ticket's directory (ticket_dir). If the resolved file is not inside that ticket's own directory, raise the new AttachmentAccessError (a subclass of AttachmentError). A customer of one ticket must never be able to read another ticket's files.\n- If it is inside but is not an existing regular file, raise AttachmentNotFound.\n- Export AttachmentAccessError from the helpdesk package and add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "helpdesk/attachments.py",
+    "keywords": ["startswith", "prefix", "os.sep", "commonpath", "separator", "sibling", "420", "421", "4200", "trailing slash", "is_relative_to", "relative_to", "other ticket", "another ticket", "different ticket", "neighbouring", "neighboring"],
+    "description": "read() checks containment with target.startswith(base) where base has no trailing separator, so ticket 42 can read files of any ticket whose id starts with 42 (e.g. '../420/invoice.pdf' resolves to tickets/420/... which starts with tickets/42). Fix: os.path.commonpath([base, target]) == base or startswith(base + os.sep)."
+  }
+}

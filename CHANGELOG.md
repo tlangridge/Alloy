@@ -3,6 +3,51 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.9.0] - 2026-09-25
+
+Measured with the new `bench/` autoresearch evaluator: 48 tasks with hidden tests,
+seeded-bug reviews and answer keys; every change kept only if quality held and
+cost fell; final routing validated on a held-out split (q 0.917, all gates pass).
+Details: `bench/RESULTS.md`.
+
+**Upgrading:** existing `routing.json` files keep their profiles and policy. To adopt
+the measured defaults, run `alloy setup --reset-defaults --non-interactive
+--skip-live-test` (backs up the file; keeps Jev provider, billing modes and quota
+pools). If you pinned `ALLOY_CODEX_MODEL=gpt-6-sol` with ChatGPT sign-in, that pin
+makes the Codex panelist fail: use `gpt-5.6-sol` or remove the pin. Any Codex pin
+also blocks the cheap Luna reviewer from routing.
+
+- Prefer Jev routing (`--route`) when a configured key is available; host routing is
+  the fallback or an explicit keyless choice.
+- `alloy setup --reset-defaults` adopts the shipped profiles and policy wholesale.
+
+- Fix managed execution on current CLIs: Antigravity (agy 1.2) Makers could not run
+  their test commands, and Grok Makers could not edit files; both failed every task.
+- Run `claude` panelists and workers with a lean context (no global MCP connectors,
+  skills or user settings; project instructions still load). Paired bench run:
+  cost −67%, wall time −24%, quality within noise. `ALLOY_CLAUDE_LEAN=0` opts out.
+- Accept a Checker verdict wrapped in prose or a code fence (Claude plan mode does
+  this); exactly one verdict is required and the packet receipt still applies.
+  Recovered 4 of 12 correct Claude reviews that previously failed closed.
+- Keep Grok panelists from cancelling their own answers: headless grok aborted the
+  whole turn (exit 0, half a sentence) whenever the model reached for a tool needing
+  approval. Read-only panels now get only read/search tools plus pre-approved page
+  fetches. Grok dev reviews and consults went from 1/12 to 11/12.
+- Routed consults require at least a medium-tier model (`policy.min_tier_by_mode`):
+  Jev cannot see the repository a question is about and under-rated such questions.
+  Existing configs keep their policy until they add the key.
+- Ship `gpt-6-sol` disabled: Codex with ChatGPT-account sign-in rejects it, so the
+  preferred large Codex profile failed every dispatch (and existing pins to it break
+  the Codex panelist). Checkers fall back to working profiles.
+- Per-mode capability tiers (`tier_by_mode`). Luna and Gemini Flash Low review at
+  every tier while staying small-tier Makers; replayed on dev tasks this cut overall
+  cost per solved task by a third at equal quality.
+- Opt-in `policy.quota_pacing`: price subscription capacity by reset time, so quota
+  that would expire unused is preferred; the host's own CLI is never discounted.
+- `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.
+- Add `bench/`: 48 tasks with hidden tests, seeded-bug reviews and answer keys;
+  production-path runners, list-price costing, quota floors and routing replay.
+
 ## [0.8.1] - 2026-09-22
 
 - Add keyless setup and host model-context inspection; the skill selects explicit workers without requiring Jev.

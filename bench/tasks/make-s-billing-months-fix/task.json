@@ -1,0 +1,96 @@
+{
+  "id": "make-s-billing-months-fix",
+  "type": "make",
+  "tier": "small",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Fix add_months year rollover crash and clamped-renewal drift in subscription billing",
+  "allow_paths": [
+    "billing",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_periods_contract.AddMonthsTests.test_spec_examples",
+      "spec": "Rule 1 examples: 2024-11-15 +1, 2024-12-15 +1, 2024-01-15 -1, 2024-12-05 +0, 2024-06-10 +18, 2024-05-20 -17."
+    },
+    {
+      "test": "test_periods_contract.AddMonthsTests.test_results_landing_in_december",
+      "spec": "Rule 1: year rolls over correctly in both directions (targets that are December)."
+    },
+    {
+      "test": "test_periods_contract.AddMonthsTests.test_zero_returns_same_day_every_month",
+      "spec": "Rule 1: add_months(day, 0) returns day."
+    },
+    {
+      "test": "test_periods_contract.AddMonthsTests.test_whole_years",
+      "spec": "Rule 1: positive/negative shifts, year rollover."
+    },
+    {
+      "test": "test_periods_contract.AddMonthsTests.test_matches_month_counting_model",
+      "spec": "Rule 1: shifting by calendar months for months in -40..40 from every start month."
+    },
+    {
+      "test": "test_periods_contract.ClampingTests.test_spec_examples",
+      "spec": "Rule 2 examples: 2024-03-31 -1 -> 2024-02-29; 2023-03-31 -1 -> 2023-02-28; 2024-02-29 +12 -> 2025-02-28."
+    },
+    {
+      "test": "test_periods_contract.ClampingTests.test_leap_year_rules",
+      "spec": "Rule 2 + Desired behavior: proleptic Gregorian leap years (4/100/400 rule)."
+    },
+    {
+      "test": "test_periods_contract.ClampingTests.test_thirty_day_months",
+      "spec": "Rule 2: result is the last day of a shorter target month."
+    },
+    {
+      "test": "test_periods_contract.RenewalsTests.test_incident_anchor_jan_31",
+      "spec": "INC-2304 + rule 3: anchor 2024-01-31 renews 02-29, 03-31, 04-30, 05-31, ..."
+    },
+    {
+      "test": "test_periods_contract.RenewalsTests.test_anchor_aug_31_across_year_end",
+      "spec": "Rule 3 (computed from the anchor) + rule 1 year rollover."
+    },
+    {
+      "test": "test_periods_contract.RenewalsTests.test_anchor_nov_15_crosses_december",
+      "spec": "INC-2291 + rule 5: renewals crossing December."
+    },
+    {
+      "test": "test_periods_contract.RenewalsTests.test_count_zero",
+      "spec": "Rule 5: count == 0 gives []."
+    },
+    {
+      "test": "test_periods_contract.RenewalsTests.test_each_renewal_is_computed_from_anchor",
+      "spec": "Rule 3: renewal k is add_months(anchor, k); rule 5 first count in order."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_incident",
+      "spec": "INC-2304: next_renewal(2024-01-31, 2024-02-29) == 2024-03-31."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_strictly_after",
+      "spec": "Rule 4: earliest renewal strictly later than after."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_crash_case",
+      "spec": "INC-2291 + rule 4: renewals landing in December."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_after_before_first_renewal",
+      "spec": "Rule 4: if after is earlier than the first renewal (including before the anchor) the result is add_months(anchor, 1)."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_after_late_in_month_past_short_renewal",
+      "spec": "Rules 3-4: renewals computed from the anchor, strictly after."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_far_future",
+      "spec": "Rules 3-4 for a distant after date."
+    },
+    {
+      "test": "test_periods_contract.NextRenewalTests.test_consistent_with_renewals",
+      "spec": "Rules 3-5: next_renewal returns the renewal dates defined in rule 3."
+    }
+  ]
+}

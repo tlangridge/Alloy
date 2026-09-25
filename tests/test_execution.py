@@ -145,6 +145,17 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
         verdict.update(revision=receipt['revision'], context_complete=False)
         with self.assertRaises(e.ExecutionError): e.review_json(json.dumps(verdict), receipt)
+        # A verdict wrapped in prose or a fence is accepted only with a valid receipt.
+        verdict.update(context_complete=True)
+        wrapped = 'ExitPlanMode is disabled, so here is the result:\n```json\n' + json.dumps(verdict) + '\n```\nDone.'
+        self.assertEqual(e.review_json(wrapped, receipt)['verdict'], 'pass')
+        with self.assertRaises(e.ExecutionError):
+            e.review_json(wrapped.replace(receipt['revision'], 'wrong'), receipt)
+        # Two different embedded verdicts, or none, fail closed.
+        other = dict(verdict, verdict='fail', findings=[dict(path='a', evidence='b', fix='c')])
+        with self.assertRaises(e.ExecutionError):
+            e.review_json('First ' + json.dumps(verdict) + ' then ' + json.dumps(other), receipt)
+        with self.assertRaises(e.ExecutionError): e.review_json('Looks good to me, pass.', receipt)
 
     def test_review_packet_contains_actual_code_and_gate_output(self):
         self.args.test += ['echo acceptance-evidence']
@@ -399,6 +410,12 @@ else:
             if name=='codex':self.assertIn('workspace-write',args)
             elif name in ('claude','grok'):self.assertIn('acceptEdits',args)
             else:self.assertIn('accept-edits',args)
+            if name=='grok':
+                # Headless grok needs explicit edit allow rules beyond acceptEdits.
+                allowed=[args[i+1] for i,a in enumerate(args) if a=='--allow']
+                self.assertEqual(set(allowed),{'Bash','Edit','Write','WebFetch'})
+                self.assertEqual(args.count('--tools'),1)
+                self.assertEqual(args[args.index('--tools')+1],'Read,Glob,Grep,Edit,Write,Bash')
 
     def test_real_subprocess_writes_worktree_and_records_boundary(self):
         binary = self.base / 'mock-cli'
@@ -610,6 +627,8 @@ else:
             env=ad.prepare_env(ctx)
         self.assertTrue(Path(env['HOME']).is_relative_to(self.base) if hasattr(Path,'is_relative_to') else str(env['HOME']).startswith(str(self.base)))
         self.assertIn('command',ad._settings()['permissions']['allow'])
+        self.assertIn('command(*)',ad._settings()['permissions']['allow'])  # agy >= 1.2 grammar
+        self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
 
 

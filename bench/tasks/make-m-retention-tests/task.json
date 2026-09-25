@@ -1,0 +1,67 @@
+{
+  "id": "make-m-retention-tests",
+  "type": "make",
+  "tier": "medium",
+  "kind": "testing",
+  "split": "dev",
+  "title": "Write a mutation-proof unittest suite for a grandfather-father-son backup retention planner",
+  "allow_paths": [
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 _hidden_tests/grade_tests.py",
+  "hidden_checks": [
+    {
+      "test": "grade_tests.py:original",
+      "spec": "How your tests are graded: every test must pass against the unmodified retention/policy.py (and at least one test must run)."
+    },
+    {
+      "test": "mutants/m01_future_not_skipped",
+      "spec": "Rule 2: a backup with taken_at > now is neither kept nor deleted; listed in skipped; takes part in no other rule."
+    },
+    {
+      "test": "mutants/m02_now_counts_as_future",
+      "spec": "Rule 2: a backup taken exactly at now is not in the future."
+    },
+    {
+      "test": "mutants/m03_pinned_fill_slots",
+      "spec": "Rule 4: pinned backups are invisible to rules 5-7 (never chosen for a slot; pinned-only days use no slot)."
+    },
+    {
+      "test": "mutants/m04_daily_calendar_window",
+      "spec": "Rule 5: the `daily` most recent distinct dates that have backups, not the last `daily` calendar days before now."
+    },
+    {
+      "test": "mutants/m05_week_uses_calendar_year",
+      "spec": "Rule 6: ISO weeks identified by ISO year and ISO week (2024-12-30 and 2025-01-02 are both 2025-W01)."
+    },
+    {
+      "test": "mutants/m06_monthly_keeps_oldest",
+      "spec": "Rules 7/8: keep the newest backup of each of the `monthly` most recent months."
+    },
+    {
+      "test": "mutants/m07_ties_smallest_id",
+      "spec": "Rule 8: ties on greatest taken_at go to the greatest id (rules 3 and 5-7)."
+    },
+    {
+      "test": "mutants/m08_max_age_inclusive",
+      "spec": "Rule 9: only age strictly greater than max_age_days is too old; exactly max_age_days old is not."
+    },
+    {
+      "test": "mutants/m09_max_age_deletes_pinned",
+      "spec": "Rule 9: backups kept by rule 4 (pinned) are never deleted for age."
+    },
+    {
+      "test": "mutants/m10_max_age_deletes_latest",
+      "spec": "Rule 9: backups kept by rule 3 (latest) are never deleted for age."
+    },
+    {
+      "test": "mutants/m11_delete_newest_first",
+      "spec": "Rule 11: delete is ordered oldest first (taken_at, then id, ascending)."
+    },
+    {
+      "test": "mutants/m12_reasons_alphabetical",
+      "spec": "Rule 11: reasons listed in the fixed order latest, pinned, daily, weekly, monthly."
+    }
+  ]
+}

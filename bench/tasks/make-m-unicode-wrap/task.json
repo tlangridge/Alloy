@@ -1,0 +1,117 @@
+{
+  "id": "make-m-unicode-wrap",
+  "type": "make",
+  "tier": "medium",
+  "kind": "implementation",
+  "split": "holdout",
+  "title": "Display-column wrap/truncate/pad with wide CJK characters and unsplittable combining clusters",
+  "allow_paths": [
+    "termtext",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_layout_rules.WrapBasicsTests.test_width_validation",
+      "spec": "Rule 1: width must be an int >= 2, else ValueError."
+    },
+    {
+      "test": "test_layout_rules.WrapBasicsTests.test_exact_fit_and_greedy",
+      "spec": "Rule 4: a word joins the line if text_width(line) + 1 + text_width(word) <= width."
+    },
+    {
+      "test": "test_layout_rules.WrapBasicsTests.test_spaces_collapse_and_are_trimmed",
+      "spec": "Rule 3: words are maximal runs of non-space characters, joined by exactly one space, no leading/trailing spaces."
+    },
+    {
+      "test": "test_layout_rules.WrapBasicsTests.test_paragraphs",
+      "spec": "Rule 2: split on \\n; a paragraph with no words produces exactly one empty line; wrap('', 5) == [''], wrap('ab\\n', 5) == ['ab', '']."
+    },
+    {
+      "test": "test_layout_rules.WrapWidthTests.test_cjk_words_measured_in_columns",
+      "spec": "Rule 4 with widths from termtext.width (CJK = 2 columns)."
+    },
+    {
+      "test": "test_layout_rules.WrapWidthTests.test_combining_marks_take_no_width",
+      "spec": "Rule 4 with widths from termtext.width (combining marks = 0 columns)."
+    },
+    {
+      "test": "test_layout_rules.WrapWidthTests.test_fullwidth_letters",
+      "spec": "Rule 4 with widths from termtext.width (fullwidth = 2 columns)."
+    },
+    {
+      "test": "test_layout_rules.WrapWidthTests.test_zero_width_joiner_stays_inside_word",
+      "spec": "Definitions: space means U+0020 only; ZWJ is zero width (termtext.width)."
+    },
+    {
+      "test": "test_layout_rules.WrapWidthTests.test_every_line_fits",
+      "spec": "Rule 6: every returned line has display width <= width; rule 3 only spaces are dropped."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_long_ascii_word_starts_new_line_and_chunks",
+      "spec": "Rule 5: a word wider than width starts on a new line and is broken into chunks."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_last_chunk_accepts_following_words",
+      "spec": "Rule 5: the last chunk becomes the current line and following words may join it under rule 4."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_cjk_long_word_chunks_by_columns",
+      "spec": "Rule 5: each chunk takes as many whole clusters as fit in width columns."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_wide_cluster_moves_to_next_chunk",
+      "spec": "Rule 5: a two-column cluster that does not fit in the one remaining column goes to the next chunk."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_combining_marks_never_split_from_base",
+      "spec": "Definitions: clusters (base + following zero-width chars) are never split by wrap."
+    },
+    {
+      "test": "test_layout_rules.WrapLongWordTests.test_ideographic_space_is_not_a_separator",
+      "spec": "Definitions: a space means U+0020 only (the ideographic space U+3000 is an ordinary character)."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_fits_unchanged",
+      "spec": "Rule 8: if text_width(text) <= width, return text unchanged."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_basic_cut",
+      "spec": "Rule 9: longest prefix whose width <= width - text_width(ellipsis), followed by ellipsis (default '\u2026')."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_trailing_spaces_removed_before_ellipsis",
+      "spec": "Rule 9: trailing spaces removed from the prefix before the ellipsis."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_wide_characters",
+      "spec": "Rule 9 with widths from termtext.width."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_combining_marks_kept_with_base",
+      "spec": "Rule 9: prefix made of whole clusters (combining marks stay with their base)."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_custom_and_empty_ellipsis",
+      "spec": "Rule 9: custom ellipsis; ellipsis='' is allowed."
+    },
+    {
+      "test": "test_layout_rules.TruncateTests.test_validation",
+      "spec": "Rule 7: width must be an int >= 0 and text_width(ellipsis) <= width, else ValueError."
+    },
+    {
+      "test": "test_layout_rules.PadTests.test_left_right_center_by_columns",
+      "spec": "Rule 10: exactly width display columns; center puts extra // 2 before and the rest after."
+    },
+    {
+      "test": "test_layout_rules.PadTests.test_combining_text",
+      "spec": "Rule 10: padding measured in display columns (combining marks = 0)."
+    },
+    {
+      "test": "test_layout_rules.PadTests.test_wide_text_unchanged_and_bad_align",
+      "spec": "Rule 10: text already width columns or wider is returned unchanged; any other align raises ValueError."
+    }
+  ]
+}

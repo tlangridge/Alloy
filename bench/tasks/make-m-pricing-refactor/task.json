@@ -1,0 +1,97 @@
+{
+  "id": "make-m-pricing-refactor",
+  "type": "make",
+  "tier": "medium",
+  "kind": "refactoring",
+  "split": "holdout",
+  "title": "Consolidate three drifted-style copies of unit pricing into shop.pricing and add clearance markdowns",
+  "allow_paths": [
+    "shop",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_tables",
+      "spec": "A: VOLUME_TIERS, MEMBER_DISCOUNTS, MARGIN_FLOOR = Decimal('1.10'), CLEARANCE_MARKDOWN = Decimal('0.30') with the stated current values."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_volume_boundaries",
+      "spec": "Current behavior 1 / A: volume fraction of the tier with the largest min_qty <= qty."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_member_after_volume_rounded_half_up",
+      "spec": "Current behavior 2-3 / A: member discount after volume, unknown tiers and customer=None get 0, round half up."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_margin_floor_rounds_up",
+      "spec": "Current behavior 4 / A step 3: floor cost * MARGIN_FLOOR rounded up to the cent."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_override",
+      "spec": "A step 1: override replaces discounts; still rounded half up and floored."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_clearance_bigger_discount_wins_and_member_applies",
+      "spec": "A step 1: if clearance, v = max(v, CLEARANCE_MARKDOWN) (never stack); member fraction still applies."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_clearance_ignores_margin_floor",
+      "spec": "A step 3: unless clearance, raise to the floor; clearance items may sell below the floor (also with override)."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_reference_grid",
+      "spec": "A steps 1-3 for all combinations; with clearance=False exactly today's calculation."
+    },
+    {
+      "test": "test_pricing_refactor.PricingModuleTests.test_patched_tables_read_at_call_time",
+      "spec": "B: tables are read at call time and patched with mock.patch.object; A: list order must not matter."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_all_channels_match_reference",
+      "spec": "B: Cart, Quote and Receipt obtain every unit price from shop.pricing.unit_price with clearance=inventory.is_clearance(sku)."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_cart_prices_clearance_when_lines_are_read",
+      "spec": "B: carts evaluate clearance when lines()/total() runs."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_quote_locks_price_at_add",
+      "spec": "Current behavior: a quote locks its unit price at add() time and add() returns it; B: quotes evaluate clearance in add(); override on clearance items not floored."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_till_merges_scans_and_uses_clearance",
+      "spec": "Current behavior: till merges scans and prices at lines() time; B: clearance in the till; checkout takes stock."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_patched_volume_tiers_reach_every_channel",
+      "spec": "B: patched VOLUME_TIERS must be followed by all three channels."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_patched_member_discounts_reach_every_channel",
+      "spec": "B: patched MEMBER_DISCOUNTS must be followed by all three channels."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_patched_margin_floor_reaches_every_channel",
+      "spec": "B: patched MARGIN_FLOOR must be followed by all three channels."
+    },
+    {
+      "test": "test_pricing_refactor.ChannelTests.test_patched_clearance_markdown_reaches_every_channel",
+      "spec": "B: patched CLEARANCE_MARKDOWN must be followed by all three channels."
+    },
+    {
+      "test": "test_pricing_refactor.PreservedBehaviorTests.test_cart_merge_and_stock",
+      "spec": "Current behavior preserved: cart merges repeated adds, Cart.add stock check, qty validation, unknown sku (existing code)."
+    },
+    {
+      "test": "test_pricing_refactor.PreservedBehaviorTests.test_quote_accept_is_all_or_nothing",
+      "spec": "Current behavior preserved: Quote.accept all-or-nothing reservation; accepting twice raises (existing code)."
+    },
+    {
+      "test": "test_pricing_refactor.PreservedBehaviorTests.test_till_checkout_all_or_nothing",
+      "spec": "Current behavior preserved: Receipt.checkout all-or-nothing; unknown sku (existing code)."
+    }
+  ]
+}

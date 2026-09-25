@@ -1,0 +1,20 @@
+{
+  "period": "2026-09",
+  "currency": "USD",
+  "rates": {
+    "api_call": 0.00024,
+    "storage_gb": 0.023,
+    "seat": 12.5
+  },
+  "promos": {
+    "WELCOME10": {"percent": 10}
+  },
+  "customers": [
+    {"id": "acme", "promo": "WELCOME10",
+     "usage": {"api_call": 77854, "storage_gb": 1520, "seat": 312}},
+    {"id": "globex", "promo": "WELCOME10",
+     "usage": {"api_call": 1204571, "storage_gb": 9800, "seat": 505}},
+    {"id": "initech",
+     "usage": {"api_call": 403354, "storage_gb": 245, "seat": 140}}
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "id": "make-s-page-range-tests",
+  "type": "make",
+  "tier": "small",
+  "kind": "testing",
+  "split": "dev",
+  "title": "Write a mutation-proof unit test suite for a --pages range parser (14 single-behavior mutants)",
+  "allow_paths": [
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 _hidden_tests/grade_tests.py",
+  "hidden_checks": [
+    {
+      "test": "mutants/m01_no_space_around_dash.py",
+      "spec": "B1: whitespace around the - of a range is ignored (\"1 - 3, 5\" -> [1, 2, 3, 5])."
+    },
+    {
+      "test": "mutants/m02_range_end_exclusive.py",
+      "spec": "B2: \"A-B\" selects A through B inclusive (\"2-4\" -> [2, 3, 4])."
+    },
+    {
+      "test": "mutants/m03_open_end_stops_early.py",
+      "spec": "B3: \"A-\" selects A through page_count (\"8-\" with 10 pages -> [8, 9, 10])."
+    },
+    {
+      "test": "mutants/m04_open_start_single_page.py",
+      "spec": "B3: \"-B\" selects 1 through B (\"-3\" -> [1, 2, 3])."
+    },
+    {
+      "test": "mutants/m05_duplicates_kept.py",
+      "spec": "B4: no duplicates (\"5, 1-3, 2\" -> [1, 2, 3, 5])."
+    },
+    {
+      "test": "mutants/m06_not_sorted.py",
+      "spec": "B4: ascending order (\"5, 1-3, 2\" -> [1, 2, 3, 5])."
+    },
+    {
+      "test": "mutants/m07_reversed_range_swapped.py",
+      "spec": "B5: a range whose start is greater than its end raises ValueError (\"5-3\")."
+    },
+    {
+      "test": "mutants/m08_end_clipped_to_page_count.py",
+      "spec": "B6: a range whose end exceeds page_count raises (\"8-20\" with 10 pages)."
+    },
+    {
+      "test": "mutants/m09_page_zero_accepted.py",
+      "spec": "B6: page 0 raises (\"0\", \"0-2\")."
+    },
+    {
+      "test": "mutants/m10_empty_spec_selects_nothing.py",
+      "spec": "B7: an empty or whitespace-only spec selects every page (\"\" with 3 pages -> [1, 2, 3])."
+    },
+    {
+      "test": "mutants/m11_empty_items_skipped.py",
+      "spec": "B7: an empty item inside a non-empty spec raises (\"1,,3\", \"1,2,\", \",1\")."
+    },
+    {
+      "test": "mutants/m12_plus_sign_accepted.py",
+      "spec": "B8: malformed items raise, e.g. \"+2\"."
+    },
+    {
+      "test": "mutants/m13_bare_dash_selects_all.py",
+      "spec": "B8: malformed items raise, e.g. \"-\"."
+    },
+    {
+      "test": "mutants/m14_zero_page_document_accepted.py",
+      "spec": "B9: page_count < 1 raises whatever the spec, including parse_page_ranges(\"\", 0)."
+    }
+  ]
+}

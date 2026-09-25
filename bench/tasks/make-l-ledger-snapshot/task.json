@@ -1,0 +1,117 @@
+{
+  "id": "make-l-ledger-snapshot",
+  "type": "make",
+  "tier": "large",
+  "kind": "debugging",
+  "split": "dev",
+  "title": "Event-sourced ledger: snapshot+replay and cache diverge from the audit rebuild in specific sequences",
+  "allow_paths": [
+    "ledger",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_ledger.ReproTests.test_repro1_fee_batch_straddling_snapshot",
+      "spec": "Acceptance criteria repro 1 (288.50 everywhere); rule 1 agreement; rule 2 snapshot correctness."
+    },
+    {
+      "test": "test_hidden_ledger.ReproTests.test_repro2_capture_after_snapshot_on_fresh_repository",
+      "spec": "Acceptance repro 2 (capture succeeds); rule 5: a hold placed before a snapshot can be captured after it through any repository; README HoldNotFound for finished holds."
+    },
+    {
+      "test": "test_hidden_ledger.ReproTests.test_repro3_release_after_snapshot_agrees_with_audit",
+      "spec": "Acceptance repro 3; rule 6 returns ids as int; rule 1 agreement with the audit."
+    },
+    {
+      "test": "test_hidden_ledger.ReproTests.test_repro4_holds_before_and_after_snapshot",
+      "spec": "Acceptance repro 4; rules 5 and 6 (int ids, numeric order, no crash); rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.ReproTests.test_repro5_conflict_does_not_leave_phantom_state",
+      "spec": "Acceptance repro 5 (svc2.balance is 7.00, retried deposit through svc2 succeeds); rule 7 caching; rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.HoldIdTests.test_release_order_is_numeric_across_snapshots",
+      "spec": "Rule 6: ascending numeric hold-id order (2 before 10), ids returned as int; rule 5: events carry int hold_id; README: one batch of HoldReleased."
+    },
+    {
+      "test": "test_hidden_ledger.HoldIdTests.test_hold_events_and_describe_use_int_ids",
+      "spec": "Rule 5: events read back carry int hold_id; describe()['holds'] keyed by int; hold ids never reused."
+    },
+    {
+      "test": "test_hidden_ledger.HoldIdTests.test_hold_ids_never_reused_after_snapshot",
+      "spec": "Rule 5: a new hold's id is one more than the highest id ever placed; README next id rules; rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.SnapshotRuleTests.test_snapshots_keep_being_used",
+      "spec": "Rule 4: a new repository reads exactly stream_version - latest_snapshot_version events; rule 3 / README: snapshots on every multiple of snapshot_every."
+    },
+    {
+      "test": "test_hidden_ledger.SnapshotRuleTests.test_snapshot_written_when_batch_crosses_boundary",
+      "spec": "Rule 3: a save that crosses a multiple writes a snapshot at a version reached by that save; rule 4 events_read; rule 2."
+    },
+    {
+      "test": "test_hidden_ledger.SnapshotRuleTests.test_every_snapshot_is_exact_when_it_is_the_latest",
+      "spec": "Rules 1 and 2 for snapshot_every 1, 2, 3 with multi-event transfer batches and expiry batches."
+    },
+    {
+      "test": "test_hidden_ledger.SnapshotRuleTests.test_conflicting_save_writes_nothing",
+      "spec": "Rule 8: a stale save raises ConcurrencyError and writes neither events nor snapshots."
+    },
+    {
+      "test": "test_hidden_ledger.SnapshotRuleTests.test_legacy_snapshot_with_string_keys",
+      "spec": "Rule 9: snapshots already written by the current code (string hold-id keys) must never produce wrong state; rule 5 capture after snapshot and no id reuse."
+    },
+    {
+      "test": "test_hidden_ledger.MoreSnapshotTests.test_every_1_batch_loads_from_final_state",
+      "spec": "Rules 2/3/4 with snapshot_every=1: a snapshot at the batch's final version exists and a new repository reads 0 events; rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.MoreSnapshotTests.test_expiry_job_from_writer_and_fresh_repositories",
+      "spec": "Rule 6 numeric order from both the writing and a fresh repository; README expiry rule (expires_at <= now); rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.CacheTests.test_repeated_conflicts_then_retry",
+      "spec": "Rule 7: after each ConcurrencyError the next load from the same repository reflects exactly the store and a retried command succeeds."
+    },
+    {
+      "test": "test_hidden_ledger.CacheTests.test_unsaved_changes_are_never_served",
+      "spec": "Rule 7: load never returns state including uncommitted events."
+    },
+    {
+      "test": "test_hidden_ledger.CacheTests.test_failed_transfer_target_save_then_reads",
+      "spec": "Rule 7: after a failed save the same repository reflects exactly the store (no phantom TransferReceived, no missing deposit); retried transfer succeeds; rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.DomainRegressionTests.test_domain_rules_unchanged",
+      "spec": "README domain rules (InsufficientFunds on available incl. fee, AccountNotFound before any write, HoldNotFound, expires_at <= now) remain in force; rule 1."
+    },
+    {
+      "test": "test_hidden_ledger.MoneyRegressionTests.test_amount_validation_unchanged",
+      "spec": "README: amounts accept str/int/Decimal (float TypeError), two decimal places, positive (fees may be zero; FeeCharged only when fee > 0)."
+    },
+    {
+      "test": "test_hidden_ledger.PropertyTests.test_random_sequences_every_1",
+      "spec": "Rule 1 agreement for arbitrary command sequences across three service instances with conflicting saves (rules 5-8), snapshot_every=1."
+    },
+    {
+      "test": "test_hidden_ledger.PropertyTests.test_random_sequences_every_2",
+      "spec": "Rule 1 agreement for arbitrary command sequences, snapshot_every=2."
+    },
+    {
+      "test": "test_hidden_ledger.PropertyTests.test_random_sequences_every_3",
+      "spec": "Rule 1 agreement for arbitrary command sequences, snapshot_every=3."
+    },
+    {
+      "test": "test_hidden_ledger.PropertyTests.test_random_sequences_every_5",
+      "spec": "Rule 1 agreement for arbitrary command sequences, snapshot_every=5."
+    },
+    {
+      "test": "test_hidden_ledger.PropertyTests.test_random_sequences_every_7",
+      "spec": "Rule 1 agreement for arbitrary command sequences, snapshot_every=7."
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "id": "review-inventory-filters",
+  "type": "review",
+  "tier": "medium",
+  "kind": "review",
+  "split": "holdout",
+  "title": "Review: structured filters for catalogue search",
+  "bug": true,
+  "claimed_change": "Add a filters argument to inventory.search.search(conn, text=None, filters=None, limit=50). filters comes straight from API query parameters and is untrusted.\n- Keys name a filterable column (inventory.search.FILTERABLE) either qualified with its own table ('products.brand', 'stock.warehouse') or bare ('brand', resolved to the table that owns it).\n- A value is a scalar (equality) or a list/tuple/set (membership); an empty collection matches nothing. Multiple filters and text combine with AND.\n- Any key that is not a filterable column of the named table (unknown column, internal column such as cost_cents, wrong or unknown table) raises ValueError before any SQL runs.\n- Values are always bound as parameters; no caller-supplied text is ever interpolated into SQL.\n- Add tests.",
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "ground_truth": {
+    "path": "inventory/search.py",
+    "keywords": ["rpartition", "table part", "table name", "table prefix", "qualifier", "qualified", "injection", "injectable", "1=1", "unvalidated", "not validated", "interpolat", "return key", "stock.brand", "products.warehouse", "arbitrary sql", "raw key"],
+    "description": "_resolve_column validates only the part after the last dot (rpartition) and then returns the caller's key verbatim for qualified keys, so the table part is never checked and is interpolated into the SQL. A key like '1=1 OR products.brand' or 'products.cost_cents > 5000 OR products.brand' injects arbitrary SQL (bypassing filters and probing the internal cost column), and 'stock.brand' raises sqlite3.OperationalError instead of ValueError. Fix: require column in FILTERABLE[table] and build the qualified name from validated parts."
+  }
+}

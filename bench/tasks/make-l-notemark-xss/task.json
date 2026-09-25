@@ -1,0 +1,121 @@
+{
+  "id": "make-l-notemark-xss",
+  "type": "make",
+  "tier": "large",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Comment markup renderer: stored XSS via entity-encoded/control-char schemes and autolink attribute breakout, plus escaping glitches",
+  "allow_paths": [
+    "notemark",
+    "tests",
+    "README.md"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_plain_and_case_variants",
+      "spec": "Rule 4 safety invariant; rule 3.3 scheme compared case-insensitively, only http/https/mailto."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_encoded_schemes",
+      "spec": "Rule 4; rule 3.1 decode character references before the policy check (decimal, hex, leading zeros)."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_control_characters",
+      "spec": "Rule 4; rule 3.2 remove tab/LF/CR anywhere and strip C0 controls and spaces from both ends before the scheme check."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_double_encoding",
+      "spec": "Rule 4; rule 3.1 decode exactly once."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_link_attribute_breakout",
+      "spec": "Rule 4; rule 3.4 href attribute-escaped (& < > \" ')."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_autolink_breakout",
+      "spec": "Rule 4; rule 3 applies to autolinks too (decode once, attribute-escape the href)."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_markup_wrapped",
+      "spec": "Rule 4 for links inside strong/em, markup in link text and mentions."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_safe_raw_html",
+      "spec": "Rule 4; README: text is escaped, code spans literal."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_reported_payloads_render_text_only",
+      "spec": "Acceptance: reported payloads render only the link text (rule 3.4 not linked)."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_entity_encoded_schemes",
+      "spec": "Rules 3.1/3.3: entity-encoded disallowed schemes are not linked; only the text renders."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_control_characters_are_removed_before_the_scheme_check",
+      "spec": "Rule 3.2 then 3.3: tabs/newlines and leading C0/space removed before the scheme check."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_references_are_decoded_exactly_once",
+      "spec": "Rule 3.1 example: [x](&amp;#106;avascript:x) -> <a href=\"&amp;#106;avascript:x\">x</a>."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_autolink_attribute_breakout",
+      "spec": "Rules 3.4/4: autolink href attribute-escaped, text escaped as text (reported payload)."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_autolink_encoded_quote",
+      "spec": "Rule 3: autolink URL decoded once; href attribute-escaped; text is the decoded URL escaped."
+    },
+    {
+      "test": "test_hidden_notemark.SecurityTests.test_link_destination_quotes_escaped",
+      "spec": "Rule 3.4 / README escaping: \" -> &quot;, ' -> &#39; in href (decoded references too)."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_existing_formatting_unchanged",
+      "spec": "Rule 1: README rendering rules (strong/em, CRLF, paragraphs/br, mentions, backslash escapes, markup in link text) unchanged."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_text_references_decoded_once_then_escaped",
+      "spec": "Rule 1 / README Text: references decoded once then escaped; unknown/invalid references stay literal."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_code_spans_are_literal",
+      "spec": "Rule 2 / README: code content shown literally, no markup, no reference decoding."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_ampersands_in_link_destinations",
+      "spec": "Rule 1 example: &amp;, & and &#38; in destinations all give href ...&amp;y=2."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_autolink_ampersands",
+      "spec": "Rule 3.4 example: autolink href/text decoded once then escaped (no &amp;amp;)."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_scheme_detection_and_relative_urls",
+      "spec": "Rule 3.3 / README step 3: a / ? # before the colon means no scheme; disallowed schemes not linked; original case kept."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_safe_destinations_are_cleaned",
+      "spec": "Rule 3.4: href is the result of step 3.2 (tabs/newlines removed, C0/space trimmed)."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_empty_destination_after_cleaning_is_not_linked",
+      "spec": "Rule 3.3: empty after cleaning -> not linked."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_links_and_autolinks_do_not_nest",
+      "spec": "Rule 1 / README: link text may contain markup except links (no autolinks/mentions inside links, existing behavior)."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_unclosed_markers_and_bad_links_are_literal",
+      "spec": "Rule 1 / README: unclosed markers literal; destinations with spaces are not links; text escaped."
+    },
+    {
+      "test": "test_hidden_notemark.RenderingTests.test_unsafe_link_keeps_formatted_text",
+      "spec": "Rule 3.4: a link that is not linked renders only its (formatted) text."
+    }
+  ]
+}

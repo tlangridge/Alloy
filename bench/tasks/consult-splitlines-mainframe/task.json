@@ -1,0 +1,14 @@
+{
+  "id": "consult-splitlines-mainframe",
+  "type": "consult",
+  "tier": "small",
+  "kind": "research",
+  "split": "holdout",
+  "title": "Element count of str.splitlines() on a mainframe record",
+  "prompt": "We ingest records exported from an old mainframe system and break each record into fields with `record.splitlines()`. For one record, written here as a Python string literal with escape sequences,\n\n    record = 'id=7\\x1cname=Ada\\u2028role=eng\\r\\nteam=core\\x85'\n\na colleague expects exactly two fields, because the only \"real\" line break in it is the `\\r\\n`. How many elements does `record.splitlines()` actually return in CPython 3 (3.8 or newer)?\n\nAnswer with a single integer.",
+  "match": "number",
+  "answers": [
+    "4"
+  ],
+  "verify": "python3 -c 'print(len(\"id=7\\x1cname=Ada\\u2028role=eng\\r\\nteam=core\\x85\".splitlines()))'"
+}

@@ -1,0 +1,8 @@
+Shipping the new parser today #Rust #perf
+Benchmarks look good on the new box #python3 #perf
+Refactor done, #Go port next #perf
+Why is CI red again #ci #python
+Flaky test fixed #CI #go
+Release notes drafted #rust #release
+Late night debugging #Go #ci #perf
+Porting the CLI this weekend #RUST

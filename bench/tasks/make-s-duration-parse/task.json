@@ -1,0 +1,120 @@
+{
+  "id": "make-s-duration-parse",
+  "type": "make",
+  "tier": "small",
+  "kind": "implementation",
+  "split": "dev",
+  "title": "Compound duration strings (\"1w 2d\", \"1h30m\") with ordering, bare seconds and canonical formatting",
+  "allow_paths": [
+    "retention",
+    "tests"
+  ],
+  "visible_test": "python3 -m unittest discover -s tests -v",
+  "hidden_test": "python3 -m unittest discover -s _hidden_tests -v",
+  "hidden_checks": [
+    {
+      "test": "test_duration_rules.ComponentTests.test_each_unit",
+      "spec": "Rule 1: w=604800, d=86400, h=3600, m=60, s=1 seconds per unit."
+    },
+    {
+      "test": "test_duration_rules.ComponentTests.test_all_units_summed",
+      "spec": "Rule 1: the result is the sum of all components."
+    },
+    {
+      "test": "test_duration_rules.ComponentTests.test_units_are_case_insensitive",
+      "spec": "Rule 1: unit letters are case-insensitive (\"2H\" equals \"2h\")."
+    },
+    {
+      "test": "test_duration_rules.ComponentTests.test_numbers_not_limited_by_next_unit",
+      "spec": "Rule 1: a component number is not limited by the next larger unit (\"90m\" -> 5400)."
+    },
+    {
+      "test": "test_duration_rules.ComponentTests.test_zero_components",
+      "spec": "Rule 1: components are non-negative integers (\"0h\" -> 0)."
+    },
+    {
+      "test": "test_duration_rules.ComponentTests.test_result_is_int",
+      "spec": "parse_duration signature: returns the total number of seconds as an int."
+    },
+    {
+      "test": "test_duration_rules.WhitespaceTests.test_separators_optional_and_repeatable",
+      "spec": "Rule 2: components may be separated by any amount of whitespace or by nothing (\"1w\\t2d\")."
+    },
+    {
+      "test": "test_duration_rules.WhitespaceTests.test_surrounding_whitespace_ignored",
+      "spec": "Rule 2: leading and trailing whitespace is ignored."
+    },
+    {
+      "test": "test_duration_rules.WhitespaceTests.test_space_between_number_and_unit_rejected",
+      "spec": "Rule 2: whitespace between a number and its unit is not allowed (\"5 m\" is invalid)."
+    },
+    {
+      "test": "test_duration_rules.OrderTests.test_decreasing_order_accepted",
+      "spec": "Rule 3: units in strictly decreasing size order are valid (\"1d2h\")."
+    },
+    {
+      "test": "test_duration_rules.OrderTests.test_out_of_order_rejected",
+      "spec": "Rule 3: out-of-order units are invalid (\"2h1d\")."
+    },
+    {
+      "test": "test_duration_rules.OrderTests.test_repeated_unit_rejected",
+      "spec": "Rule 3: each unit at most once (\"1h 1h\" invalid); rule 1 case-insensitivity makes \"1H1h\" a repeat."
+    },
+    {
+      "test": "test_duration_rules.BareSecondsTests.test_bare_integer_is_seconds",
+      "spec": "Rule 4: a string that is just an integer is seconds (\"90\" -> 90, \" 0 \" -> 0)."
+    },
+    {
+      "test": "test_duration_rules.BareSecondsTests.test_unitless_number_inside_compound_rejected",
+      "spec": "Rule 4: a number without a unit is not allowed inside a multi-component string (\"1h 30\")."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_empty_rejected",
+      "spec": "Rule 5: empty or whitespace-only strings raise ValueError."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_signs_rejected",
+      "spec": "Rule 5: signs (\"-5m\", \"+5m\") raise ValueError."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_decimals_rejected",
+      "spec": "Rule 5: decimals (\"1.5h\") raise ValueError."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_unknown_units_rejected",
+      "spec": "Rule 5: unknown units (\"5y\", \"5ms\") raise ValueError."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_stray_characters_rejected",
+      "spec": "Rule 5: any other characters such as separators or punctuation (\"1h, 30m\", \"1h30m!\", \"h\") raise ValueError."
+    },
+    {
+      "test": "test_duration_rules.ErrorTests.test_non_str_raises_type_error",
+      "spec": "Rule 5: a text argument that is not a str (90, None, b\"1h\") raises TypeError."
+    },
+    {
+      "test": "test_duration_rules.FormatTests.test_examples",
+      "spec": "Rule 6: canonical examples 5400 -> \"1h30m\", 694861 -> \"1w1d1h1m1s\", 86400 -> \"1d\", 3601 -> \"1h1s\", 59 -> \"59s\"."
+    },
+    {
+      "test": "test_duration_rules.FormatTests.test_zero",
+      "spec": "Rule 6: zero is \"0s\"."
+    },
+    {
+      "test": "test_duration_rules.FormatTests.test_weeks_are_largest_unit",
+      "spec": "Rule 6: largest to smallest unit (w first), each component as large as possible, zero components omitted."
+    },
+    {
+      "test": "test_duration_rules.FormatTests.test_negative_rejected",
+      "spec": "Rule 6: a negative value raises ValueError."
+    },
+    {
+      "test": "test_duration_rules.FormatTests.test_round_trip",
+      "spec": "Rule 6: parse_duration(format_duration(n)) == n for every non-negative n."
+    },
+    {
+      "test": "test_duration_rules.PolicyTests.test_policy_accepts_compound_duration",
+      "spec": "retention.policy.expired must keep working and gains compound durations automatically."
+    }
+  ]
+}

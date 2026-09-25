@@ -1,0 +1,14 @@
+{
+  "id": "consult-dashsvc-tenant-leak",
+  "type": "consult",
+  "tier": "large",
+  "kind": "debugging",
+  "split": "holdout",
+  "title": "Root cause of anonymous visitors seeing internal dashboard metrics",
+  "prompt": "Incident follow-up for the dashboard service in this repository. Every so often, anonymous visitors of the public status page (no `X-Tenant` header) are shown internal-only metrics such as `oncall` and `error_budget_burn`, which only the operations account (`X-Tenant: system` with a valid ops token) should ever see; and sometimes ops sees the public numbers instead of its internal ones. It only happens when the other kind of caller rendered the same report with the same parameters within the cache TTL. Regular numbered tenants have never seen each other's data, the ops token check is working, and the unit tests pass.\n\nWhich single function or method in this repository is the root cause of this cross-caller leak? Answer with its fully qualified dotted name (package, module, and class if any, e.g. `pkg.module.Class.method`).",
+  "match": "regex",
+  "answers": [
+    "(((dashsvc\\.)?cache\\.)?tenantcache\\.)?_space(\\(\\))?"
+  ],
+  "verify": "python3 - <<'EOF'\nfrom dashsvc.cache import TenantCache, TTLCache\nfrom dashsvc.service import DashboardService\n\nOPS = {'X-Tenant': 'system', 'X-Ops-Token': 's3cret'}\n\ndef leaks():\n    svc = DashboardService('s3cret', TenantCache(clock=lambda: 100.0))\n    svc.render(OPS, 'status', {'region': 'eu'})\n    anon = svc.render({}, 'status', {'region': 'eu'})\n    svc2 = DashboardService('s3cret', TenantCache(clock=lambda: 100.0))\n    svc2.render({}, 'overview')\n    ops = svc2.render(OPS, 'overview')\n    return 'oncall' in anon['metrics'] or 'oncall' not in ops['metrics']\n\nassert leaks(), 'symptom not reproduced'\n\ndef fixed_space(self, tenant_id):\n    return self._spaces.setdefault(tenant_id, TTLCache(self.ttl, self.maxsize, self.clock))\n\nTenantCache._space = fixed_space\nassert not leaks(), 'fixing _space did not remove the symptom'\nprint('dashsvc.cache.TenantCache._space')\nEOF"
+}

@@ -1,0 +1,14 @@
+{
+  "id": "consult-fxrecon-fetch-count",
+  "type": "consult",
+  "tier": "large",
+  "kind": "research",
+  "split": "dev",
+  "title": "How many billed FX provider requests the September reconciliation makes",
+  "prompt": "Our FX provider bills us for every rate request, and the September reconciliation cost noticeably more than the handful of currency/day combinations in the data would suggest. Going by the code in this repository (`fxrecon/feed.py` stands in for the provider in the offline build), how many times is `fxrecon.feed.fetch_rate` called in total when running\n\n    python3 -m fxrecon fixtures/september.json\n\nAnswer with a single integer.",
+  "match": "number",
+  "answers": [
+    "11"
+  ],
+  "verify": "python3 - <<'EOF'\nimport contextlib, io, runpy, sys\nfrom fxrecon import feed\ncalls = []\nreal = feed.fetch_rate\ndef counting(*args, **kwargs):\n    calls.append((args, kwargs))\n    return real(*args, **kwargs)\nfeed.fetch_rate = counting\nsys.argv = ['fxrecon', 'fixtures/september.json']\nwith contextlib.redirect_stdout(io.StringIO()):\n    try:\n        runpy.run_module('fxrecon', run_name='__main__')\n    except SystemExit as exc:\n        assert not exc.code, exc.code\nprint(len(calls))\nEOF"
+}
