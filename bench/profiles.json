@@ -31,6 +31,13 @@
       "family": "openai"
     },
     {
+      "id": "codex-sol6-xhigh",
+      "cli": "codex",
+      "model": "gpt-6-sol",
+      "effort": "xhigh",
+      "family": "openai"
+    },
+    {
       "id": "claude-sonnet",
       "cli": "claude",
       "model": "claude-sonnet-5",
