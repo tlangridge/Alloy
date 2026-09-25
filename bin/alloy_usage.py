@@ -512,6 +512,40 @@ def headroom(profile, snapshot):
     return min(w['remaining_fraction'] for w in selected)
 
 
+_WINDOW_UNITS = {'h': 3600, 'd': 86400, 'w': 7 * 86400}
+_WINDOW_NAMES = {'hourly': 3600, 'daily': 86400, 'weekly': 7 * 86400, 'monthly': 30 * 86400}
+
+
+def window_seconds(name):
+    """Length of a quota window from its label ('5h', '7d', 'weekly'); None if unknown."""
+    name = str(name).strip().lower()
+    if name in _WINDOW_NAMES:
+        return _WINDOW_NAMES[name]
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([hdw])', name)
+    return float(m.group(1)) * _WINDOW_UNITS[m.group(2)] if m else None
+
+
+def pacing(profile, snapshot):
+    """Quota pressure: (share of the window still to run) / (share of quota left),
+    worst window wins. Below 1, capacity will reset unused at the current pace;
+    above 1, it is running short. None when any window is unknown or unparseable."""
+    if headroom(profile, snapshot) is None:
+        return None
+    now = time.time()
+    row = snapshot['providers'][profile['adapter']]
+    pools = applicable(profile)
+    pressure = []
+    for w in row.get('windows', []):
+        if w.get('pool') not in pools:
+            continue
+        length = window_seconds(w.get('window'))
+        if not length or w.get('resets_at') is None:
+            return None
+        left = min(1.0, max(0.0, (w['resets_at'] - now) / length))
+        pressure.append(left / max(w['remaining_fraction'], .05))
+    return max(pressure) if pressure else None
+
+
 def reset_text(value, now):
     if value is None:
         return 'unknown'

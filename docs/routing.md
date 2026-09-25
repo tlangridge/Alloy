@@ -193,6 +193,15 @@ Optional `routing.json` policy fields:
 {"use_model_evidence": true, "task_fit_cost_slack": 0.25, "kind_confidence_floor": 0.65}
 ```
 
+`quota_pacing` (default `false`) prices subscription capacity by pace instead of
+by remaining fraction alone: pressure = (share of the window still to run) /
+(share of quota left), worst window wins. Capacity that will reset unused
+becomes cheap (a Codex window with 20% left and 9% of the week to run scores
+0.47 instead of 5.0); a window running short becomes dear. The host's own CLI
+keeps the conservative remaining-fraction rule, because the host session draws
+on the same subscription. Reserves still exclude a pool outright. Pacing
+assumes steady use; enable it if your own usage is not front-loaded.
+
 `min_tier_by_mode` sets a minimum tier per mode. The shipped default is
 `{"consult": "medium"}`: a panel question's difficulty lives in the repository,
 which the classifier never sees. On alloy-bench, Jev rated such questions "small"

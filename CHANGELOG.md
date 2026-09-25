@@ -22,6 +22,8 @@ Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
 - Routed consults require at least a medium-tier model (`policy.min_tier_by_mode`):
   Jev cannot see the repository a question is about and under-rated such questions.
   Existing configs keep their policy until they add the key.
+- Opt-in `policy.quota_pacing`: price subscription capacity by reset time, so quota
+  that would expire unused is preferred; the host's own CLI is never discounted.
 - `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.
 - Add `bench/`: 48 tasks with hidden tests, seeded-bug reviews and answer keys;
   production-path runners, list-price costing, quota floors and routing replay.

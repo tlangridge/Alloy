@@ -604,6 +604,35 @@ class RouterTests(unittest.TestCase):
             with self.assertRaises(r.RoutingError):
                 r.validate(self.config)
 
+    def live(self, **pools):
+        """A fresh usage snapshot: adapter -> (remaining fraction, share of a 7d window still to run)."""
+        now = r.time.time()
+        return dict(enabled=True, ttl_seconds=120, providers={
+            name: dict(status='fresh', observed_at=now, windows=[dict(
+                pool=name, window='7d', remaining_fraction=left, resets_at=now + share * 7 * 86400)])
+            for name, (left, share) in pools.items()})
+
+    def test_quota_pacing_is_opt_in_and_spares_the_host(self):
+        self.assertEqual(r.usage.window_seconds('5h'), 5 * 3600)
+        self.assertEqual(r.usage.window_seconds('weekly'), 7 * 86400)
+        self.assertIsNone(r.usage.window_seconds('someday'))
+        for p in self.config['profiles']:
+            p['enabled'] = p['id'] in ('codex-small', 'antigravity-small')
+            p['cost_rank'] = 1
+        # Codex: 30% left but resets in 5% of the window (surplus); agy: 60% left, 90% to run (deficit).
+        snap = self.live(codex=(.3, .05), antigravity=(.6, .9))
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='small'))
+        self.assertAlmostEqual(r.usage.pacing(dict(adapter='codex', model='x'), snap), .05 / .3, places=4)
+        choose = lambda: r.resolve(core, self.config, answers, self.available, self.args, snap)['profile']
+        self.assertEqual(choose(), 'antigravity-small')  # default: more headroom wins
+        self.config['policy']['quota_pacing'] = True
+        self.assertEqual(choose(), 'codex-small')        # pacing: use quota that will reset unused
+        self.args.host_family = 'openai'                 # ... but never discount the host's own CLI
+        self.assertEqual(choose(), 'antigravity-small')
+        self.config['policy']['quota_pacing'] = 'yes'
+        with self.assertRaises(r.RoutingError):
+            r.validate(self.config)
+
     def test_setup_preserves_profiles_and_backs_up(self):
         self.config['profiles'][0]['model'] = 'gpt-custom'
         r.save(r.root() / 'routing.json', self.config)

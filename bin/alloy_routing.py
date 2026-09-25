@@ -155,6 +155,8 @@ def validate(config):
             raise RoutingError("Invalid policy " + field)
     if type(policy.get('use_model_evidence', True)) is not bool:
         raise RoutingError("use_model_evidence must be boolean")
+    if type(policy.get("quota_pacing", False)) is not bool:
+        raise RoutingError("quota_pacing must be boolean")
     floors = policy.get("min_tier_by_mode", {})
     if not isinstance(floors, dict) or any(m not in ("consult", "review", "make", "debate") or t not in TIERS
                                            for m, t in floors.items()):
@@ -581,6 +583,13 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             p["effective_cost_rank"] = (p["cost_rank"] / max(live_remaining, .05)
                 if live_remaining is not None else p["cost_rank"] *
                 (1.25 if usage_snapshot.get("enabled") and p["billing_mode"] != "metered" else 1))
+            # Opt-in pacing: quota that will reset unused is cheap, quota running
+            # short is dear. The host's own CLI keeps the conservative rule above,
+            # because the host's interactive use draws on the same subscription.
+            pressure = usage.pacing(p, usage_snapshot) if policy.get("quota_pacing") else None
+            p["quota_pressure"] = pressure
+            if pressure is not None and FAMILIES.get(name) != host:
+                p["effective_cost_rank"] = p["cost_rank"] * max(pressure, .1)
             eligible.append(p)
     if not eligible:
         raise RoutingError("No eligible profile for %s work; check model overrides, billing, availability and family constraints. No task dispatched." % tier)
