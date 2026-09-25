@@ -294,7 +294,10 @@ command is idempotent. `models advise` reports any model-pin conflicts afterward
 
 ## Keyless host routing
 
-Jev is an optional acceleration layer. `alloy setup --keyless` skips both the
+Jev is optional but preferred when its configured API key is available and
+routing is authorized. Use host routing when no key is configured, Jev is
+unavailable, or the user explicitly requests keyless mode.
+`alloy setup --keyless` skips both the
 credential prompt and synthetic inference test, even without `--skip-live-test`.
 It preserves existing credentials and provider selection. Add `--non-interactive`
 for unattended setup; explicit `--billing` settings are still accepted.

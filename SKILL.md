@@ -158,7 +158,17 @@ Setup with `--skip-live-test` makes no inference call and needs no API key yet.
 Only run a paid live test when authorized. Defaults are versioned with releases;
 update the shared files as model evidence changes.
 
-### Keyless host routing (no Jev required)
+### Router preference: Jev first
+
+When the configured Jev provider has a user-supplied API key available and routing
+is authorized, **prefer Jev and use `--route`**. Do not choose host routing merely
+because it is available. Check credential availability without printing or
+including the key in context. Respect an explicit user request for keyless mode.
+Use host routing only when no router key is configured, Jev is unavailable, or
+the user explicitly selects it. Report service failures before falling back;
+never bypass budget, pin, quota or independent-review constraints.
+
+### Keyless host routing (fallback; no Jev required)
 
 Without a Jev key, do not block Alloy or ask the user to obtain one. Initialize
 profiles with `alloy setup --keyless --non-interactive`, then read
@@ -182,7 +192,7 @@ omit `--route`. Pass the assessed tier explicitly. Existing budget, quota,
 permission, correction and cleanup controls still apply. Ordinary consult/review
 panels can use host-chosen CLI/model overrides with their read-only permissions.
 
-Jev remains the optional fast router for authorized/configured users. If it
+Jev is the preferred router for authorized/configured users with a key. If it
 fails, report the failure and make an explicit host selection using the same
 controls; never silently remove a budget, pin or review requirement.
 
@@ -513,7 +523,8 @@ dispatch; normal execute also checks readiness. Show the combined blocker report
 instead of attempting workers one at a time.
 
 Set `--host-family` to your actual model family, not automatically to your CLI's.
-Use `--route` only when Jev routing is authorized/configured; otherwise replace
+Prefer `--route` whenever Jev routing is authorized/configured and its key is
+available (unless the user explicitly requests keyless mode); otherwise replace
 it with `--maker-profile <id> --checker-profile <id>`. Jev assesses the task once;
 code chooses eligible workers and rechecks model pins, billing, compatibility and
 quota reserves before each dispatch. It never silently changes models mid-loop.

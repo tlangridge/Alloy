@@ -468,7 +468,8 @@ variables, never in the shared defaults. See [routing setup](docs/routing.md).
 
 ### No Jev key? Let the host route
 
-Jev is optional. The host agent can select workers using the bundled model
+Jev is preferred when a configured API key is available. As a fallback without
+Jev, the host agent can select workers using the bundled model
 profiles, evidence and quota context:
 
 ```sh
