@@ -3,6 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.9.1] - 2026-09-25
+
+- Preserve Claude user settings, including permission deny rules and hooks, in
+  lean mode. Optional MCP/skill context is still trimmed. The 0.9.0 cost reduction
+  measured a different invocation and is not a verified saving for this version.
+- Count routing failures in benchmark quality and keep missing Maker/Checker
+  measurements or token costs unknown. Incomplete replay cannot pass the gate;
+  the CLI exits nonzero and omits unsupported aggregate scores and intervals.
+- Score Checker correctness rather than JSON validity. Label replay as a component
+  proxy, not a measured end-to-end execute result.
+- Replay Jev model-fit answers using their original ordered model cards for both
+  routing decisions. Reject missing/mismatched context; historical classifier-only
+  replay requires an explicit flag.
+- Qualify the earlier routing claims: 0.9.0's aggregate cost/quality figures need
+  re-evaluation with full coverage and model-fit evidence. No new live performance
+  or complete execute-loop claim is made by this patch.
+
 ## [0.9.0] - 2026-09-25
 
 Measured with the new `bench/` autoresearch evaluator: 48 tasks with hidden tests,

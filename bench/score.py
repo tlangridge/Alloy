@@ -42,7 +42,7 @@ def stat(rows):
     n = len(rows)
     cost = [r['api_usd'] for r in rows if r.get('api_usd') is not None]
     return dict(n=n, q=sum(bool(r['passed']) for r in rows) / n if n else None,
-                usd=sum(cost) / len(cost) if cost else None,
+                usd=sum(cost) / n if n and len(cost) == n else None,
                 wall=sum(r.get('wall_s') or 0 for r in rows) / n if n else None,
                 score=sum(r.get('score') or 0 for r in rows) / n if n else None)
 
@@ -85,7 +85,8 @@ def cmd_frontier(args):
         if t:
             groups.setdefault((t['type'], t['tier']), {}).setdefault(profile, []).extend(rows)
     for (typ, tier), profs in sorted(groups.items(), key=lambda kv: (kv[0][0], h.TIERS.index(kv[0][1]))):
-        pts = sorted(((stat(r)['usd'] or 0, stat(r)['q'], p) for p, r in profs.items()), key=lambda x: (x[0], -x[1]))
+        pts = sorted(((stat(r)['usd'], stat(r)['q'], p) for p, r in profs.items()
+                      if stat(r)['usd'] is not None), key=lambda x: (x[0], -x[1]))
         best_q = -1
         print('\n%s / %s' % (typ, tier))
         for usd, q, p in pts:
@@ -101,25 +102,49 @@ def profile_key(cli, model, effort):
     return (cli, MODEL_ALIASES.get(model, model), effort or None)
 
 
-def replay(core, config, tasks, data, hosts, answers_by_task=None):
+def replay_fits(core, config, entry, classifier_only=False):
+    """Use the original ordered cards; fit_N has no identity without them."""
+    if classifier_only or not config['policy'].get('use_model_evidence', True):
+        return {}
+    cards = entry.get('model_context')
+    if not isinstance(cards, list) or not cards:
+        raise ValueError('Jev replay needs the original model_context cards; '
+                         'use --classifier-only for an explicitly limited historical replay')
+    profiles = {p['id']: p for p in config['profiles']}
+    seen = set()
+    for card in cards:
+        profile = profiles.get(card.get('profile'))
+        if (not profile or card['profile'] in seen or
+            profile['model'] != card.get('model') or
+            profile.get('effort') != card.get('effort')):
+            raise ValueError('Jev model_context does not match the replay profiles; recapture answers')
+        seen.add(card['profile'])
+    expected = {'fit_' + str(i) for i in range(len(cards))}
+    actual = {key for key in entry['answers'] if key.startswith('fit_')}
+    if actual != expected:
+        raise ValueError('Jev replay needs one model-fit answer per original card')
+    return core.routing.model_fits(entry, cards)
+
+
+def replay(core, config, tasks, data, hosts, answers_by_task=None, classifier_only=False):
     bench = h.bench_profiles()
     by_key = {profile_key(p['cli'], p['model'], p.get('effort')): pid for pid, p in bench.items()}
     available = {n: dict(status='ready', compatible=True) for n in core.routing.FAMILIES}
-    # Checker cost for execute = that profile's mean cost on review tasks of the same tier.
-    review_cost, review_ok = {}, {}
+    # A component proxy, NOT an observed execute run. Use correctness and cost
+    # from same-tier reviews; do not substitute formatting validity or other tiers.
+    reviews = {}
     for (task, profile), rows in data.items():
         t = tasks.get(task)
         if t and t['type'] == 'review':
-            review_cost.setdefault((profile, t['tier']), []).extend(r['api_usd'] for r in rows if r.get('api_usd') is not None)
-            # Execute fails closed unless the Checker returns a valid verdict.
-            for key in ((profile, t['tier']), (profile, 'all')):
-                review_ok.setdefault(key, []).extend(
-                    float(not r.get('failure') and not (r.get('grade') or {}).get('malformed')) for r in rows)
+            reviews.setdefault((profile, t['tier']), []).extend(rows)
     per_task, unmeasured = [], []
     for host in hosts:
         for t in tasks.values():
-            if answers_by_task:  # a real classifier's judgments (e.g. Jev), not the task labels
-                answers = answers_by_task[t['id']]['answers']
+            fits = {}
+            if answers_by_task is not None:
+                entry = answers_by_task[t['id']]
+                answers = entry['answers']
+                fits = replay_fits(core, config, entry, classifier_only)
             else:
                 answers = core.execution.host_assessment(_ap.Namespace(task_kind=t['kind'], task_tier=t['tier'],
                                                                        task_risk=False, task_ambiguous=False))
@@ -127,34 +152,49 @@ def replay(core, config, tasks, data, hosts, answers_by_task=None):
             args = _ap.Namespace(mode=mode, profile=None, panelists=None, host_family=host,
                                  exclude_family=host if mode == 'review' else '', prior_failures=0,
                                  failed_profile=[], max_estimated_usd=None)
+            row = dict(task=t['id'], type=t['type'], tier=t['tier'], host=host,
+                       profile=None, checker=None, q=None, usd=None)
+            per_task.append(row)
             try:
-                d = core.routing.resolve(core, config, answers, available, args, {})
+                d = core.routing.resolve(core, config, answers, available, args, {}, fits)
             except core.routing.RoutingError as exc:
-                per_task.append(dict(task=t['id'], host=host, error=str(exc), q=0.0, usd=0.0))
+                row.update(error=str(exc), q=0.0, usd=0.0)
                 continue
             pid = by_key.get(profile_key(d['cli'], d['model'], d.get('effort')))
+            row['profile'] = pid
             rows = data.get((t['id'], pid)) if pid else None
             if not rows:
                 unmeasured.append((t['id'], d['profile'], host))
                 continue
-            s = stat(rows)
-            usd = s['usd'] or 0.0
-            q_exec = s['q']
-            checker = None
+            result = stat(rows)
+            row.update(q=result['q'], usd=result['usd'])
+            if result['usd'] is None:
+                unmeasured.append((t['id'], 'cost:' + d['profile'], host))
             if mode == 'make':
                 cargs = _ap.Namespace(**dict(vars(args), mode='review', exclude_family=host + ',' + d['family']))
-                c = core.routing.resolve(core, config, answers, available, cargs, {})
+                try:
+                    c = core.routing.resolve(core, config, answers, available, cargs, {}, fits)
+                except core.routing.RoutingError as exc:
+                    row.update(error=str(exc), q=0.0)
+                    continue
                 checker = by_key.get(profile_key(c['cli'], c['model'], c.get('effort')))
-                costs = review_cost.get((checker, t['tier'])) or []
-                ok = review_ok.get((checker, t['tier'])) or review_ok.get((checker, 'all'))
-                if costs and ok:
-                    usd += sum(costs) / len(costs)
-                    q_exec = s['q'] * sum(ok) / len(ok)
-                else:
+                row['checker'] = checker
+                checks = reviews.get((checker, t['tier']))
+                if not checks:
+                    row.update(q=None, usd=None)
                     unmeasured.append((t['id'], 'checker:' + c['profile'], host))
-            per_task.append(dict(task=t['id'], type=t['type'], tier=t['tier'], host=host,
-                                 profile=pid, checker=checker, q=q_exec, usd=usd))
+                    continue
+                review = stat(checks)
+                row['q'] *= review['q']
+                row['usd'] = (row['usd'] + review['usd']
+                              if row['usd'] is not None and review['usd'] is not None else None)
+                if review['usd'] is None:
+                    unmeasured.append((t['id'], 'checker-cost:' + c['profile'], host))
     return per_task, unmeasured
+
+
+def mean_known(values):
+    return sum(values) / len(values) if values and all(v is not None for v in values) else None
 
 
 def references(tasks, data):
@@ -169,7 +209,9 @@ def references(tasks, data):
         for pid in bench:
             if all((i, pid) in data for i in ids):
                 q = sum(stat(data[(i, pid)])['q'] for i in ids) / len(ids)
-                usd = sum(stat(data[(i, pid)])['usd'] or 0 for i in ids) / len(ids)
+                usd = mean_known([stat(data[(i, pid)])['usd'] for i in ids])
+                if usd is None:
+                    continue
                 if best is None or (q, -usd) > (best[1], -best[2]):
                     best = (pid, q, usd)
         solvable = sum(any(stat(r)['q'] for (i2, _p), r in data.items() if i2 == i) for i in ids) / len(ids)
@@ -181,23 +223,25 @@ def references(tasks, data):
 def summarize(per_task, refs):
     out = {}
     for typ in h.TYPES:
-        rows = [r for r in per_task if r.get('type') == typ or (r.get('error') and typ == 'make')]
-        rows = [r for r in per_task if r.get('type') == typ]
+        rows = [r for r in per_task if r['type'] == typ]
         if not rows:
             continue
-        q = sum(r['q'] for r in rows) / len(rows)
-        usd = sum(r['usd'] for r in rows) / len(rows)
+        q = mean_known([r['q'] for r in rows])
+        usd = mean_known([r['usd'] for r in rows])
+        complete = q is not None and usd is not None
         ref = refs.get(typ, {})
         tol = 1.0 / ref['n'] if ref.get('n') else 0
-        out[typ] = dict(q=q, usd=usd, cps=usd / q if q else math.inf, n=len(rows),
+        out[typ] = dict(q=q, usd=usd, cps=usd / q if complete and q else None,
+                        n=len(rows), complete=complete,
                         ref_q=ref.get('q'), ref_profile=ref.get('profile'), ref_usd=ref.get('usd'),
                         ceiling=ref.get('ceiling'),
-                        gate=ref.get('q') is None or q >= ref['q'] - tol - 1e-9)
-    total_usd = sum(v['usd'] * v['n'] for v in out.values())
-    total_q = sum(v['q'] * v['n'] for v in out.values())
-    out['overall'] = dict(cps=total_usd / total_q if total_q else math.inf,
-                          gate=all(v['gate'] for v in out.values()),
-                          q=total_q / sum(v['n'] for v in out.values() if 'n' in v) if out else None)
+                        gate=complete and ref.get('q') is not None and q >= ref['q'] - tol - 1e-9)
+    q = mean_known([r['q'] for r in per_task])
+    usd = mean_known([r['usd'] for r in per_task])
+    complete = q is not None and usd is not None
+    out['overall'] = dict(cps=usd / q if complete and q else None,
+                          gate=bool(out) and all(v['gate'] for v in out.values()),
+                          q=q, complete=complete, n=len(per_task))
     return out
 
 
@@ -213,7 +257,7 @@ def bootstrap(per_task, refs, n=2000, seed=7):
     out = {}
     for typ in list(h.TYPES) + ['overall']:
         pool = [i for i in ids if typ == 'overall' or by_task[i][0]['type'] == typ]
-        if not pool:
+        if not pool or any(r['q'] is None or r['usd'] is None for i in pool for r in by_task[i]):
             continue
         qs, cps = [], []
         for _ in range(n):
@@ -236,7 +280,9 @@ def baselines(tasks, data):
         for pid in h.bench_profiles():
             if ids and all((i, pid) in data for i in ids):
                 q = sum(stat(data[(i, pid)])['q'] for i in ids) / len(ids)
-                usd = sum(stat(data[(i, pid)])['usd'] or 0 for i in ids) / len(ids)
+                usd = mean_known([stat(data[(i, pid)])['usd'] for i in ids])
+                if usd is None:
+                    continue
                 rows.append((pid, q, usd))
         if rows:
             out[typ] = dict(best=max(rows, key=lambda x: (x[1], -x[2])), cheapest=min(rows, key=lambda x: (x[2], -x[1])))
@@ -254,26 +300,32 @@ def cmd_replay(args):
     tasks = {t['id']: t for t in h.load_tasks(split=args.split)}
     data = cells(args.tags, args.split)
     answers = json.loads(Path(args.answers).read_text()) if args.answers else None
-    per_task, unmeasured = replay(core, config, tasks, data, args.hosts.split(','), answers)
+    try:
+        per_task, unmeasured = replay(core, config, tasks, data, args.hosts.split(','), answers, args.classifier_only)
+    except (ValueError, KeyError, core.routing.RoutingError) as exc:
+        print('Replay input error: %s' % exc, file=sys.stderr)
+        return 2
     refs = references(tasks, data)
     s = summarize(per_task, refs)
     ci = bootstrap(per_task, refs)
     base = baselines(tasks, data)
     if args.json:
-        print(json.dumps(dict(summary=s, ci=ci, baselines=base, unmeasured=unmeasured, per_task=per_task), indent=2, default=str))
-        return 0
+        print(json.dumps(dict(measurement='component_proxy',
+                              assessment='classifier_only' if args.classifier_only else ('jev_model_fit' if answers is not None and config['policy'].get('use_model_evidence', True) else 'task_labels_or_priors'),
+                              summary=s, ci=ci, baselines=base, unmeasured=unmeasured, per_task=per_task), indent=2, default=str))
+        return 0 if s['overall']['gate'] else 1
     rows = [[typ, v['n'], fmt(v['q'], '%.3f'), fmt(v['ref_q'], '%.3f') + ' (' + str(v['ref_profile']) + ')',
              fmt(v['ceiling'], '%.2f'), fmt(v['usd'], '$%.4f'), fmt(v['cps'], '$%.4f'), 'PASS' if v['gate'] else 'FAIL']
             for typ, v in s.items() if typ != 'overall']
     for row in rows:
         c = ci.get(row[0])
-        if c:
-            row.insert(3, '[%.2f, %.2f]' % c['q'])
-            row.append('[$%.3f, $%.3f]' % c['cps'])
+        row.insert(3, '[%.2f, %.2f]' % c['q'] if c else '-')
+        row.append('[$%.3f, $%.3f]' % c['cps'] if c else '-')
     print(table(rows, ['type', 'n', 'routed_q', 'q 90% CI', 'quality_ref', 'ceiling', 'usd/task', 'usd/solve', 'gate', 'usd/solve 90% CI']))
     o = s['overall']
-    print('\nOVERALL  cost_per_solve=$%.4f %s  q=%.3f  gate=%s' % (
-        o['cps'], '[$%.3f, $%.3f]' % ci['overall']['cps'] if 'overall' in ci else '', o['q'] or 0, 'PASS' if o['gate'] else 'FAIL'))
+    print('\nCOMPONENT PROXY (not end-to-end execute; %s) cost_per_solve=%s  q=%s  gate=%s' % (
+        'classifier-only' if args.classifier_only else 'model-fit or task-label routing',
+        fmt(o['cps'], '$%.4f'), fmt(o['q'], '%.3f'), 'PASS' if o['gate'] else 'FAIL/INCOMPLETE'))
     print('\nBASELINES (single profile on every task of the type):')
     for typ, b in base.items():
         for label in ('best', 'cheapest'):
@@ -286,7 +338,7 @@ def cmd_replay(args):
     if args.verbose:
         for r in per_task:
             print(r)
-    return 0
+    return 0 if s['overall']['gate'] else 1
 
 
 def main():
@@ -302,6 +354,7 @@ def main():
             p.add_argument('--state', default=str(Path.home() / '.local' / 'state' / 'alloy-bench' / 'replay'))
             p.add_argument('--json', action='store_true')
             p.add_argument('--verbose', action='store_true')
+            p.add_argument('--classifier-only', action='store_true', help='explicit historical replay without Jev model-fit evidence')
             p.add_argument('--answers', help='per-task classifier answers (JSON from a Jev run) instead of task labels')
             p.add_argument('--policy', action='append', help='policy override, e.g. confidence_floor=0.5 (repeatable)')
     args = ap.parse_args()

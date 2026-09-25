@@ -75,7 +75,7 @@ import alloy_routing as routing
 import alloy_execution as execution
 from datetime import datetime, timezone
 
-ALLOY_VERSION = "0.9.0"
+ALLOY_VERSION = "0.9.1"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -1108,14 +1108,11 @@ class ClaudeAdapter(Adapter):
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
         args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
-        # Lean context: a panelist or worker needs the repository and its project
-        # instructions (CLAUDE.md, .claude/ settings), not the user's global MCP
-        # connectors, skills or user-level settings/plugins, which are re-read
-        # on every turn. Measured by alloy-bench (r1): ~90% fewer tokens.
-        # ALLOY_CLAUDE_LEAN=0 restores the full user context.
+        # Trim optional tools/skills, but retain every settings source: user
+        # settings may contain deny rules, hooks and credential configuration.
+        # ALLOY_CLAUDE_LEAN=0 restores the full tool/skill context.
         if (setting("ALLOY_CLAUDE_LEAN", "1") or "1").lower() not in ("0", "false", "no", "off"):
-            args += ["--strict-mcp-config", "--disable-slash-commands",
-                     "--setting-sources", "project,local"]
+            args += ["--strict-mcp-config", "--disable-slash-commands"]
         # Name the session up front (resumable after a timeout kill; see grok).
         # claude -p has no headless deadline flag to mirror alloy's timeout.
         sid = (ctx or {}).get("session_id")
