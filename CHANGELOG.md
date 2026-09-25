@@ -22,6 +22,12 @@ Measured with the new `bench/` autoresearch evaluator (see `bench/program.md`).
 - Routed consults require at least a medium-tier model (`policy.min_tier_by_mode`):
   Jev cannot see the repository a question is about and under-rated such questions.
   Existing configs keep their policy until they add the key.
+- Ship `gpt-6-sol` disabled: Codex with ChatGPT-account sign-in rejects it, so the
+  preferred large Codex profile failed every dispatch (and existing pins to it break
+  the Codex panelist). Checkers fall back to working profiles.
+- Per-mode capability tiers (`tier_by_mode`). Luna and Gemini Flash Low review at
+  every tier while staying small-tier Makers; replayed on dev tasks this cut overall
+  cost per solved task by a third at equal quality.
 - Opt-in `policy.quota_pacing`: price subscription capacity by reset time, so quota
   that would expire unused is preferred; the host's own CLI is never discounted.
 - `ALLOY_CAPTURE_USAGE=1` records provider-reported token usage per dispatch.

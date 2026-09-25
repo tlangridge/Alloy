@@ -106,11 +106,15 @@ def replay(core, config, tasks, data, hosts, answers_by_task=None):
     by_key = {profile_key(p['cli'], p['model'], p.get('effort')): pid for pid, p in bench.items()}
     available = {n: dict(status='ready', compatible=True) for n in core.routing.FAMILIES}
     # Checker cost for execute = that profile's mean cost on review tasks of the same tier.
-    review_cost = {}
+    review_cost, review_ok = {}, {}
     for (task, profile), rows in data.items():
         t = tasks.get(task)
         if t and t['type'] == 'review':
             review_cost.setdefault((profile, t['tier']), []).extend(r['api_usd'] for r in rows if r.get('api_usd') is not None)
+            # Execute fails closed unless the Checker returns a valid verdict.
+            for key in ((profile, t['tier']), (profile, 'all')):
+                review_ok.setdefault(key, []).extend(
+                    float(not r.get('failure') and not (r.get('grade') or {}).get('malformed')) for r in rows)
     per_task, unmeasured = [], []
     for host in hosts:
         for t in tasks.values():
@@ -135,18 +139,21 @@ def replay(core, config, tasks, data, hosts, answers_by_task=None):
                 continue
             s = stat(rows)
             usd = s['usd'] or 0.0
+            q_exec = s['q']
             checker = None
             if mode == 'make':
                 cargs = _ap.Namespace(**dict(vars(args), mode='review', exclude_family=host + ',' + d['family']))
                 c = core.routing.resolve(core, config, answers, available, cargs, {})
                 checker = by_key.get(profile_key(c['cli'], c['model'], c.get('effort')))
                 costs = review_cost.get((checker, t['tier'])) or []
-                if costs:
+                ok = review_ok.get((checker, t['tier'])) or review_ok.get((checker, 'all'))
+                if costs and ok:
                     usd += sum(costs) / len(costs)
+                    q_exec = s['q'] * sum(ok) / len(ok)
                 else:
                     unmeasured.append((t['id'], 'checker:' + c['profile'], host))
             per_task.append(dict(task=t['id'], type=t['type'], tier=t['tier'], host=host,
-                                 profile=pid, checker=checker, q=s['q'], usd=usd))
+                                 profile=pid, checker=checker, q=q_exec, usd=usd))
     return per_task, unmeasured
 
 

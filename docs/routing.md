@@ -202,6 +202,15 @@ keeps the conservative remaining-fraction rule, because the host session draws
 on the same subscription. Reserves still exclude a pool outright. Pacing
 assumes steady use; enable it if your own usage is not front-loaded.
 
+A profile's `tier` is its capability for every mode unless `tier_by_mode`
+overrides it for one mode. The starter Luna and Gemini Flash Low profiles are
+small-tier Makers with `{"review": "large"}`: on alloy-bench they found seeded
+bugs as reliably as large models (Luna 5/6, Flash Low 6/6) at 1–5% of the
+cost, while as Makers they fell behind on medium and large changes.
+The starter `gpt-6-sol` profile ships disabled: Codex with ChatGPT-account
+sign-in rejects that model. Enable it (`alloy models enable --id
+codex-large-gpt-6-sol`) only with API-key billing.
+
 `min_tier_by_mode` sets a minimum tier per mode. The shipped default is
 `{"consult": "medium"}`: a panel question's difficulty lives in the repository,
 which the classifier never sees. On alloy-bench, Jev rated such questions "small"

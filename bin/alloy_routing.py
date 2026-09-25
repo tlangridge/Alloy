@@ -132,6 +132,10 @@ def validate(config):
             raise RoutingError("Invalid billing_mode")
         if type(p.get("enabled", True)) is not bool or not number(p.get("cost_rank", 1)):
             raise RoutingError("Invalid enabled/cost_rank")
+        roles = p.get("tier_by_mode", {})
+        if not isinstance(roles, dict) or any(m not in ("consult", "review", "make", "debate") or t not in TIERS
+                                              for m, t in roles.items()):
+            raise RoutingError("tier_by_mode maps consult/review/make/debate to small|medium|large")
         if 'task_preferences' in p and (not isinstance(p['task_preferences'], list)
             or any(k not in evidence.KINDS for k in p['task_preferences'])):
             raise RoutingError("task_preferences must contain known task kinds")
@@ -464,6 +468,12 @@ def retry_context(args, config):
     return dict(verified_quality_failures=count, failed_profiles=failed)
 
 
+def role_tier(profile, mode):
+    """A profile's capability tier for a mode; tier_by_mode lets e.g. a strong,
+    cheap reviewer serve large reviews while it only makes small changes."""
+    return profile.get("tier_by_mode", {}).get(mode, profile["tier"])
+
+
 def resolve(core, config, answers, available, args, usage_snapshot=None, model_fit=None):
     usage_snapshot = usage_snapshot or {}
     policy = config["policy"]
@@ -511,7 +521,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             or family(other) == maker_family
             or available.get(name, {}).get("status") != "ready"
             or not available[name].get("compatible")
-            or TIERS.index(other["tier"]) < TIERS.index(tier)):
+            or TIERS.index(role_tier(other, "review")) < TIERS.index(tier)):
             return False
         model_pin = core.setting(MODEL_KEYS[name])
         if model_pin and model_pin != other["model"]:
@@ -541,7 +551,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
         elif allowed and name not in allowed: why = "outside explicit panelists"
         elif available.get(name, {}).get("status") != "ready" or not available[name].get("compatible"): why = "CLI unavailable or incompatible"
         elif family(p) in exclude: why = "family excluded"
-        elif TIERS.index(p["tier"]) < TIERS.index(tier): why = "below required tier"
+        elif TIERS.index(role_tier(p, mode)) < TIERS.index(tier): why = "below required tier"
         elif core.setting(MODEL_KEYS[name]) and core.setting(MODEL_KEYS[name]) != p["model"]: why = "model override differs; add a matching profile"
         if mode == "make" and not why:
             # Preserve an independent non-host Checker, as required by execute.

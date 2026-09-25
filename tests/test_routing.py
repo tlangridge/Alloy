@@ -96,6 +96,11 @@ class RouterTests(unittest.TestCase):
                   'gemini-3.8-flash-low', 'gemini-3.8-flash-medium',
                   'gemini-3.8-flash-high', 'gemini-3.1-pro-low', 'gemini-3.1-pro-high'}
         self.assertTrue(wanted <= {p['model'] for p in self.config['profiles']})
+        # gpt-6-sol ships disabled (ChatGPT-account Codex rejects it) but routes once enabled.
+        sol = next(p for p in self.config['profiles'] if p['model'] == 'gpt-6-sol')
+        self.assertFalse(sol['enabled'])
+        sol['enabled'] = True
+        r.save(r.root() / 'routing.json', self.config)
         for model in wanted:
             p = next(p for p in self.config['profiles'] if p['model'] == model)
             self.args.profile = p['id']
@@ -611,6 +616,24 @@ class RouterTests(unittest.TestCase):
             name: dict(status='fresh', observed_at=now, windows=[dict(
                 pool=name, window='7d', remaining_fraction=left, resets_at=now + share * 7 * 86400)])
             for name, (left, share) in pools.items()})
+
+    def test_tier_by_mode_lets_a_small_maker_review_large_work(self):
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='large'))
+        for p in self.config['profiles']:
+            p['enabled'] = p['id'] in ('codex-small', 'codex-large')
+            p.pop('tier_by_mode', None)
+        self.args.mode = 'review'
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-large')
+        next(p for p in self.config['profiles'] if p['id'] == 'codex-small')['tier_by_mode'] = {'review': 'large'}
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-small')
+        self.args.mode = 'consult'  # other modes keep the base tier
+        self.assertEqual(r.resolve(core, self.config, answers, self.available, self.args, {})['profile'], 'codex-large')
+        next(p for p in self.config['profiles'] if p['id'] == 'codex-small')['tier_by_mode'] = {'review': 'huge'}
+        with self.assertRaises(r.RoutingError):
+            r.validate(self.config)
+        shipped = {p['id']: p for p in r.starter(core)['profiles']}
+        self.assertEqual(shipped['codex-small']['tier_by_mode'], {'review': 'large'})
+        self.assertEqual(shipped['antigravity-small']['tier_by_mode'], {'review': 'large'})
 
     def test_quota_pacing_is_opt_in_and_spares_the_host(self):
         self.assertEqual(r.usage.window_seconds('5h'), 5 * 3600)

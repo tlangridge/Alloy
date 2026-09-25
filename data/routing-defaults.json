@@ -13,7 +13,10 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "codex",
-      "evidence": "editable starter assumption; not benchmarked"
+      "evidence": "alloy-bench 2026-09-25: small-tier Maker; reviewed seeded bugs as well as large models (Luna 5/6, Flash-low 6/6)",
+      "tier_by_mode": {
+        "review": "large"
+      }
     },
     {
       "id": "codex-medium",
@@ -49,10 +52,10 @@
       "family": "openai",
       "effort": "high",
       "cost_rank": 2,
-      "enabled": true,
+      "enabled": false,
       "billing_mode": "unknown",
       "quota_pool": "codex",
-      "evidence": "editable starter assumption; not benchmarked"
+      "evidence": "Codex rejects gpt-6-sol under ChatGPT-account sign-in (verified 2026-09-25); enable only with API-key billing"
     },
     {
       "id": "codex-large-gpt-6-astra",
@@ -130,7 +133,10 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "antigravity",
-      "evidence": "editable starter assumption; not benchmarked"
+      "evidence": "alloy-bench 2026-09-25: small-tier Maker; reviewed seeded bugs as well as large models (Luna 5/6, Flash-low 6/6)",
+      "tier_by_mode": {
+        "review": "large"
+      }
     },
     {
       "id": "antigravity-medium-gemini-3.8-flash-medium",

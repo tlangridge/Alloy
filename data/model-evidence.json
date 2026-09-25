@@ -387,7 +387,7 @@
         "architecture"
       ],
       "strengths": "Officially positioned for complex coding and agentic workflows; lower standard API token price than GPT-5.6 Sol.",
-      "limitations": "No local quality or subscription efficiency benchmark. API price is not a subscription quota multiplier. Model and effort availability depend on the CLI account.",
+      "limitations": "No local quality or subscription efficiency benchmark. API price is not a subscription quota multiplier. Model and effort availability depend on the CLI account: Codex with ChatGPT-account sign-in rejects gpt-6-sol (verified 2026-09-25), so its starter profile ships disabled; use gpt-5.6-sol there.",
       "sources": [
         "https://developers.openai.com/api/docs/models/gpt-6-sol"
       ],
