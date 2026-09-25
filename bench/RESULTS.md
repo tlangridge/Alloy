@@ -1,5 +1,18 @@
 # Alloy autoresearch — results (September 24–25, 2026)
 
+> **0.9.1 correction:** The figures below are historical outputs of the 0.9.0
+> evaluator, not validated end-to-end execute results. That evaluator omitted
+> routing failures, left missing Checker costs out of totals, used verdict format
+> validity as the Checker success proxy, and ignored Jev's model-fit answers.
+> The recorded final holdout had no routing errors, but all 12 OpenAI-host Maker
+> rows lacked measured Claude Checker coverage. Its aggregate quality, cost/solve
+> and confidence interval therefore cannot substantiate the headline claims.
+> The saved Jev answers also lack the original ordered model cards; use explicit
+> `--classifier-only` to inspect them, or recapture the cards and answers together
+> for model-fit replay. CLI fixes and individual role measurements remain useful.
+> Claude lean mode now retains user settings, so its old savings need remeasurement.
+
+
 Branch `autoresearch/sep24`. Method: [program.md](program.md), after Karpathy's
 autoresearch: a frozen evaluator (`bench/`), one change at a time, keep only
 changes that hold quality and cut cost, log every experiment

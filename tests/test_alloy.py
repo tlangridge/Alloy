@@ -457,7 +457,7 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertIn("--strict-mcp-config", cmd)
         self.assertIn("--disable-slash-commands", cmd)
-        self.assertIn("--setting-sources project,local", cmd)  # project instructions still load
+        self.assertNotIn("--setting-sources", cmd)  # retain user deny rules and hooks
         _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"], env_extra={"ALLOY_CLAUDE_LEAN": "0"})
         cmd = " ".join(by_name(m, "claude")["command"])
         self.assertNotIn("--strict-mcp-config", cmd)

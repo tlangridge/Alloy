@@ -363,7 +363,7 @@ variables (env wins over the file):
 | `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
-| `ALLOY_CLAUDE_LEAN` | `1` | run `claude` panelists/workers without your global MCP connectors, skills and user settings (project `CLAUDE.md` still loads); measured ~67% fewer tokens. `0` restores full context |
+| `ALLOY_CLAUDE_LEAN` | `1` | trim global MCP connectors and skills for `claude` panelists/workers; all settings sources, including user permissions and hooks, still load. `0` restores full tool/skill context |
 | `ALLOY_JUDGE` | `host` | who judges (the invoking agent; see methodology). Rotation to a CLI is on the roadmap. |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
 | `ALLOY_WEB` | `1` | panelists may search the web for research; `0` disables it (codex) |

@@ -12,7 +12,7 @@ Live runs reuse production code paths so the measurement is of Alloy itself:
                execute Checker), graded against a seeded-bug ground truth;
   * consult -- routing.routed_adapter + run_panelist (one read-only panelist),
                graded against an answer key;
-  * execute -- execution.run() end to end (Maker + Checker + corrections).
+End-to-end execute (Maker + Checker + corrections) is not measured by this harness.
 Standard library only.
 """
 import argparse

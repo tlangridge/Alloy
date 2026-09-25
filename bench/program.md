@@ -28,6 +28,28 @@ providers** (Codex, Claude, Grok, Antigravity).
 6. Create `bench/results.tsv` with the header row (tab-separated):
    `commit	kind	q	cost_per_solve	gate	status	description`
 
+## Replay integrity (0.9.1)
+
+Replay is a **component proxy**, not an observed execute loop: coding quality
+combines hidden-test Maker success with same-tier Checker correctness. It does
+not measure correction rounds, integration, cleanup, or actual paired review.
+Run those separately before making end-to-end reliability or cost claims.
+
+Capture each task's `answers` and original ordered `model_context` together from
+production `routing.route()` (its returned decision already contains both).
+Replay maps `fit_N` using those cards and passes the result to both resolvers.
+Do not reconstruct card order from today's model inventory. Changed model or
+reasoning effort requires fresh capture; missing cards/fit answers are rejected.
+Historical classification-only files require `--classifier-only`, clearly labeled
+in text and JSON output. This mode is not evidence for full Jev routing.
+
+Routing failures remain in denominators as failures. Missing measurements and
+unknown costs remain null, invalidate the aggregate gate, and suppress aggregate
+confidence intervals. Replay exits 1 for failed/incomplete gates, 2 for invalid
+input, and 0 only for a passing component proxy. Budget for complete Maker and
+independent Checker coverage before claiming an improvement. Missing cost cannot
+make a profile a free baseline or a cost-frontier winner.
+
 ## The metric
 
 `python3 bench/score.py replay --tags <measurement tags> --answers
