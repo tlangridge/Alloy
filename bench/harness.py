@@ -283,7 +283,9 @@ def configure(state):
     profiles = json.loads((BENCH / 'profiles.json').read_text())['profiles']
     defaults = json.loads((ROOT / 'data' / 'routing-defaults.json').read_text())
     config = dict(schema=1, jev_model=defaults.get('jev_model'), quota_pools={}, policy=defaults['policy'],
-                  profiles=[dict(id=p['id'], adapter=p['cli'], model=p['model'], tier='small', family=p['family'],
+                  # 'large' so an explicitly measured profile clears every tier gate
+                  # (task tier, mode floors); the bench measures, it does not route.
+                  profiles=[dict(id=p['id'], adapter=p['cli'], model=p['model'], tier='large', family=p['family'],
                                  effort=p.get('effort'), cost_rank=1, enabled=True, billing_mode='subscription',
                                  quota_pool=p['cli'], evidence='alloy-bench measured profile') for p in profiles])
     (state / 'routing' / 'routing.json').write_text(json.dumps(config, indent=2))
