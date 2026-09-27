@@ -148,7 +148,7 @@ def worker_adapter(core, decision, write=False):
         return argv
     ad.build_args = build
     if ad.name == 'antigravity':
-        def settings():
+        def settings(ctx=None):
             return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
                         permissions=dict(allow=list(ad.READ_TOOLS) + list(ad.WRITE_TOOLS) + ['command(*)'], deny=[]))
         ad._settings = settings

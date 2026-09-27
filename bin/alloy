@@ -627,7 +627,7 @@ class AntigravityAdapter(Adapter):
     default_model = "gemini-3.6-flash-high"
 
     # Read tools get an allow-rule; everything else fails closed. Bare tool names
-    # (no "(target)" suffix) mean "any target" -- with allowNonWorkspaceAccess
+    # (no "(target)" suffix) mean "any target" on agy 1.1 -- with allowNonWorkspaceAccess
     # false the reachable targets are the --add-dir workspace roots.
     READ_TOOLS = (
         "read_file", "view_file", "view_file_outline", "view_code_item",
@@ -642,10 +642,9 @@ class AntigravityAdapter(Adapter):
     # Only denied when the user turns web research off (ALLOY_WEB=0). Hosted
     # search is read-only and on by default, matching the other panelists.
     WEB_TOOLS = ("search_web", "read_url_content", "browser_navigate")
-    # agy >= 1.2 only accepts grants of the form action(target) and ignores the
-    # bare names above with a warning (reads of --add-dir workspaces are allowed
-    # by default there). These keep the same posture in the new grammar; each
-    # release ignores the other's entries.
+    # agy 1.2.12 ignores bare names and needs read_file(/abs/dir) for each
+    # --add-dir root. Keep both grammars; each release ignores the other's
+    # entries. These denials keep the same posture in the new grammar.
     WRITE_GRANTS = ("command(*)", "write_file(*)")
     WEB_GRANTS = ("read_url(*)", "execute_url(*)")
 
@@ -777,7 +776,9 @@ class AntigravityAdapter(Adapter):
                 "\t</array>\n"
                 "</dict>\n</plist>\n")
 
-    def _settings(self) -> dict:
+    def _settings(self, ctx: "dict | None" = None) -> dict:
+        allow = list(self.READ_TOOLS) + [
+            "read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
         deny = list(self.WRITE_TOOLS) + list(self.WRITE_GRANTS)
         if not web_enabled():
             deny += list(self.WEB_TOOLS) + list(self.WEB_GRANTS)
@@ -788,7 +789,7 @@ class AntigravityAdapter(Adapter):
             "notifications": False,
             "showTips": False,
             "showFeedbackSurvey": False,
-            "permissions": {"allow": list(self.READ_TOOLS), "deny": deny},
+            "permissions": {"allow": allow, "deny": deny},
         }
 
     def _home(self, ctx: "dict | None") -> "str | None":
@@ -838,7 +839,7 @@ class AntigravityAdapter(Adapter):
                 except OSError:
                     pass  # agy falls back to file token storage
         write_atomic(os.path.join(cli, "settings.json"),
-                     json.dumps(self._settings(), indent=2))
+                     json.dumps(self._settings(ctx), indent=2))
         return home
 
     def prepare_env(self, ctx: "dict | None" = None) -> dict:
@@ -847,7 +848,8 @@ class AntigravityAdapter(Adapter):
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
-        ctx = ctx or {}
+        if ctx is None:
+            ctx = {}
         # agy ignores stdin in print mode (1.1.7), so the prompt goes in a file it
         # is pointed at -- never on argv (ARG_MAX, `ps` leakage, quoting). The file
         # lives in its own directory so the --add-dir grant covers the prompt only,
@@ -865,9 +867,10 @@ class AntigravityAdapter(Adapter):
         # `--mode plan` steers toward analysis over edits. It is an intent hint
         # only (unenforced); the allow-list is what actually stops writes.
         args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
-        for d in (os.path.dirname(staged), ctx.get("repo")):
-            if d:
-                args += ["--add-dir", d]
+        ctx["agy_add_dirs"] = [os.path.abspath(d) for d in
+                               (os.path.dirname(staged), ctx.get("repo")) if d]
+        for d in ctx["agy_add_dirs"]:
+            args += ["--add-dir", d]
         # Match agy's own print-mode deadline (default 5m) to alloy's, so the
         # engine's timeout is the one that decides, not a hidden CLI default.
         timeout_s = ctx.get("timeout_s")

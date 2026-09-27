@@ -584,18 +584,24 @@ class AlloyTests(unittest.TestCase):
     def test_antigravity_prompt_goes_in_a_file_not_argv(self):
         # agy ignores stdin in print mode, so the prompt is STAGED AS A FILE and
         # only a pointer reaches argv (no ARG_MAX, no prompt visible in `ps`).
-        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
-                         env_extra=self._agy_env())
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity", "--repo", REPO],
+                         env_extra=self._agy_env(MOCK_VERSION="1.2.12"))
         p = by_name(m, "antigravity")
         staged = os.path.join(os.path.dirname(p["stdout_path"]), "prompt_in", "prompt.md")
-        with open(staged) as f:
-            self.assertEqual(f.read(), "Say something useful.")
+        with open(staged) as f, open(m["prompt_path"]) as original:
+            self.assertEqual(f.read(), original.read())
         cmd = " ".join(p["command"])
         self.assertNotIn("Say something useful.", cmd)   # never on argv
         self.assertIn(staged, cmd)                       # pointed at, instead
         # The grant covers the prompt's own directory, not the whole run dir
         # (which holds the other panelists' captured answers).
         self.assertIn("--add-dir " + os.path.dirname(staged), cmd)
+        args = p["command"]
+        add_dirs = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--add-dir"]
+        self.assertEqual(add_dirs, [os.path.abspath(os.path.dirname(staged)), os.path.abspath(REPO)])
+        allow = self._agy_settings(self._shared_agy_home())["permissions"]["allow"]
+        self.assertEqual([a for a in allow if "(" in a],
+                         ["read_file(%s)" % d for d in add_dirs])
 
     def test_antigravity_isolated_home_with_readonly_allowlist(self):
         # The CLI is confined to an alloy-owned HOME holding OUR settings.json, so
@@ -614,7 +620,9 @@ class AlloyTests(unittest.TestCase):
         # is also expressed as action(target) grants.
         self.assertIn("command(*)", s["permissions"]["deny"])
         self.assertIn("write_file(*)", s["permissions"]["deny"])
-        self.assertFalse(any("(" in a for a in s["permissions"]["allow"]))
+        self.assertEqual(s["permissions"]["allow"][:8], [
+            "read_file", "view_file", "view_file_outline", "view_code_item",
+            "list_dir", "grep_search", "find_by_name", "codebase_search"])
         self.assertFalse(s["allowNonWorkspaceAccess"])
         # Containment invariant the macOS keychain config leans on: the agy
         # HOME itself (where the generated com.apple.security.plist lives) is
@@ -623,6 +631,8 @@ class AlloyTests(unittest.TestCase):
         add_dirs = [args[i + 1] for i, a in enumerate(args[:-1])
                     if a == "--add-dir"]
         self.assertTrue(add_dirs)
+        self.assertEqual(s["permissions"]["allow"][8:],
+                         ["read_file(%s)" % d for d in add_dirs])
         for d in add_dirs:
             self.assertFalse(d.startswith(self._shared_agy_home()))
         # toolPermission:"strict" would override the allow-list and deny the READ
