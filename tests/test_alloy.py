@@ -584,8 +584,11 @@ class AlloyTests(unittest.TestCase):
     def test_antigravity_prompt_goes_in_a_file_not_argv(self):
         # agy ignores stdin in print mode, so the prompt is STAGED AS A FILE and
         # only a pointer reaches argv (no ARG_MAX, no prompt visible in `ps`).
+        # A file on stdin is itself a denied read_file on agy 1.2.12.
+        stdin_dump = os.path.join(self.tmp, "agy_stdin_len.txt")
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity", "--repo", REPO],
-                         env_extra=self._agy_env(MOCK_VERSION="1.2.12"))
+                         env_extra=self._agy_env(MOCK_VERSION="1.2.12",
+                                                 MOCK_STDIN_DUMP=stdin_dump))
         p = by_name(m, "antigravity")
         staged = os.path.join(os.path.dirname(p["stdout_path"]), "prompt_in", "prompt.md")
         with open(staged) as f, open(m["prompt_path"]) as original:
@@ -602,6 +605,8 @@ class AlloyTests(unittest.TestCase):
         allow = self._agy_settings(self._shared_agy_home())["permissions"]["allow"]
         self.assertEqual([a for a in allow if "(" in a],
                          ["read_file(%s)" % d for d in add_dirs])
+        with open(stdin_dump) as f:
+            self.assertEqual(f.read(), "0")
 
     def test_antigravity_isolated_home_with_readonly_allowlist(self):
         # The CLI is confined to an alloy-owned HOME holding OUR settings.json, so

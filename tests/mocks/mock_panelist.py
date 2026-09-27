@@ -62,6 +62,7 @@ def main():
     if dump:
         with open(dump, "w") as f:
             f.write(os.environ.get("HOME", ""))
+    stdin_dump = os.environ.get("MOCK_STDIN_DUMP")
 
     role = role_from_argv(argv)
     behavior = os.environ.get(
@@ -73,6 +74,9 @@ def main():
         stdin_data = sys.stdin.buffer.read()
     except Exception:
         stdin_data = b""
+    if stdin_dump:
+        with open(stdin_dump, "w") as f:
+            f.write(str(len(stdin_data)))
 
     if behavior == "hang":
         child = subprocess.Popen(["sleep", "300"])

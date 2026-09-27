@@ -1438,8 +1438,14 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         with open(prompt_path, "rb") as fin, open(out_path, "wb") as fout, open(
             err_path, "wb"
         ) as ferr:
+            # agy 1.2.12 ignores the -p prompt's contents on stdin, but a file
+            # on stdin is treated as a read_file target that headless mode
+            # auto-denies -- even when that path is already in --add-dir.
+            # DEVNULL is what actually lets the Checker read the worktree.
             proc = subprocess.Popen(
-                argv, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env,
+                argv,
+                stdin=subprocess.DEVNULL if adapter.name == "antigravity" else fin,
+                stdout=fout, stderr=ferr, cwd=cwd, env=env,
                 start_new_session=True,
             )
             pgid = proc.pid  # start_new_session makes the child its group leader.
