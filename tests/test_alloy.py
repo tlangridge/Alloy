@@ -603,8 +603,9 @@ class AlloyTests(unittest.TestCase):
         add_dirs = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--add-dir"]
         self.assertEqual(add_dirs, [os.path.abspath(os.path.dirname(staged)), os.path.abspath(REPO)])
         allow = self._agy_settings(self._shared_agy_home())["permissions"]["allow"]
-        self.assertEqual([a for a in allow if "(" in a],
-                         ["read_file(%s)" % d for d in add_dirs])
+        self.assertEqual(allow, ["read_file(%s)" % d for d in add_dirs])
+        deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
+        self.assertEqual(deny, ["command(*)", "write_file(*)"])
         with open(stdin_dump) as f:
             self.assertEqual(f.read(), "0")
 

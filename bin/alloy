@@ -777,8 +777,21 @@ class AntigravityAdapter(Adapter):
                 "</dict>\n</plist>\n")
 
     def _settings(self, ctx: "dict | None" = None) -> dict:
-        allow = list(self.READ_TOOLS) + [
-            "read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
+        dirs = ["read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
+        ver = self._agy_version()
+        # agy 1.2.12 fails closed if allow still lists bare tool names or the
+        # 1.1 deny set: headless read_file is auto-denied even with path grants.
+        # Emit the grammar it rewrites to. 1.1 keeps both grammars.
+        if ver and ver >= (1, 2, 0):
+            deny = list(self.WRITE_GRANTS)
+            if not web_enabled():
+                deny += list(self.WEB_GRANTS)
+            return {
+                "enableTerminalSandbox": True,
+                "showTips": False,
+                "showFeedbackSurvey": False,
+                "permissions": {"allow": dirs, "deny": deny},
+            }
         deny = list(self.WRITE_TOOLS) + list(self.WRITE_GRANTS)
         if not web_enabled():
             deny += list(self.WEB_TOOLS) + list(self.WEB_GRANTS)
@@ -789,7 +802,7 @@ class AntigravityAdapter(Adapter):
             "notifications": False,
             "showTips": False,
             "showFeedbackSurvey": False,
-            "permissions": {"allow": allow, "deny": deny},
+            "permissions": {"allow": list(self.READ_TOOLS) + dirs, "deny": deny},
         }
 
     def _home(self, ctx: "dict | None") -> "str | None":
