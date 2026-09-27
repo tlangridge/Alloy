@@ -609,6 +609,34 @@ class AlloyTests(unittest.TestCase):
         with open(stdin_dump) as f:
             self.assertEqual(f.read(), "0")
 
+    def test_antigravity_worktree_metadata_read_roots(self):
+        repo = os.path.join(self.tmp, "worktree")
+        common = os.path.join(self.tmp, "source.git")
+        gitdir = os.path.join(common, "worktrees", "tid")
+        os.makedirs(repo)
+        os.makedirs(gitdir)
+        for target in (gitdir, os.path.relpath(gitdir, repo)):
+            with self.subTest(target=target):
+                with open(os.path.join(repo, ".git"), "w") as f:
+                    f.write("gitdir: %s\n" % target)
+                _proc, m = panel(
+                    self.tmp, extra_args=["--panelists", "antigravity", "--repo", repo],
+                    env_extra=self._agy_env(MOCK_VERSION="1.2.12"))
+                p = by_name(m, "antigravity")
+                self.assertEqual(p["status"], "ok")
+                args = p["command"]
+                add_dirs = [args[i + 1] for i, a in enumerate(args[:-1])
+                            if a == "--add-dir"]
+                pin = os.path.join(os.path.dirname(p["stdout_path"]), "prompt_in")
+                self.assertEqual(add_dirs, [os.path.abspath(d)
+                                           for d in (pin, repo, gitdir, common)])
+                permissions = self._agy_settings(self._shared_agy_home())["permissions"]
+                self.assertEqual(permissions["allow"],
+                                 ["read_file(%s)" % d for d in add_dirs])
+                self.assertEqual(permissions["deny"], ["command(*)", "write_file(*)"])
+                self.assertNotIn(self._shared_agy_home(), add_dirs)
+                self.assertNotIn("--dangerously-skip-permissions", args)
+
     def test_antigravity_isolated_home_with_readonly_allowlist(self):
         # The CLI is confined to an alloy-owned HOME holding OUR settings.json, so
         # the user's ~/.gemini is neither read for config nor written to.

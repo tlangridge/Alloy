@@ -882,6 +882,23 @@ class AntigravityAdapter(Adapter):
         args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
         ctx["agy_add_dirs"] = [os.path.abspath(d) for d in
                                (os.path.dirname(staged), ctx.get("repo")) if d]
+        repo = ctx.get("repo")
+        if repo:
+            # Linked worktrees keep HEAD and shared metadata outside the checkout.
+            try:
+                with open(os.path.join(repo, ".git"), encoding="utf-8") as f:
+                    pointer = f.read().strip()
+                if pointer.startswith("gitdir:"):
+                    target = pointer[len("gitdir:"):].strip()
+                    if target and not any(c in target for c in "\r\n\0"):
+                        gitdir = os.path.abspath(os.path.join(repo, target))
+                        ctx["agy_add_dirs"].append(gitdir)
+                        parent = os.path.dirname(gitdir)
+                        if os.path.basename(parent) == "worktrees":
+                            ctx["agy_add_dirs"].append(os.path.dirname(parent))
+            except (OSError, UnicodeError):
+                pass  # Ordinary checkouts, missing files, and malformed pointers.
+        ctx["agy_add_dirs"] = list(dict.fromkeys(ctx["agy_add_dirs"]))
         for d in ctx["agy_add_dirs"]:
             args += ["--add-dir", d]
         # Match agy's own print-mode deadline (default 5m) to alloy's, so the
