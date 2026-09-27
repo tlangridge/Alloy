@@ -58,6 +58,16 @@ and feed quota reserves and headroom into routing.
 [Model research](docs/model-research.md) informs task-specific recommendations
 within a bounded cost tolerance.
 
+## Effort by role
+
+Alloy can use different reasoning effort for implementation and verification.
+Profiles support `effort_by_mode` (for example, medium Maker and high Checker),
+with explicit effort overrides taking precedence. Jev assesses each role at its
+configured effort in one request; keyless hosts can inspect
+`alloy models context --mode make` and `--mode review`. Round tables show the
+chosen effort. See [effort routing](docs/effort-routing.md) for configuration,
+failure diagnosis, and the limits of the evidence.
+
 ## See it in 15 seconds
 
 A real Alloy round (the prompt: *"the single biggest reliability risk when an

@@ -102,13 +102,15 @@ def profile_key(cli, model, effort):
     return (cli, MODEL_ALIASES.get(model, model), effort or None)
 
 
-def replay_fits(core, config, entry, classifier_only=False):
+def replay_fits(core, config, entry, classifier_only=False, mode=None, review=False):
     """Use the original ordered cards; fit_N has no identity without them."""
     if classifier_only or not config['policy'].get('use_model_evidence', True):
         return {}
-    cards = entry.get('model_context')
+    context_key = 'review_model_context' if review else 'model_context'
+    prefix = 'review_fit_' if review else 'fit_'
+    cards = entry.get(context_key)
     if not isinstance(cards, list) or not cards:
-        raise ValueError('Jev replay needs the original model_context cards; '
+        raise ValueError('Jev replay needs the original model_context cards for each role; '
                          'use --classifier-only for an explicitly limited historical replay')
     profiles = {p['id']: p for p in config['profiles']}
     seen = set()
@@ -116,14 +118,15 @@ def replay_fits(core, config, entry, classifier_only=False):
         profile = profiles.get(card.get('profile'))
         if (not profile or card['profile'] in seen or
             profile['model'] != card.get('model') or
-            profile.get('effort') != card.get('effort')):
+            profile.get('effort_by_mode', {}).get(mode, profile.get('effort')) != card.get('effort') or
+            (mode is not None and card.get('mode', mode) != mode)):
             raise ValueError('Jev model_context does not match the replay profiles; recapture answers')
         seen.add(card['profile'])
-    expected = {'fit_' + str(i) for i in range(len(cards))}
-    actual = {key for key in entry['answers'] if key.startswith('fit_')}
+    expected = {prefix + str(i) for i in range(len(cards))}
+    actual = {key for key in entry['answers'] if key.startswith(prefix)}
     if actual != expected:
         raise ValueError('Jev replay needs one model-fit answer per original card')
-    return core.routing.model_fits(entry, cards)
+    return core.routing.model_fits(entry, cards, prefix)
 
 
 def replay(core, config, tasks, data, hosts, answers_by_task=None, classifier_only=False):
@@ -140,15 +143,17 @@ def replay(core, config, tasks, data, hosts, answers_by_task=None, classifier_on
     per_task, unmeasured = [], []
     for host in hosts:
         for t in tasks.values():
-            fits = {}
+            fits, review_fits = {}, {}
+            mode = t['type']
             if answers_by_task is not None:
                 entry = answers_by_task[t['id']]
                 answers = entry['answers']
-                fits = replay_fits(core, config, entry, classifier_only)
+                fits = replay_fits(core, config, entry, classifier_only, mode)
+                if mode == 'make':
+                    review_fits = replay_fits(core, config, entry, classifier_only, 'review', True)
             else:
                 answers = core.execution.host_assessment(_ap.Namespace(task_kind=t['kind'], task_tier=t['tier'],
                                                                        task_risk=False, task_ambiguous=False))
-            mode = dict(make='make', review='review', consult='consult')[t['type']]
             args = _ap.Namespace(mode=mode, profile=None, panelists=None, host_family=host,
                                  exclude_family=host if mode == 'review' else '', prior_failures=0,
                                  failed_profile=[], max_estimated_usd=None)
@@ -173,7 +178,7 @@ def replay(core, config, tasks, data, hosts, answers_by_task=None, classifier_on
             if mode == 'make':
                 cargs = _ap.Namespace(**dict(vars(args), mode='review', exclude_family=host + ',' + d['family']))
                 try:
-                    c = core.routing.resolve(core, config, answers, available, cargs, {}, fits)
+                    c = core.routing.resolve(core, config, answers, available, cargs, {}, review_fits)
                 except core.routing.RoutingError as exc:
                     row.update(error=str(exc), q=0.0)
                     continue

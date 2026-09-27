@@ -3,6 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.10.0] - 2026-09-26
+
+- Add profile `effort_by_mode`: implementation and independent review can use
+  different effort, while explicit CLI effort overrides retain priority. Existing
+  profiles remain unchanged on upgrade; the shipped Opus 5.5 profile uses medium
+  implementation effort and high review effort.
+- Give Jev separate Maker and Checker model cards and fit questions in the same
+  make-routing request. Use review-specific judgments for Checker selection and
+  retain both contexts for offline replay. Routing rubric is now version 4.
+- Add `alloy models context --mode make|review` for equivalent keyless decisions.
+  Every execute-round table shows each worker's effort.
+- Teach the skill and worker prompts to distinguish missing edge cases, wrong
+  approaches, unclear requirements and infrastructure failures before retrying.
+  Keep required tests, independent review, permissions and correction bounds.
+- Document the source and limits of the effort guidance. No new live benchmark,
+  cache-hit, cost-reduction or quota-saving claim is made by this release.
+
 ## [0.9.1] - 2026-09-25
 
 - Preserve Claude user settings, including permission deny rules and hooks, in

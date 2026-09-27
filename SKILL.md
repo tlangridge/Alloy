@@ -214,8 +214,23 @@ combines those judgments with eligible profiles, cost, evidence and quota.
 Unknown measured success, latency and tokens per successful fix stay unknown;
 never present vendor benchmarks as local outcomes. Keep
 price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
-for coding; retain Sol as a capable independent-family option and Astra for hard
+for coding and consider high for independent verification; retain Sol as a capable independent-family option and Astra for hard
 reasoning/science. These are task-specific priors, not universal winners.
+
+### Choose implementation and verification effort separately
+
+Read `docs/effort-routing.md` when selecting worker effort or diagnosing retries.
+Use low effort for bounded, supervised iteration when the model supports it;
+managed autonomous work usually warrants medium or high according to risk.
+Verification-heavy debugging and review may justify higher effort than the Maker.
+Resolve material ambiguity first. More effort cannot reliably repair a wrong
+approach, and max is not the default response to a failure.
+
+Profiles support `effort_by_mode`; explicit effort pins win. Inspect keyless
+candidates with `alloy models context --mode make` and `--mode review`.
+Jev assesses both roles at their configured effort in one make-routing request.
+Show effort with each task assignment. Preserve independent families, required
+checks, permission controls and bounded corrections at every effort level.
 
 ### Show usage and task assignments in chat
 
@@ -695,8 +710,10 @@ it met the bar. (Evidence + citations: see `docs/methodology.md`.)
   working: the limit was the problem, so raise `--timeout` (consult panels may use their
   `resume_hint`; managed execute must use `alloy resume`) — do **not** make the
   model dumber to fit a clock. (2) `stalled: true`, or bytes flat across many
-  heartbeats, means it may be stuck or looping: retry once with a lower effort
-  (`ALLOY_CODEX_EFFORT=medium`). (3) Or proceed as a partial panel. Never
+  heartbeats, means it may be stuck or looping: inspect the last failure and
+  distinguish tooling trouble from a wrong approach before choosing a retry.
+  Consult retries may deliberately change effort; do not change a managed worker
+  mid-task. (3) Or proceed as a partial panel. Never
   treat the silence as agreement.
 - **Truncated output** (`truncated: true` in the manifest) → note that the
   panelist's answer was capped at `max_chars`. The run dir's `stdout.txt` is also

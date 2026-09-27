@@ -80,6 +80,14 @@ class ExecutionTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return e.lifecycle(core, args)
 
+    def test_usage_table_exposes_role_effort(self):
+        task = dict(maker=dict(self.maker, effort='medium'), checker=dict(self.checker, effort='high'))
+        with patch.object(core.routing.usage, 'get', return_value={}):
+            e.round_usage(core, task, self.base, 0)
+        table = (self.base / 'usage.md').read_text()
+        self.assertIn('effort medium', table)
+        self.assertIn('effort high', table)
+
     def test_readiness_collects_dirty_auth_and_capacity_without_inference(self):
         self.args.max_fix_rounds = 0
         self.args.test = ['exit 1']
@@ -108,7 +116,7 @@ class ExecutionTests(unittest.TestCase):
         available = {n: dict(status='ready', compatible=True) for n in r.FAMILIES}
         with patch.object(r, 'inventory', return_value=available):
             report = REAL_READINESS(core, self.args, str(self.repo))
-            self.assertTrue(any('independence:' in x for x in report['blockers']))
+            self.assertFalse(report['ready'])  # no independent Maker/Checker pair
             config['profiles'][1]['family'] = 'xai'
             r.save(r.root() / 'routing.json', config)
             self.assertTrue(REAL_READINESS(core, self.args, str(self.repo))['ready'])

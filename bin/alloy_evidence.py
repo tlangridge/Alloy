@@ -44,7 +44,7 @@ def assessment(profile, data):
         preferred_tasks=row['preferred_tasks'] if supported else [],
         strengths=row['strengths'], limitations=row['limitations'], sources=row['sources'],
         basis=row['basis'], suggested_tier=row['suggested_tier'],
-        api_pricing=row.get('api_pricing'))
+        api_pricing=row.get('api_pricing'), effort_guidance=row.get('effort_guidance'))
 
 
 def advise(core, config, data, cache):

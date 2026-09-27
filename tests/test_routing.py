@@ -60,6 +60,72 @@ class RouterTests(unittest.TestCase):
         return r.route(core, 'Change the README title to Alloy.', self.args,
             transport=lambda payload: (answer or response(), 5), available=self.available)
 
+    def test_role_effort_applies_before_evidence_and_preserves_pins(self):
+        p = next(p for p in self.config['profiles'] if p['id'] == 'claude-large')
+        p['effort_by_mode'] = {'make': 'low', 'review': 'high'}
+        self.args.profile = p['id']
+        self.args.mode = 'make'; self.args.host_family = 'openai'
+        maker = r.resolve(core, self.config, response('large')['answers'], self.available, self.args)
+        self.assertEqual(maker['effort'], 'low')
+        self.assertEqual(maker['model_evidence']['status'], 'effort-unverified')
+        self.args.mode = 'review'; self.args.exclude_family = 'openai'
+        review = r.resolve(core, self.config, response('large')['answers'], self.available, self.args)
+        self.assertEqual(review['effort'], 'high')
+        self.assertEqual(review['effort_source'], 'mode')
+        argv = r.routed_adapter(core, review).build_args('prompt', 'last', 'review')
+        self.assertEqual(argv[argv.index('--effort') + 1], 'high')
+        self.assertEqual(review['model_evidence']['status'], 'matched')
+        for override, expected in [('medium', 'medium'), ('inherit', None)]:
+            with patch.dict(os.environ, ALLOY_CLAUDE_EFFORT=override):
+                decision = r.resolve(core, self.config, response('large')['answers'], self.available, self.args)
+            self.assertEqual(decision['effort'], expected)
+            self.assertEqual(decision['effort_source'], 'override')
+        self.assertEqual(p['effort'], 'medium')  # config never mutated
+
+    def test_role_effort_validation(self):
+        for value in ([], {'unknown': 'high'}, {'review': 'unlimited'}, {'review': 1}):
+            with self.subTest(value=value):
+                config = copy.deepcopy(self.config)
+                config['profiles'][0]['effort_by_mode'] = value
+                with self.assertRaisesRegex(r.RoutingError, 'effort_by_mode'):
+                    r.validate(config)
+
+    def test_jev_receives_both_efforts_in_one_request(self):
+        self.args.mode = 'make'; self.args.host_family = 'openai'
+        captured = []
+        def transport(payload):
+            captured.append(payload)
+            reply = response('large')
+            for key in payload['questions']:
+                if key.startswith(('fit_', 'review_fit_')):
+                    reply['answers'][key] = dict(type='noul', noul=.9 if key.startswith('review_') else .1)
+            return reply, 1
+        decision = r.route(core, 'Implement a scoped feature', self.args,
+                           transport=transport, available=self.available, usage_snapshot={})
+        self.assertEqual(len(captured), 1)
+        payload = captured[0]
+        maker = next(c for c in payload['state']['models'] if c['profile'] == 'claude-large')
+        checker = next(c for c in payload['state']['review_models'] if c['profile'] == 'claude-large')
+        self.assertEqual(maker['effort'], 'medium')
+        self.assertEqual(checker['effort'], 'high')
+        self.assertEqual(checker['mode'], 'review')
+        self.assertIn('effort_guidance', checker)
+        self.assertEqual(decision['review_model_fits']['claude-large'], .9)
+        self.assertIn('review_fit_0', decision['answers'])
+        self.assertIn('independent review', payload['questions']['review_fit_0']['instructions'])
+
+    def test_execute_uses_review_specific_jev_judgments(self):
+        maker = dict(family='google', answers=response()['answers'], review_model_fits={'claude-large': .9})
+        checker = dict(family='anthropic')
+        args = argparse.Namespace(max_estimated_usd=None, route=True, maker_profile=None,
+                                  checker_profile=None, host_family='openai')
+        with patch.object(r, 'inventory', return_value=self.available), patch.object(r.usage, 'get', return_value={}), \
+             patch.object(r, 'route', return_value=maker), patch.object(r, 'resolve', return_value=checker) as resolve, \
+             patch.object(core.execution, 'probe'):
+            core.execution.select(core, args, 'task')
+        self.assertEqual(resolve.call_args.args[-1], {'claude-large': .9})
+        self.assertEqual(resolve.call_args.args[4].mode, 'review')
+
     def test_grok_47_default_preserves_pins_and_separates_fast_evidence(self):
         with patch.dict(os.environ, {'ALLOY_GROK_MODEL': ''}):
             profiles = r.starter(core)['profiles']

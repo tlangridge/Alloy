@@ -37,6 +37,8 @@ Run those separately before making end-to-end reliability or cost claims.
 
 Capture each task's `answers` and original ordered `model_context` together from
 production `routing.route()` (its returned decision already contains both).
+For make routing, also capture `review_model_context` and the `review_fit_*`
+answers: the Checker may use different effort and must receive its own judgments.
 Replay maps `fit_N` using those cards and passes the result to both resolvers.
 Do not reconstruct card order from today's model inventory. Changed model or
 reasoning effort requires fresh capture; missing cards/fit answers are rejected.
