@@ -320,3 +320,9 @@ pins and three-family review. Keyless does not mean free provider execution or
 unauthenticated CLIs. No paid fallback runs automatically if Jev fails: the host
 reports the failure and chooses explicit profiles. Jev-enabled routing remains
 available through `--route` with the user's own key.
+
+### Role-specific effort
+
+See [effort routing](effort-routing.md) for `effort_by_mode`, override precedence,
+role-specific Jev evidence, and keyless selection. Existing profiles remain intact
+on upgrade. No effort setting grants execution permissions.

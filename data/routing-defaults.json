@@ -94,7 +94,10 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "claude",
-      "evidence": "editable starter assumption; not benchmarked"
+      "evidence": "editable starter assumption; not benchmarked",
+      "effort_by_mode": {
+        "review": "high"
+      }
     },
     {
       "id": "grok-large",

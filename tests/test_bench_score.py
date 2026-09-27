@@ -100,15 +100,33 @@ class BenchScoreTests(unittest.TestCase):
                  'model_context': [{'profile': 'maker', 'model': 'maker', 'effort': 'high'}]}
         self.core.routing.resolve.side_effect = self.decisions + [self.decisions[1]]
         self.data[('review-task', 'checker')] = [dict(passed=True, api_usd=1)]
+        entry['answers']['review_fit_0'] = {'type': 'noul', 'noul': .9}
+        entry['review_model_context'] = entry['model_context']
         self.replay(answers={'make-task': entry, 'review-task': entry})
         for call in self.core.routing.resolve.call_args_list:
             self.assertEqual(call.args[-1], {'maker': .9})
-        self.core.routing.model_fits.assert_called_with(entry, entry['model_context'])
+        self.core.routing.model_fits.assert_called_with(entry, entry['model_context'], 'fit_')
 
     def test_missing_fit_answer_is_rejected(self):
         entry = {'answers': {}, 'model_context': [{'profile': 'maker', 'model': 'maker', 'effort': 'high'}]}
         with self.assertRaisesRegex(ValueError, 'one model-fit answer'):
             score.replay_fits(self.core, self.config, entry)
+
+    def test_checker_requires_its_own_capture(self):
+        entry = {'answers': {'fit_0': {'type': 'noul', 'noul': .9}},
+                 'model_context': [{'profile': 'maker', 'model': 'maker', 'effort': 'high'}]}
+        with self.assertRaisesRegex(ValueError, 'each role'):
+            score.replay_fits(self.core, self.config, entry, mode='review', review=True)
+
+    def test_replay_checks_role_effort_not_base_effort(self):
+        self.config['profiles'][0]['effort_by_mode'] = {'review': 'medium'}
+        entry = {'answers': {'review_fit_0': {'type': 'noul', 'noul': .9}},
+                 'review_model_context': [{'profile': 'maker', 'model': 'maker', 'effort': 'medium', 'mode': 'review'}]}
+        score.replay_fits(self.core, self.config, entry, mode='review', review=True)
+        self.core.routing.model_fits.assert_called_with(entry, entry['review_model_context'], 'review_fit_')
+        entry['review_model_context'][0]['effort'] = 'high'
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            score.replay_fits(self.core, self.config, entry, mode='review', review=True)
 
     def test_partial_coverage_and_empty_runs_never_pass(self):
         rows = [dict(task='ok', type='make', q=1, usd=1), dict(task='unknown', type='make', q=None, usd=None)]
