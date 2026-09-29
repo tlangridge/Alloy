@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "2026-09-26.1",
+  "revision": "2026-09-29.1",
   "reviewed_at": "2026-09-17",
   "expires_at": "2026-12-16",
   "models": [
@@ -9,6 +9,10 @@
         "gpt-5.6-luna"
       ],
       "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
       "suggested_tier": "small",
       "preferred_tasks": [
         "documentation",
@@ -42,6 +46,10 @@
         "gpt-5.6-terra"
       ],
       "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
       "suggested_tier": "medium",
       "preferred_tasks": [
         "implementation",
@@ -74,6 +82,10 @@
         "gpt-5.6-sol"
       ],
       "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "debugging",
@@ -111,6 +123,10 @@
         "gpt-6-astra"
       ],
       "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "debugging",
@@ -148,6 +164,10 @@
         "claude-sonnet-5"
       ],
       "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
       "suggested_tier": "medium",
       "preferred_tasks": [
         "implementation",
@@ -181,6 +201,10 @@
         "claude-opus-5"
       ],
       "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
@@ -214,6 +238,10 @@
         "claude-fable-5.1"
       ],
       "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "debugging",
@@ -247,6 +275,10 @@
         "grok-4.6"
       ],
       "family": "xai",
+      "adapters": [
+        "grok"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
@@ -270,6 +302,10 @@
         "grok-4.7"
       ],
       "family": "xai",
+      "adapters": [
+        "grok"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
@@ -301,6 +337,10 @@
         "gemini-3.6-flash-high"
       ],
       "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
       "suggested_tier": "medium",
       "preferred_tasks": [
         "implementation",
@@ -322,6 +362,10 @@
         "gemini-3.8-flash-high"
       ],
       "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
@@ -343,6 +387,10 @@
         "claude-opus-5-5"
       ],
       "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
@@ -381,6 +429,10 @@
         "gpt-6-sol"
       ],
       "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
       "suggested_tier": "large",
       "preferred_tasks": [
         "implementation",
