@@ -364,3 +364,7 @@ Tip: use --model <id> (or /model <id> in interactive mode) to switch. Parameteri
 - No keychain prompt from a non-GUI shell; no file written to the working directory; `--mode ask` and `--mode plan` are the documented read-only modes; `-p` alone "has access to all tools, including write and shell".
 - Auth: `cursor-agent login` (done by Tom, account tl***@gmail.com). `--api-key` / CURSOR_API_KEY exist but must NOT be used by Alloy (argv/env secret rule).
 - Model families (from ids): claude-* = anthropic; gpt-* = openai; gemini-* = google; grok-* and cursor-grok-* = xai; composer-* = cursor; auto = UNKNOWN family (router), so it must never be eligible where family independence matters.
+
+## Login store (measured 2026-09-29, names only)
+- The Cursor CLI keeps its login in the macOS login keychain as generic-password items with service names `cursor-access-token` and `cursor-refresh-token` (account masked). No token file exists under ~/.cursor or ~/.local/share/cursor-agent. The Cursor desktop app separately has "Cursor Safe Storage".
+- Consequence: an in-process read tool cannot read the token from a file path; the keychain DB (~/Library/Keychains) is encrypted and needs the Security API, which the model can use only through a shell (denied in ask mode). Alloy itself must NEVER read the keychain (operator rule): no `security` calls, no exact-value redaction that reads the token.
