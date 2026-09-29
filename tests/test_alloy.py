@@ -2,6 +2,7 @@
 """Tests for the alloy dispatcher, driven by a mock panelist CLI so they cost
 no tokens. Run with:  python3 -m unittest discover -s tests -v
 """
+import hashlib
 import json
 import os
 import re
@@ -1162,8 +1163,11 @@ class CursorCase(unittest.TestCase):
         """A new module instance: its own preflight cache and adapter singletons."""
         mock = self.mock
         mod = _import_alloy_module()
+        # The mock CLI reads its MOCK_* knobs from its environment; production passes
+        # nothing but the allowlist, so only the tests widen it (like SANDBOX_EXEC).
         for target, value in (("_CONFIG", {}), ("SANDBOX_EXEC", MOCK), ("SANDBOX_TRUSTED_UID", os.getuid()),
                               ("CURSOR_PLATFORM", sys.platform), ("log", lambda msg: None),
+                              ("CURSOR_ENV_ALLOW_PREFIXES", ("LC_", "MOCK_")),
                               ("_install_signal_handlers", lambda: None)):
             p = mock.patch.object(mod, target, value)
             p.start()
@@ -1245,8 +1249,8 @@ class CursorCase(unittest.TestCase):
                 out.append(f.read())
         return out
 
-    def decision(self, profile, op, path):
-        return MOCKMOD.sbpl_decision(profile, op, path)
+    def decision(self, profile, op, path=None, target=None):
+        return MOCKMOD.sbpl_decision(profile, op, path, target)
 
     def runtime(self, **kw):
         rt = self.mod.cursor_make_runtime(**kw)
@@ -1263,8 +1267,11 @@ class CursorCase(unittest.TestCase):
         os.makedirs(pdir)
         ctx = {"repo": repo, "pdir": pdir, "cwd": repo, "scope": rt}
         tail = ad.build_args(self.prompt(), "", "consult", ctx)
+        if role == "maker":     # a well-formed Maker call is a managed dispatch with cwd == workspace
+            kw = dict({"managed_worktree": True, "cwd": repo}, **kw)
         argv = self.mod.cursor_command(role, tail, exe=MOCK, runtime=rt, workspace=repo,
-                                       staged=ctx["cursor_staged"], **kw)
+                                       staged=ctx["cursor_staged"],
+                                       expected_model=ctx["cursor_expected_model"], **kw)
         with open(rt.profile) as f:
             return argv, f.read(), tail
 
@@ -1341,12 +1348,12 @@ class CursorNamingTests(CursorCase):
     def test_effort_pin_precedence_and_refusals(self):
         ad = self.mod.CursorAgentAdapter()
         self.assertIsNone(ad.effort())
-        self.assertEqual(ad.effective_model(), "composer-2.5")
+        self.assertEqual(ad.effective_model(), "composer-2.5[fast=false]")
         self.setenv(ALLOY_CURSOR_AGENT_EFFORT="low")
         self.assertEqual(ad.effort(), "low")
         self.setenv(ALLOY_CURSOR_EFFORT="HIGH")
         self.assertEqual(ad.effort(), "high")
-        self.assertEqual(ad.effective_model(), "composer-2.5[effort=high]")
+        self.assertEqual(ad.effective_model(), "composer-2.5[effort=high,fast=false]")
         self.setenv(ALLOY_CURSOR_EFFORT="inherit")
         self.assertIsNone(ad.effort())
         for bad in ("ultra", "extreme"):
@@ -1354,10 +1361,34 @@ class CursorNamingTests(CursorCase):
             with self.assertRaises(self.mod.CursorBoundaryError):
                 ad.effective_model()
         self.setenv(ALLOY_CURSOR_EFFORT=None, ALLOY_CURSOR_AGENT_EFFORT=None)
-        for bad in ("auto", "muse-spark-1", "composer-2.5-fast", "composer-2.5[fast=true]"):
+        for bad in ("auto", "muse-spark-1", "composer-2.5-fast",
+                    "composer-2.5[fast=true]", "composer-2.5[fast=1]",
+                    "composer-2.5[fast=yes]", "composer-2.5[fast=unknown]",
+                    "composer-2.5[effort=ultra]"):
             self.setenv(ALLOY_CURSOR_MODEL=bad)
             with self.assertRaises(self.mod.CursorBoundaryError, msg=bad):
                 ad.effective_model()
+        self.setenv(ALLOY_CURSOR_MODEL="composer-2.5[fast=false,effort=xhigh]")
+        self.assertEqual(ad.effective_model(), "composer-2.5[effort=xhigh,fast=false]")
+
+    def test_direct_pin_normalizes_suffix_effort_and_always_disables_fast(self):
+        m = self.mod
+        self.assertEqual(
+            m.cursor_effective_model("gpt-5.6-sol-high", "max"),
+            "gpt-5.6-sol[effort=max,fast=false]")
+        self.assertEqual(
+            m.cursor_effective_model("gpt-5.6-sol-high"),
+            "gpt-5.6-sol[effort=high,fast=false]")
+        self.assertEqual(
+            m.cursor_effective_model("gpt-5.5-extra-high"),
+            "gpt-5.5-extra-high[fast=false]")
+        self.assertEqual(
+            m.cursor_effective_model(
+                "claude-opus-4-8[context=1m,effort=low,fast=false]", "xhigh"),
+            "claude-opus-4-8[context=1m,effort=xhigh,fast=false]")
+        self.setenv(ALLOY_CURSOR_MODEL="gpt-5.6-sol-high", ALLOY_CURSOR_EFFORT="max")
+        self.assertEqual(m.CursorAgentAdapter().effective_model(),
+                         "gpt-5.6-sol[effort=max,fast=false]")
 
     def test_model_families(self):
         fam = self.mod.cursor_model_family
@@ -1405,12 +1436,16 @@ class CursorBoundaryTests(CursorCase):
         return mod, ad
 
     def test_every_unavailable_or_invalid_boundary_state_is_refused(self):
-        for mode in ("read_allowed", "write_leak", "link_leak", "exec_leak", "garbage", "noout", "fail", "cli_fail"):
+        for mode in ("read_allowed", "write_leak", "link_leak", "exec_leak", "garbage", "noout", "fail", "cli_fail",
+                     "socket_leak", "socket_silent_leak", "socket_control_fail",
+                     "mach_leak", "mach_control_fail"):
             with self.subTest(preflight=mode):
                 self.setenv(MOCK_SANDBOX_PREFLIGHT=mode)
                 self._not_ready(mode)
         self.setenv(MOCK_SANDBOX_PREFLIGHT="pass")
-        for version in ("2026.01.01-abcdef0", "9.9.9", "2026.09.27-ffff"):
+        for version in ("2026.01.01-abcdef0", "9.9.9", "2026.09.27-ffff",
+                        "2026.09.28-fffffff", "2026.09.29-64d2043",
+                        "2099.12.31-deadbee"):
             with self.subTest(version=version):
                 self.setenv(MOCK_VERSION=version)
                 self._not_ready(version)
@@ -1465,6 +1500,12 @@ class CursorBoundaryTests(CursorCase):
     def test_non_macos_is_refused_even_with_allow_unsandboxed(self):
         self.setenv(ALLOY_ALLOW_UNSANDBOXED="1")
         m = self.mod = self.fresh()
+        # Production keeps CURSOR_PLATFORM="darwin"; changing only the actual
+        # platform must still fail closed.
+        with self.mock.patch.object(m.sys, "platform", "linux"):
+            ad = m.CursorAgentAdapter()
+            self.assertFalse(ad.cursor_boundary_ready)
+            self.assertIn("unsupported platform", ad.boundary_reason)
         with self.mock.patch.object(m, "CURSOR_PLATFORM", "no-such-platform"):
             ad = m.CursorAgentAdapter()
             self.assertFalse(ad.cursor_boundary_ready)
@@ -1504,7 +1545,8 @@ class CursorBoundaryTests(CursorCase):
         for _ in range(3):
             self.assertTrue(ad.cursor_boundary_ready)
         self.assertEqual(self.sandbox_calls(), first)                       # cached
-        with self.mock.patch.object(self.mod, "CURSOR_SANDBOX_PROFILE_VERSION", 2):
+        with self.mock.patch.object(self.mod, "CURSOR_SANDBOX_PROFILE_VERSION",
+                                    self.mod.CURSOR_SANDBOX_PROFILE_VERSION + 1):
             self.assertTrue(ad.cursor_boundary_ready)
         self.assertGreater(self.sandbox_calls(), first)                     # a new version re-proves
 
@@ -1519,6 +1561,333 @@ class CursorBoundaryTests(CursorCase):
         self.assertNotIn("/bin/bash", cli)                                  # the CLI probe has no extras
         self.assertIn("/denied", probe)                                     # a configured denied-read fixture
         self.assertTrue(all(p.startswith("(version 1)") for p in profiles))
+
+    def test_preflight_cursor_launches_use_the_shared_final_validator(self):
+        m = self.mod
+        seen = []
+        real = m.cursor_validate_argv
+
+        def spy(role, tail, **kw):
+            seen.append((role, list(tail)))
+            return real(role, tail, **kw)
+
+        with self.mock.patch.object(m, "cursor_validate_argv", side_effect=spy):
+            self.assertTrue(m.CursorAgentAdapter().cursor_boundary_ready)
+        self.assertEqual(seen.count(("version", ["--version"])), 2)         # panel and Maker profiles
+
+    def spy_probe_socket(self, mod):
+        """Record every count the preflight's listener reports (connections it really accepted)."""
+        takes = []
+
+        class Spy(mod._ProbeSocket):
+            def take(spy, wait=0.0):
+                count = super().take(wait)
+                takes.append(count)
+                return count
+        patcher = self.mock.patch.object(mod, "_ProbeSocket", Spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return takes
+
+    def test_preflight_proves_a_sandboxed_client_cannot_reach_a_unix_socket(self):
+        mod = self.fresh()
+        takes = self.spy_probe_socket(mod)
+        self.assertTrue(mod.CursorAgentAdapter().cursor_boundary_ready)
+        # Only the parent's own control connection ever reached the listener; neither
+        # profile's client did. That is what "denied" means here, not a client's word.
+        self.assertEqual(sum(takes), 1, takes)
+        profiles = self.profiles()
+        self.assertEqual(len(profiles), 4)      # panel probe, panel CLI start, Maker probe, Maker CLI start
+        self.assertIn('(literal "/usr/bin/nc")', profiles[0])       # the client tool may run in the panel probe ...
+        self.assertFalse(any("/usr/bin/nc" in p for p in profiles[1:]))   # ... and nowhere else
+
+    def test_a_unix_socket_that_is_reachable_or_a_dead_control_refuses_the_boundary(self):
+        for mode, key in (("socket_leak", "unix_connect"), ("socket_silent_leak", "unix_connect"),
+                          ("socket_control_fail", "unix_allowed")):
+            with self.subTest(mode=mode):
+                self.setenv(MOCK_SANDBOX_PREFLIGHT=mode)
+                mod = self.fresh()
+                takes = self.spy_probe_socket(mod)
+                ad = mod.CursorAgentAdapter()
+                self.assertFalse(ad.cursor_boundary_ready)
+                self.assertIn("self-test failed for the panel profile", ad.boundary_reason)
+                self.assertIn(key, ad.boundary_reason)
+                if mode != "socket_control_fail":
+                    self.assertGreater(sum(takes), 1, takes)     # the listener really saw the client
+                self.assertEqual(self.all_cursor_calls(), [])     # the CLI was never started under it
+
+    def test_preflight_proves_mach_relays_are_unreachable_and_the_allowlist_still_works(self):
+        m = self.mod
+        self.assertTrue(m.CursorAgentAdapter().cursor_boundary_ready)
+        profiles = self.profiles()
+        self.assertEqual(len(profiles), 4)
+        # The Mach client is the running interpreter and its WHOLE exec chain (a framework
+        # Python's bin/python3 is a launcher that execs Python.app/.../Python): every link is
+        # executable in the panel probe profile, and none is in the profiles the CLI starts under.
+        chain = m._cursor_probe_interpreters()
+        self.assertEqual(chain[0], os.path.realpath(sys.executable))
+        for link in chain:
+            self.assertIn('(literal "%s")' % link, profiles[0])
+            self.assertEqual(self.decision(profiles[0], "process-exec", link), "allow", link)
+            self.assertFalse(any(link in p for p in profiles[1:2] + profiles[3:]), link)
+        # the probe passes the client, its script, the one allowed name and every relay
+        with open(self.sblog) as f:
+            probes = [json.loads(line)["cmd"] for line in f]
+        self.assertEqual(probes[0], ["/bin/bash", "-c"])
+        script = m._PREFLIGHT_SCRIPT
+        self.assertIn("mach_allowed=allow", script)
+        self.assertIn("mach_relay=deny", script)
+        for role in ("panel", "maker"):
+            self.assertEqual(m._PREFLIGHT_EXPECTED[role]["mach_allowed"], "allow")
+            self.assertEqual(m._PREFLIGHT_EXPECTED[role]["mach_relay"], "deny")
+        # the client itself: a failure of any kind is exit 99, and a count of resolved names is
+        # offset by 64 so no crash or refused-exec status can read as one
+        self.assertIn("sys.exit(99)", m._MACH_PROBE_PY)
+        self.assertIn("sys.exit(64+n)", m._MACH_PROBE_PY)
+        self.assertIn("bootstrap_look_up", m._MACH_PROBE_PY)
+        self.assertEqual((m.CURSOR_MACH_EXIT_BASE, m.CURSOR_MACH_EXIT_ERROR), (64, 99))
+        self.assertLess(m.CURSOR_MACH_EXIT_BASE + len(m.CURSOR_MACH_RELAY_SERVICES), m.CURSOR_MACH_EXIT_ERROR)
+        compile(m._MACH_PROBE_PY, "<mach-probe>", "exec")
+        # the probe judged the GENERATED profile: the real allowlist passes the control name
+        self.assertEqual(self.decision(profiles[0], "mach-lookup", m.CURSOR_MACH_PROBE_ALLOWED), "allow")
+        for relay in m.CURSOR_MACH_RELAY_SERVICES:
+            self.assertEqual(self.decision(profiles[0], "mach-lookup", relay), "deny", relay)
+
+    def test_a_reachable_mach_relay_or_a_dead_mach_allowlist_refuses_the_boundary(self):
+        # Injected client reports (the mock says what a broken sandbox would let the client do) ...
+        for mode, key in (("mach_leak", "mach_relay"), ("mach_control_fail", "mach_allowed")):
+            with self.subTest(mode=mode):
+                self.setenv(MOCK_SANDBOX_PREFLIGHT=mode)
+                ad = self.fresh().CursorAgentAdapter()
+                self.assertFalse(ad.cursor_boundary_ready)
+                self.assertIn("self-test failed for the panel profile", ad.boundary_reason)
+                self.assertIn(key, ad.boundary_reason)
+                self.assertEqual(self.all_cursor_calls(), [])     # the CLI was never started under it
+        self.setenv(MOCK_SANDBOX_PREFLIGHT="pass")
+        # ... and the real wiring: the GENERATED profile decides. Allowing any relay, or
+        # dropping the allowlisted control name, is caught by the preflight.
+        for relay in self.mod.CURSOR_MACH_RELAY_SERVICES:
+            with self.subTest(allowed_relay=relay):
+                mod = self.fresh()
+                with self.mock.patch.object(mod, "CURSOR_MACH_ALLOW", mod.CURSOR_MACH_ALLOW + (relay,)):
+                    ad = mod.CursorAgentAdapter()
+                    self.assertFalse(ad.cursor_boundary_ready)
+                    self.assertIn("mach_relay", ad.boundary_reason)
+        mod = self.fresh()
+        without = tuple(n for n in mod.CURSOR_MACH_ALLOW if n != mod.CURSOR_MACH_PROBE_ALLOWED)
+        with self.mock.patch.object(mod, "CURSOR_MACH_ALLOW", without):
+            ad = mod.CursorAgentAdapter()
+            self.assertFalse(ad.cursor_boundary_ready)
+            self.assertIn("mach_allowed", ad.boundary_reason)
+        self.assertEqual(self.all_cursor_calls(), [])
+
+    def test_preflight_without_a_usable_interpreter_refuses_before_any_probe(self):
+        mod = self.fresh()
+        for value in ("", os.path.join(self.tmp, "no-such-python")):
+            with self.subTest(executable=value), self.mock.patch.object(mod.sys, "executable", value):
+                mod._CURSOR_PREFLIGHT.clear()
+                ad = mod.CursorAgentAdapter()
+                self.assertFalse(ad.cursor_boundary_ready)
+                self.assertIn("interpreter", ad.boundary_reason)
+        self.assertEqual(self.sandbox_calls(), 0)
+
+    def fake_dyld(self, path=None, rc=0, boom=False):
+        """A ctypes whose libSystem answers `_NSGetExecutablePath` with `path`."""
+        class Buf:
+            value = b""
+
+            def __len__(buf):
+                return 4096
+
+        class Lib:
+            def _NSGetExecutablePath(lib, buf, _size):
+                if boom:
+                    raise OSError("no dyld")
+                buf.value = os.fsencode(path or "")
+                return rc
+
+        fake = type(sys)("ctypes")
+        fake.create_string_buffer = lambda n: Buf()
+        fake.c_uint32 = lambda n: n
+        fake.byref = lambda obj: obj
+        fake.CDLL = lambda _name: Lib()
+        return fake
+
+    def test_the_probe_interpreter_chain_includes_the_running_image_behind_a_launcher(self):
+        m = self.mod
+        launcher = os.path.realpath(sys.executable)
+        image = os.path.join(self.tmp, "Python.app", "Contents", "MacOS", "Python")
+        os.makedirs(os.path.dirname(image))
+        with open(image, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(image, 0o755)
+        # macOS, framework build: bin/python3 is a launcher, the process image is another file
+        with self.mock.patch.object(m.sys, "platform", "darwin"), \
+                self.mock.patch.dict(sys.modules, {"ctypes": self.fake_dyld(image)}):
+            self.assertEqual(m._cursor_probe_interpreters(), (launcher, os.path.realpath(image)))
+        # a plain build: launcher and image are one file and it is listed once
+        with self.mock.patch.object(m.sys, "platform", "darwin"), \
+                self.mock.patch.dict(sys.modules, {"ctypes": self.fake_dyld(launcher)}):
+            self.assertEqual(m._cursor_probe_interpreters(), (launcher,))
+        # an image dyld cannot name, one that is not an executable file, or a dyld failure: refused
+        noexec = os.path.join(self.tmp, "Python.app", "noexec")
+        with open(noexec, "w") as f:
+            f.write("x")
+        for label, fake in (("truncated", self.fake_dyld(image, rc=-1)), ("empty", self.fake_dyld("")),
+                            ("absent", self.fake_dyld(os.path.join(self.tmp, "gone"))),
+                            ("a directory", self.fake_dyld(os.path.join(self.tmp, "Python.app"))),
+                            ("not executable", self.fake_dyld(noexec)),
+                            ("dyld error", self.fake_dyld(boom=True))):
+            with self.subTest(label), self.mock.patch.object(m.sys, "platform", "darwin"), \
+                    self.mock.patch.dict(sys.modules, {"ctypes": fake}):
+                with self.assertRaisesRegex(m.CursorBoundaryError, "running Python image"):
+                    m._cursor_probe_interpreters()
+        with self.mock.patch.object(m.sys, "platform", "darwin"), self.mock.patch.dict(sys.modules, {"ctypes": None}):
+            with self.assertRaisesRegex(m.CursorBoundaryError, "running Python image"):
+                m._cursor_probe_interpreters()
+        # off macOS there is no launcher chain (and Cursor itself is refused there)
+        with self.mock.patch.object(m.sys, "platform", "linux"):
+            self.assertEqual(m._cursor_probe_interpreters(), (launcher,))
+
+    def test_preflight_lists_every_link_of_the_interpreter_chain_and_refuses_an_unidentified_one(self):
+        launcher = os.path.realpath(sys.executable)
+        image = os.path.join(self.tmp, "Python.app", "Contents", "MacOS", "Python")
+        os.makedirs(os.path.dirname(image))
+        with open(image, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(image, 0o755)
+        mod = self.fresh()
+        # the launcher and BOTH links reach the generated probe profile, and no other profile
+        with self.mock.patch.object(mod, "_cursor_probe_interpreters", return_value=(launcher, image)):
+            self.assertTrue(mod.CursorAgentAdapter().cursor_boundary_ready)
+        profiles = self.profiles()
+        self.assertEqual(len(profiles), 4)
+        for link in (launcher, image):
+            self.assertEqual(self.decision(profiles[0], "process-exec", link), "allow", link)
+            self.assertEqual(self.decision(profiles[2], "process-exec", link), "allow", link)
+            self.assertEqual(self.decision(profiles[1], "process-exec", link), "deny", link)
+        # an interpreter chain that cannot be identified refuses the boundary before any probe runs
+        calls = self.sandbox_calls()
+        mod = self.fresh()
+        with self.mock.patch.object(mod, "_cursor_probe_interpreters", side_effect=mod.CursorBoundaryError(
+                "the sandbox self-test could not identify the running Python image")):
+            ad = mod.CursorAgentAdapter()
+            self.assertFalse(ad.cursor_boundary_ready)
+            self.assertIn("running Python image", ad.boundary_reason)
+        self.assertEqual(self.sandbox_calls(), calls)
+
+    def run_mach_client(self, names, resolvable=(), broken=False):
+        """The probe client's exit status with ctypes replaced by a fake libSystem."""
+        m = self.mod
+
+        class CUInt:
+            def __init__(self, value=0):
+                self.value = value
+
+            @classmethod
+            def in_dll(cls, _lib, symbol):
+                if broken:
+                    raise ValueError(symbol)
+                return cls(7)
+
+        def look_up(_bootstrap, name, _out):
+            return 0 if name.decode() in resolvable else 1102       # 1102: BOOTSTRAP_UNKNOWN_SERVICE
+
+        lib = type("Lib", (), {})()
+        lib.bootstrap_look_up = look_up
+        fake = type(sys)("ctypes")
+        fake.CDLL = lambda _name: lib
+        fake.c_uint, fake.c_char_p, fake.c_int = CUInt, bytes, int
+        fake.POINTER = lambda kind: kind
+        fake.byref = lambda obj: obj
+        with self.mock.patch.dict(sys.modules, {"ctypes": fake}), self.mock.patch.object(sys, "argv", ["-c"] + list(names)):
+            with self.assertRaises(SystemExit) as caught:
+                exec(compile(m._MACH_PROBE_PY, "<mach-probe>", "exec"), {})
+        return caught.exception.code
+
+    def test_the_mach_probe_client_exits_with_64_plus_the_number_of_names_that_resolved(self):
+        relays = list(self.mod.CURSOR_MACH_RELAY_SERVICES)
+        self.assertEqual(self.run_mach_client(["allowed.name"], resolvable={"allowed.name"}), 65)
+        self.assertEqual(self.run_mach_client(["allowed.name"]), 64)
+        self.assertEqual(self.run_mach_client(relays), 64)                                # all denied
+        self.assertEqual(self.run_mach_client(relays, resolvable={relays[3]}), 65)
+        self.assertEqual(self.run_mach_client(relays, resolvable=set(relays)), 64 + len(relays))
+        self.assertEqual(self.run_mach_client(relays, broken=True), 99)                   # any error: never "64"
+        # no libSystem at all (a non-macOS host, or a client that cannot load it): also 99
+        with self.mock.patch.dict(sys.modules, {"ctypes": None}):
+            with self.mock.patch.object(sys, "argv", ["-c", "x"]), self.assertRaises(SystemExit) as caught:
+                exec(compile(self.mod._MACH_PROBE_PY, "<mach-probe>", "exec"), {})
+        self.assertEqual(caught.exception.code, 99)
+
+    def test_the_preflight_script_reads_a_client_that_did_not_run_as_a_leak_never_as_a_denial(self):
+        m = self.mod
+        mach_lines = [l for l in m._PREFLIGHT_SCRIPT.splitlines() if l.startswith('( "$Y"')]
+        self.assertEqual(len(mach_lines), 2)
+        stub = os.path.join(self.tmp, "stub-python")
+
+        def probe(allowed_rc, relay_rc, executable=None):
+            # names = arguments after `-I -S -c <script>`: one for the allowed control, all relays otherwise
+            with open(stub, "w") as f:
+                f.write('#!/bin/sh\nn=$(($# - 4))\n[ "$n" -eq 1 ] && exit %d\nexit %d\n' % (allowed_rc, relay_rc))
+            os.chmod(stub, 0o755)
+            script = 'Y="$1" Z=script A=allowed.name\nshift\n' + "\n".join(mach_lines)
+            done = subprocess.run(["/bin/bash", "-c", script, "bash", executable or stub,
+                                   *m.CURSOR_MACH_RELAY_SERVICES], capture_output=True, text=True, timeout=20)
+            return dict(line.split("=") for line in done.stdout.split())
+
+        base, count = m.CURSOR_MACH_EXIT_BASE, len(m.CURSOR_MACH_RELAY_SERVICES)
+        ok = {"mach_allowed": "allow", "mach_relay": "deny"}
+        self.assertEqual(probe(base + 1, base), ok)
+        failed = {"mach_allowed": "deny", "mach_relay": "allow"}
+        for label, allowed_rc, relay_rc, expect in (
+                ("client error", 99, 99, failed),
+                ("exec denied", 126, 126, failed),
+                # a launcher whose second exec was refused dies with 1: it must NOT read as a
+                # resolved control name, nor as a denied relay
+                ("launcher crash", 1, 1, failed),
+                ("killed by a signal", 137, 137, failed),
+                ("control name does not resolve", base, base, {"mach_allowed": "deny", "mach_relay": "deny"}),
+                ("one relay resolves", base + 1, base + 1, {"mach_allowed": "allow", "mach_relay": "allow"}),
+                ("every relay resolves", base + 1, base + count, {"mach_allowed": "allow", "mach_relay": "allow"}),
+                ("two names resolve for the control", base + 2, base, {"mach_allowed": "deny", "mach_relay": "deny"})):
+            with self.subTest(label):
+                self.assertEqual(probe(allowed_rc, relay_rc), expect)
+        # the old, unoffset codes are no longer a pass
+        self.assertEqual(probe(1, 0), failed)
+        # an interpreter that is not there at all (127) is neither a control pass nor a denial
+        self.assertEqual(probe(base + 1, base, os.path.join(self.tmp, "absent")), failed)
+
+    def test_probe_socket_control_and_path_limits(self):
+        m = self.mod
+        with self.assertRaises(m.CursorBoundaryError):
+            m._ProbeSocket("/" + "a" * 120)                       # over the sockaddr_un limit: refused, not truncated
+        path = os.path.join(self.tmp, "p.sock")
+        sock = m._ProbeSocket(path)
+        try:
+            sock.control()                                        # an unsandboxed client is accepted ...
+            self.assertEqual(sock.take(), 0)                      # ... and counted exactly once
+        finally:
+            sock.close()
+        dead = m._ProbeSocket(os.path.join(self.tmp, "q.sock"))
+        dead.close()
+        with self.assertRaises(m.CursorBoundaryError):
+            dead.control()                                        # a listener that is not there proves nothing
+
+    def test_metadata_uses_the_effective_run_root_for_the_boundary_and_the_command(self):
+        m = self.mod
+        run_root = os.path.join(self.tmp, "meta-runs")
+        os.makedirs(run_root)
+        seen = []
+        real = m.cursor_command
+
+        def spy(*a, **kw):
+            seen.append(kw.get("run_root"))
+            return real(*a, **kw)
+        with self.mock.patch.object(m, "cursor_command", spy):
+            rc, text = m.cursor_metadata("status", MOCK, run_root=run_root)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [run_root])
+        self.assertEqual(len(m._CURSOR_PREFLIGHT), 1)             # one verdict, not one per spelling
 
     def test_status_and_version_go_through_the_sandbox_wrapper(self):
         ad = self.mod.CursorAgentAdapter()
@@ -1566,7 +1935,10 @@ class CursorProfileTests(CursorCase):
             self.assertEqual(d("process-exec", tool), "deny", tool)
         self.assertEqual(d("file-read-data", wt + "/tracked.txt"), "allow")      # reads of the repo stay possible
         self.assertEqual(d("file-read-data", MOCK), "allow")
-        self.assertEqual(d("network-outbound", "/x"), "allow")                  # the provider network is needed
+        self.assertEqual(d("network-outbound", "api2.cursor.sh:443"), "allow")  # the provider network is needed
+        # ... but a path is a Unix-domain socket, and only the resolver's is reachable
+        self.assertEqual(d("network-outbound", "/x"), "deny")
+        self.assertEqual(d("network-outbound", "/private/var/run/mDNSResponder"), "allow")
 
     def test_maker_profile_allows_only_non_git_worktree_content_and_runtime(self):
         repo = self.repo()
@@ -1597,6 +1969,141 @@ class CursorProfileTests(CursorCase):
         grant = next(i for i, l in enumerate(lines) if l.startswith("(allow file-write*") and wt in l)
         gitdeny = next(i for i, l in enumerate(lines) if l.startswith("(deny file-write*") and "/.git" in l)
         self.assertGreater(gitdeny, grant)
+
+    def test_both_profiles_deny_unsandboxed_write_delegation_channels(self):
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        for role, workspace in (("panel", repo), ("maker", wt)):
+            with self.subTest(role=role):
+                _argv, profile, _tail = self.gateway(role, workspace)
+                for operation in ("job-creation", "lsopen", "appleevent-send",
+                                  "user-preference-write"):
+                    self.assertIn("(deny %s)" % operation, profile)
+                    self.assertEqual(self.decision(profile, operation, ""), "deny")
+
+    def test_both_profiles_deny_local_ipc_relays_and_other_process_access(self):
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        home = self.mod.cursor_login_home()
+        for role, workspace in (("panel", repo), ("maker", wt)):
+            with self.subTest(role=role):
+                rt = self.runtime()
+                _argv, prof, _tail = self.gateway(role, workspace, rt)
+                d = lambda op, path=None, target=None: self.decision(prof, op, path, target)
+                # Unix-domain sockets: tmux, Docker (both spellings), an ssh agent, an IDE's
+                # command-line hook and sockets inside the writable roots are unreachable ...
+                for sock in ("/private/tmp/tmux-501/default", "/private/var/run/docker.sock",
+                             home + "/.docker/run/docker.sock", "/private/tmp/com.apple.launchd.AbC/Listeners",
+                             "/private/var/folders/xx/T/vscode-ipc-1.sock", workspace + "/dev.sock",
+                             rt.tmp + "/agent.sock", "/private/var/run/mDNSResponder2"):
+                    self.assertEqual(d("network-outbound", sock), "deny", sock)
+                    self.assertEqual(d("network-bind", sock), "deny", sock)
+                # ... except the one resolver socket name resolution needs, and only to connect
+                self.assertEqual(d("network-outbound", "/private/var/run/mDNSResponder"), "allow")
+                self.assertEqual(d("network-bind", "/private/var/run/mDNSResponder"), "deny")
+                # the provider network (TCP/UDP endpoints are not paths) is untouched
+                for endpoint in ("api2.cursor.sh:443", "127.0.0.1:8080", "[::1]:8080"):
+                    self.assertEqual(d("network-outbound", endpoint), "allow", endpoint)
+                self.assertEqual(d("network-bind", "127.0.0.1:0"), "allow")
+                lines = prof.splitlines()
+                self.assertEqual([l for l in lines if l.startswith("(allow network")],
+                                 ['(allow network-outbound (literal "/private/var/run/mDNSResponder"))'])
+                # inspecting or reading the task port of any process but itself and its children
+                for op in ("process-info-pidinfo", "process-info-rusage", "process-info-setcontrol"):
+                    self.assertEqual(d(op, target="others"), "deny", op)
+                    self.assertEqual(d(op, target="self"), "allow", op)
+                    self.assertEqual(d(op, target="children"), "allow", op)
+                self.assertEqual(d("process-info-listpids"), "deny")
+                self.assertEqual(d("process-info-codesignature"), "allow")
+                self.assertEqual(d("mach-task-read", target="others"), "deny")
+                self.assertEqual(d("mach-task-read", target="self"), "allow")
+                # Mach services that act for a caller outside its sandbox: every lookup is
+                # denied unless it is on the exact allowlist (the keychain login item, TLS and
+                # name resolution stay reachable), so an UNLISTED service is unreachable too
+                for service in self.mod.CURSOR_MACH_RELAY_SERVICES:
+                    self.assertEqual(d("mach-lookup", service), "deny", service)
+                for service in ("com.apple.SecurityServer", "com.apple.trustd", "com.apple.system.opendirectoryd.libinfo"):
+                    self.assertEqual(d("mach-lookup", service), "allow", service)
+                for service in self.mod.CURSOR_MACH_ALLOW:
+                    self.assertEqual(d("mach-lookup", service), "allow", service)
+                for unlisted in ("com.example.relay", "com.apple.some.unlisted.service", "org.tmux.relay",
+                                 "com.docker.socket", "com.apple.coreservices.uiagent",
+                                 "com.apple.SecurityServer.extra", "com.apple.trustd2", ""):
+                    self.assertEqual(d("mach-lookup", unlisted), "deny", unlisted)
+                # ordering: all of it precedes the write rules, so no role grant can undo it
+                first_write = next(i for i, l in enumerate(lines) if l.startswith("(deny file-write*)"))
+                for needle in ("(deny network-outbound", "(deny network-bind", "(deny process-info*)",
+                               "(deny mach-task-read", "(deny mach-lookup"):
+                    self.assertLess(next(i for i, l in enumerate(lines) if l.startswith(needle)), first_write, needle)
+                self.assertLess(lines.index("(deny mach-lookup)"),
+                                next(i for i, l in enumerate(lines) if l.startswith("(allow mach-lookup")))
+
+    def test_the_mach_lookup_allowlist_is_exact_default_deny_and_never_holds_a_relay(self):
+        m = self.mod
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        # the constants: no relay is allowed, the probe's control name is allowed, no duplicates
+        self.assertEqual(set(m.CURSOR_MACH_ALLOW) & set(m.CURSOR_MACH_RELAY_SERVICES), set())
+        self.assertIn(m.CURSOR_MACH_PROBE_ALLOWED, m.CURSOR_MACH_ALLOW)
+        self.assertEqual(len(set(m.CURSOR_MACH_ALLOW)), len(m.CURSOR_MACH_ALLOW))
+        self.assertTrue(m.CURSOR_MACH_RELAY_SERVICES)
+        for role, workspace in (("panel", repo), ("maker", wt)):
+            with self.subTest(role=role):
+                _argv, profile, _tail = self.gateway(role, workspace)
+                mach = [l for l in profile.splitlines() if "mach-lookup" in l]
+                # exactly two rules: a filterless deny, then the allow of exact global names
+                self.assertEqual(len(mach), 2, mach)
+                self.assertEqual(mach[0], "(deny mach-lookup)")
+                self.assertEqual(mach[1], "(allow mach-lookup " + " ".join(
+                    '(global-name "%s")' % n for n in m.CURSOR_MACH_ALLOW) + ")")
+                # no bare/regex/prefix allow that would reopen the gap, and no deny-list of relays
+                self.assertNotIn("(allow mach-lookup)", profile)
+                self.assertNotIn("global-name-prefix", profile)
+                self.assertNotIn("global-name-regex", profile)
+                self.assertNotIn("xpc-service-name", profile)
+                self.assertNotRegex(profile, r"\(deny mach-lookup \(")
+                for relay in m.CURSOR_MACH_RELAY_SERVICES:
+                    self.assertNotIn('"%s"' % relay, profile, relay)
+        # a name that could break out of the SBPL literal is refused, not escaped
+        for bad in ('x") (allow mach-lookup', "a b", "", "a\nb", "com.apple.x\\"):
+            with self.subTest(name=bad), self.mock.patch.object(m, "CURSOR_MACH_ALLOW", m.CURSOR_MACH_ALLOW + (bad,)):
+                with self.assertRaises(m.CursorBoundaryError):
+                    self.gateway("panel", repo)
+
+    def test_the_mock_evaluator_models_target_and_path_filters_faithfully(self):
+        # A parser that dropped a filter it did not understand would turn `(allow ... (target
+        # self))` into an unconditional allow and make every check above pass vacuously.
+        prof = "\n".join(["(version 1)", "(deny process-info*)",
+                          "(allow process-info* (target self) (target children))",
+                          '(deny network-outbound (subpath "/"))',
+                          '(allow network-outbound (literal "/r"))',
+                          '(deny mach-lookup (global-name "svc.a") (global-name "svc.b"))'])
+        d = self.decision
+        self.assertEqual(d(prof, "process-info-pidinfo", target="others"), "deny")
+        self.assertEqual(d(prof, "process-info-pidinfo", target="self"), "allow")
+        self.assertEqual(d(prof, "process-info-pidinfo"), "deny")             # no target: not a self/child rule
+        self.assertEqual(d(prof, "network-outbound", "/x"), "deny")
+        self.assertEqual(d(prof, "network-outbound", "/r"), "allow")
+        self.assertEqual(d(prof, "network-outbound", "host:1"), "deny")       # no allow-default in this snippet
+        self.assertEqual(d("(version 1)\n(allow default)\n" + "\n".join(prof.splitlines()[1:]),
+                           "network-outbound", "host:1"), "allow")
+        # (evaluator semantics only: a filtered deny leaves other names to the default. The
+        # production profile is default-deny for Mach lookups; see the allowlist tests.)
+        self.assertEqual(d("(version 1)\n(allow default)\n" + prof.splitlines()[-1], "mach-lookup", "svc.b"), "deny")
+        self.assertEqual(d("(version 1)\n(allow default)\n" + prof.splitlines()[-1], "mach-lookup", "svc.c"), "allow")
+        # the allowlist shape: a filterless deny, then an allow of exact names; later wins
+        allow = "\n".join(["(version 1)", "(allow default)", "(deny mach-lookup)",
+                           '(allow mach-lookup (global-name "svc.a") (global-name "svc.b"))'])
+        self.assertEqual(d(allow, "mach-lookup", "svc.a"), "allow")
+        self.assertEqual(d(allow, "mach-lookup", "svc.b"), "allow")
+        self.assertEqual(d(allow, "mach-lookup", "svc.c"), "deny")               # unlisted
+        self.assertEqual(d(allow, "mach-lookup", "svc.a.sub"), "deny")           # exact, not a prefix
+        self.assertEqual(d(allow, "mach-lookup", "svc"), "deny")
+        self.assertEqual(d(allow, "mach-lookup"), "deny")                        # no name: not an allowed one
+        self.assertEqual(d(allow, "network-outbound", "host:1"), "allow")        # other operations unaffected
+        reversed_order = "\n".join(["(version 1)", "(allow default)",
+                                    '(allow mach-lookup (global-name "svc.a"))', "(deny mach-lookup)"])
+        self.assertEqual(d(reversed_order, "mach-lookup", "svc.a"), "deny")      # order is what makes it work
 
     def test_maker_refuses_plain_dirs_and_subdirectories(self):
         repo = self.repo()
@@ -1685,6 +2192,19 @@ class CursorProfileTests(CursorCase):
             with self.assertRaises(self.mod.CursorBoundaryError):
                 self.mod._check_overlap(self.mod.cursor_denials(), [os.path.realpath(inside)])
 
+    def test_fingerprint_root_containing_a_denial_is_refused_before_any_walk(self):
+        m = self.mod
+        root = os.path.join(self.tmp, "fake-home")
+        denied = os.path.join(root, "Library", "Keychains")
+        os.makedirs(denied)
+        denials = m.CursorDenials((denied,), ())
+        with self.mock.patch.object(m, "cursor_git_locations",
+                                    side_effect=AssertionError("must refuse before Git inspection")), \
+                self.mock.patch.object(m, "_fp_walk",
+                                       side_effect=AssertionError("must not walk denied roots")):
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_fingerprint(root, denials=denials)
+
     def test_denial_parsing_and_escaping(self):
         m = self.mod
         home = m.cursor_login_home()
@@ -1713,10 +2233,32 @@ class CursorProfileTests(CursorCase):
         self.assertEqual(self.decision(prof, "file-read-data", home + "/.ssh/id"), "deny")
         self.assertEqual(self.decision(prof, "file-read-data", home + "/dotfiles-ssh/id"), "deny")
 
-    def test_login_home_is_never_taken_from_the_environment(self):
+    def test_login_home_comes_from_the_account_database(self):
         import pwd
-        self.setenv(HOME=self.tmp)
         self.assertEqual(self.mod.cursor_login_home(), os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+
+    def test_missing_account_database_home_fails_without_expanduser_fallback(self):
+        m = self.mod
+        with self.mock.patch.object(m.pwd, "getpwuid", side_effect=KeyError("missing")), \
+                self.mock.patch.object(m.os.path, "expanduser",
+                                       side_effect=AssertionError("must not consult HOME")):
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_login_home()
+            self.assertFalse(m.cursor_boundary(MOCK).ready)
+
+    def test_dispatch_records_a_refusal_when_login_home_disappears(self):
+        m = self.mod
+        ad = m.CursorAgentAdapter()
+        self.assertTrue(ad.cursor_boundary_ready)
+        before = len(self.inference_calls())
+        with self.mock.patch.object(m.pwd, "getpwuid", side_effect=KeyError("missing")):
+            st = self.dispatch(repo=self.repo(), adapter=ad)
+        self.assertEqual(st["status"], "error")
+        self.assertTrue(st["error"].startswith("refused: "), st)
+        self.assertIn("account database", st["error"])
+        self.assertEqual(len(self.inference_calls()), before)
+        with open(os.path.join(self.tmp, "runs", "r", "cursor", "status.json")) as f:
+            self.assertEqual(json.load(f)["error"], st["error"])
 
     def test_write_grants_refuse_symlinks_and_uncertain_paths(self):
         m = self.mod
@@ -1769,12 +2311,95 @@ class CursorProfileTests(CursorCase):
         with self.assertRaises(m.CursorBoundaryError):
             m.cursor_make_runtime(forbidden=["/"])
 
+    def test_runtime_always_protects_configured_and_default_run_roots(self):
+        m = self.mod
+        configured = os.path.join(self.tmp, "configured-runs")
+        default = os.path.join(self.tmp, "state", "alloy", "runs")
+        for run_root, configured_value in ((configured, configured), (default, None)):
+            os.makedirs(run_root, exist_ok=True)
+            self.setenv(ALLOY_RUN_ROOT=configured_value)
+            with self.subTest(run_root=run_root), self.mock.patch.object(tempfile, "tempdir", run_root):
+                with self.assertRaises(m.CursorBoundaryError):
+                    m.cursor_make_runtime()
+                self.assertEqual(os.listdir(run_root), [])
+
+    def test_tmpdir_environment_cannot_place_runtime_beneath_the_run_root(self):
+        m = self.mod
+        run_root = os.path.join(self.tmp, "environment-runs")
+        os.makedirs(run_root)
+        self.setenv(ALLOY_RUN_ROOT=run_root)
+        with self.mock.patch.dict(os.environ, {"TMPDIR": run_root}), \
+                self.mock.patch.object(tempfile, "tempdir", None):
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_make_runtime()
+        self.assertEqual(os.listdir(run_root), [])
+
+    def test_explicit_cli_run_root_is_protected_during_preflight_and_dispatch(self):
+        m = self.mod
+        repo = self.repo()
+        run_root = os.path.join(self.tmp, "argument-runs")
+        os.makedirs(run_root)
+        with self.mock.patch.object(tempfile, "tempdir", run_root):
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_make_runtime(run_root=run_root)
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_metadata("status", MOCK, run_root=run_root)
+            rc, out, _err = self.cli(
+                "panel", "--prompt-file", self.prompt(), "--run-dir", run_root,
+                "--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 3)
+        with open(out.strip().splitlines()[-1]) as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["panelists"], [])
+        self.assertIn("no supported OS write boundary",
+                      manifest["summary"]["skipped"][0]["reason"])
+        self.assertFalse([n for n in os.listdir(run_root) if n.startswith("alloy-cursor-")])
+
+    def test_retry_pdir_is_protected_without_parent_depth_inference(self):
+        m = self.mod
+        run_root = os.path.join(self.tmp, "runs-root")
+        retry = os.path.join(run_root, "stamp", "cursor", "_retry")
+        os.makedirs(retry)
+        with self.mock.patch.object(tempfile, "tempdir", retry):
+            with self.assertRaises(m.CursorBoundaryError):
+                m.cursor_make_runtime(pdir=retry)
+        self.assertEqual(os.listdir(retry), [])
+
+    def test_cleanup_uncertainty_turns_a_completed_dispatch_into_failure(self):
+        m = self.mod
+        ad = m.CursorAgentAdapter()
+        self.assertTrue(ad.cursor_boundary_ready)       # warm preflight before intercepting dispatch cleanup
+        real_rmtree = m.shutil.rmtree
+        retained = []
+
+        def leave_private_tree(path, *args, **kwargs):
+            if os.path.basename(path).startswith("alloy-cursor-"):
+                retained.append(path)
+                return None
+            return real_rmtree(path, *args, **kwargs)
+
+        try:
+            with self.mock.patch.object(m.shutil, "rmtree", side_effect=leave_private_tree):
+                st = self.dispatch(repo=self.repo(), adapter=ad)
+            self.assertEqual(len(self.inference_calls()), 1)
+            self.assertEqual(st["status"], "error")
+            self.assertIn("cleanup could not be verified", st["error"])
+            with open(os.path.join(self.tmp, "runs", "r", "cursor", "status.json")) as f:
+                self.assertEqual(json.load(f)["status"], "error")
+        finally:
+            for path in set(retained):
+                if os.path.lexists(path):
+                    real_rmtree(path)
+
 
 class CursorGrammarTests(CursorCase):
     def good(self, role="panel", ws=None):
         ws = ws or os.path.join(self.tmp, "ws")
         os.makedirs(ws, exist_ok=True)
         staged = os.path.join(self.tmp, "prompt_in", "prompt.md")
+        os.makedirs(os.path.dirname(staged), exist_ok=True)
+        with open(staged, "w") as f:
+            f.write("fixture")
         instr = self.mod.cursor_instruction(role, staged, os.path.realpath(ws))
         argv = ["-p"] + (["--mode", "ask"] if role == "panel" else []) + [
             "--output-format", "json", "--workspace", ws, "--model", "composer-2.5", "--trust",
@@ -1782,7 +2407,8 @@ class CursorGrammarTests(CursorCase):
         return argv, ws, staged
 
     def check(self, role, argv, ws, staged):
-        self.mod.cursor_validate_argv(role, argv, workspace=ws, staged=staged)
+        self.mod.cursor_validate_argv(role, argv, workspace=ws, staged=staged,
+                                      expected_model="composer-2.5")
 
     def test_the_two_closed_role_grammars_accept_exactly_their_own_form(self):
         for role in ("panel", "maker"):
@@ -1843,6 +2469,7 @@ class CursorGrammarTests(CursorCase):
                 "flag as value": [("--force" if a == "composer-2.5" else a) for a in argv],
                 "auto model": [("auto" if a == "composer-2.5" else a) for a in argv],
                 "unknown model": [("muse-spark-1" if a == "composer-2.5" else a) for a in argv],
+                "known model replacement": [("gpt-5.6-sol-high" if a == "composer-2.5" else a) for a in argv],
                 "empty model": [("" if a == "composer-2.5" else a) for a in argv],
                 "bracketed unknown": [("kimi-k3[effort=low]" if a == "composer-2.5" else a) for a in argv],
                 "sandbox disabled": [("disabled" if a == "enabled" else a) for a in argv],
@@ -1868,6 +2495,47 @@ class CursorGrammarTests(CursorCase):
         with self.assertRaises(m.CursorBoundaryError):
             self.check("maker", argv[:-1] + [argv[-1].replace(json.dumps(os.path.realpath(ws)), json.dumps("/elsewhere"))], ws, staged)
 
+    def test_workspace_staged_and_model_identity_are_exact(self):
+        m = self.mod
+        argv, ws, staged = self.good("panel")
+        alias = os.path.join(self.tmp, "workspace-alias")
+        os.symlink(ws, alias)
+        aliased = list(argv)
+        aliased[aliased.index("--workspace") + 1] = alias
+        with self.assertRaises(m.CursorBoundaryError):
+            self.check("panel", aliased, ws, staged)
+        with self.assertRaises(m.CursorBoundaryError):
+            m.cursor_validate_argv("panel", argv, workspace=ws, staged=None,
+                                   expected_model="composer-2.5")
+        for duplicate in ("composer-2.5[fast=false,fast=true]",
+                          "composer-2.5[effort=low,effort=high]"):
+            with self.subTest(model=duplicate), self.assertRaises(m.CursorBoundaryError):
+                m.cursor_validate_model(duplicate)
+
+    def test_exact_staged_file_denial_and_symlink_are_refused_before_spawn(self):
+        m = self.mod
+        repo = self.repo()
+        rt = self.runtime()
+        ad = m.CursorAgentAdapter()
+        pdir = os.path.join(self.tmp, "staged-check")
+        os.makedirs(pdir)
+        ctx = {"repo": repo, "pdir": pdir, "cwd": repo, "scope": rt}
+        tail = ad.build_args(self.prompt(), "", "consult", ctx)
+        staged = ctx["cursor_staged"]
+        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=staged)
+        with self.assertRaises(m.CursorBoundaryError):
+            m.cursor_command("panel", tail, exe=MOCK, runtime=rt, workspace=repo,
+                             staged=staged, expected_model=ctx["cursor_expected_model"])
+        target = os.path.join(self.tmp, "other-prompt")
+        with open(target, "w") as f:
+            f.write("x")
+        os.remove(staged)
+        os.symlink(target, staged)
+        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=None)
+        with self.assertRaises(m.CursorBoundaryError):
+            m.cursor_command("panel", tail, exe=MOCK, runtime=rt, workspace=repo,
+                             staged=staged, expected_model=ctx["cursor_expected_model"])
+
     def test_metadata_roles_have_exact_grammars(self):
         m = self.mod
         for role, tail in m._CURSOR_METADATA.items():
@@ -1887,7 +2555,9 @@ class CursorGrammarTests(CursorCase):
         self.assertTrue(self.mod.CursorAgentAdapter().cursor_boundary_ready)
         spawned = self.sandbox_calls()
         with self.assertRaises(self.mod.CursorBoundaryError):
-            self.mod.cursor_command("panel", argv[:-1] + ["--force", argv[-1]], exe=MOCK, runtime=rt, workspace=ws, staged=staged)
+            self.mod.cursor_command("panel", argv[:-1] + ["--force", argv[-1]], exe=MOCK,
+                                    runtime=rt, workspace=ws, staged=staged,
+                                    expected_model="composer-2.5")
         self.assertFalse(os.path.exists(rt.profile))                  # no profile was even written
         self.assertEqual(self.sandbox_calls(), spawned)                # and nothing was spawned
 
@@ -1916,6 +2586,7 @@ class CursorGrammarTests(CursorCase):
             "mode plan": set_value("--mode", "plan"),
             "sandbox disabled": set_value("--sandbox", "disabled"),
             "model auto": set_value("--model", "auto"),
+            "known model swapped": set_value("--model", "gpt-5.6-sol-high"),
             "force appended": lambda a: a[:-1] + ["--force", a[-1]],
             "yolo appended": lambda a: a + ["--yolo"],
             "endpoint appended": lambda a: a[:-1] + ["--endpoint=https://x.invalid", a[-1]],
@@ -1943,7 +2614,8 @@ class CursorGrammarTests(CursorCase):
         self.setenv(CURSOR_API_KEY="env-poison-not-a-secret", CURSOR_API_ENDPOINT="https://env-poison.invalid",
                     TYPESAFE_API_KEY="router-poison", OPENROUTER_API_KEY="router-poison-2")
         with self.mock.patch.object(self.mod, "_CONFIG", {"CURSOR_API_KEY": "cfg-poison-not-a-secret",
-                                                          "CURSOR_API_ENDPOINT": "https://cfg-poison.invalid"}):
+                                                          "CURSOR_API_ENDPOINT": "https://cfg-poison.invalid",
+                                                          "OTHER_PROVIDER_TOKEN": "unrelated-config-secret"}):
             ad = self.mod.CursorAgentAdapter()
             self.assertEqual(ad.auth_state(), "ready")                  # status
             self.mod.cursor_metadata("version", MOCK)                   # version
@@ -1954,7 +2626,8 @@ class CursorGrammarTests(CursorCase):
                          {("status",), ("--version",)})                    # status, version (preflight) ... and:
         self.assertEqual(len(self.inference_calls()), 1)                    # ... the panel call
         for call in calls:
-            for name in ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
+            for name in ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY",
+                         "OPENROUTER_API_KEY", "OTHER_PROVIDER_TOKEN"):
                 self.assertIsNone(call["env"][name], (call["argv"][:1], name))
             joined = " ".join(call["argv"])
             for flag in ("--api-key", "--endpoint", "--header", "-e ", "-H ", "--force", "--yolo"):
@@ -1963,11 +2636,93 @@ class CursorGrammarTests(CursorCase):
         self.assertNotIn("poison", blob)
         with open(os.path.join(self.tmp, "runs", "r", "cursor", "status.json")) as f:
             self.assertNotIn("poison", f.read())
-        for name in ("stdout.txt", "result.md"):
+        for name in ("stdout.txt", "stderr.txt", "result.md"):
             with open(os.path.join(self.tmp, "runs", "r", "cursor", name)) as f:
                 self.assertNotIn("poison", f.read())
         with open(self.sblog) as f:
             self.assertNotIn("poison", f.read())
+
+
+class CursorEnvironmentTests(CursorCase):
+    # Names an ambient shell exports that must never reach any Cursor process: IPC
+    # hooks (each a route to an unsandboxed server), cloud/VCS/provider credentials,
+    # code-injection knobs and a proxy URL that embeds a password.
+    AMBIENT = {
+        "SSH_AUTH_SOCK": "/private/tmp/agent.sock", "TMUX": "/private/tmp/tmux-501/default,1,0",
+        "TMUX_PANE": "%1", "STY": "1234.pts-0", "DOCKER_HOST": "unix:///var/run/docker.sock",
+        "VSCODE_IPC_HOOK_CLI": "/private/tmp/vscode-ipc.sock", "VSCODE_IPC_HOOK": "/private/tmp/vscode.sock",
+        "AWS_ACCESS_KEY_ID": "poison-aws-id", "AWS_SECRET_ACCESS_KEY": "poison-aws-secret",
+        "AWS_SESSION_TOKEN": "poison-aws-session", "AWS_PROFILE": "poison-profile",
+        "GITHUB_TOKEN": "poison-github", "GH_TOKEN": "poison-gh", "OPENAI_API_KEY": "poison-openai",
+        "ANTHROPIC_API_KEY": "poison-anthropic", "NPM_TOKEN": "poison-npm", "NODE_OPTIONS": "--require=/x.js",
+        "HTTPS_PROXY": "http://user:poison-proxy-pass@proxy.invalid:3128",
+    }
+    KEPT = {"NO_PROXY": "localhost", "LC_ALL": "C", "TZ": "UTC"}
+
+    def maker(self):
+        ad = self.mod.CursorAgentAdapter()
+        ad.__class__ = type("ManagedCursor", (self.mod.CursorAgentAdapter,), {"read_only": False})
+        return ad
+
+    def test_every_cursor_process_gets_only_allowlisted_environment(self):
+        m = self.mod
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        self.setenv(**self.AMBIENT, **self.KEPT)
+        ad = m.CursorAgentAdapter()
+        self.assertEqual(ad.auth_state(), "ready")                          # status
+        self.assertEqual(m.cursor_metadata("version", MOCK)[0], 0)          # version (and the preflight's own launches)
+        self.assertEqual(self.dispatch(repo=repo, adapter=ad)["status"], "ok")            # panel
+        self.assertEqual(self.dispatch(repo=wt, adapter=self.maker(), managed=True,
+                                       mode="make", name="mk")["status"], "ok")            # Maker
+        calls = self.all_cursor_calls()
+        self.assertEqual(len(calls), 6)         # preflight --version x2, status, metadata --version, panel, Maker
+        runtime_names = {"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR"}
+        # The mock runs under /usr/bin/python3, whose Xcode shim re-exports these itself (in the
+        # test process too); they are not something Alloy passes, so they say nothing here.
+        interpreter_shim = {"SDKROOT", "CPATH", "LIBRARY_PATH", "MANPATH"}
+        ambient = {n for n in os.environ
+                   if not (n in m.CURSOR_ENV_ALLOW or n.startswith(m.CURSOR_ENV_ALLOW_PREFIXES)
+                           or n in runtime_names or n in interpreter_shim or n.startswith("__"))}
+        self.assertTrue(set(self.AMBIENT) - {"HTTPS_PROXY"} <= ambient)
+        for call in calls:
+            names = set(call["env_names"])
+            for name in ambient | {"HTTPS_PROXY"}:       # nothing outside the allowlist; a credentialed proxy URL is dropped
+                self.assertNotIn(name, names, (call["argv"][:1], name))
+            self.assertTrue({"PATH", "NO_PROXY", "LC_ALL", "TZ"} <= names, (call["argv"][:1], sorted(names)))
+            self.assertTrue(runtime_names <= names)
+            self.assertEqual(call["env"]["HOME"], m.cursor_login_home())
+            for name in ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
+                self.assertNotIn(name, names)
+        for call in calls[-2:]:                                              # panel and Maker: the private runtime only
+            self.assertEqual(os.path.basename(call["env"]["TMPDIR"]), "tmp")
+
+    def test_allowlist_is_explicit_and_proxy_credentials_are_never_forwarded(self):
+        pristine = _import_alloy_module()               # production constants, no test patching
+        self.assertEqual(pristine.CURSOR_ENV_ALLOW_PREFIXES, ("LC_",))
+        banned = tuple(n for n in self.AMBIENT if n != "HTTPS_PROXY") + (
+            "CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS", "AZURE_CLIENT_SECRET", "MOCK_BEHAVIOR", "HOME", "TMPDIR")
+        for name in banned:
+            self.assertNotIn(name, pristine.CURSOR_ENV_ALLOW, name)
+        self.assertEqual(pristine.cursor_base_env({n: "x" for n in banned}), {})
+        env = pristine.cursor_base_env({
+            "PATH": "/usr/bin", "LC_ALL": "C", "LC_CTYPE": "UTF-8", "LANG": "C", "TERM": "xterm", "TZ": "UTC",
+            "HTTPS_PROXY": "http://proxy.invalid:3128", "https_proxy": "https://user:secret@proxy.invalid",
+            "ALL_PROXY": "socks5://:tokenonly@proxy.invalid", "NO_PROXY": "localhost,.internal",
+            "SSL_CERT_FILE": "/etc/ssl/cert.pem", "LCX": "not-a-locale", "MOCK_X": "not-allowed-in-production",
+            "PYTHONPATH": "/x", "DYLD_INSERT_LIBRARIES": "/x", "BAD": 5})
+        self.assertEqual(env, {"PATH": "/usr/bin", "LC_ALL": "C", "LC_CTYPE": "UTF-8", "LANG": "C", "TERM": "xterm",
+                               "TZ": "UTC", "HTTPS_PROXY": "http://proxy.invalid:3128",
+                               "NO_PROXY": "localhost,.internal", "SSL_CERT_FILE": "/etc/ssl/cert.pem"})
+
+    def test_dispatch_does_not_start_from_the_full_process_environment(self):
+        self.setenv(**self.AMBIENT)
+        st = self.dispatch(repo=self.repo())
+        self.assertEqual(st["status"], "ok", st)
+        call = self.inference_calls()[-1]
+        self.assertTrue(set(call["env_names"]).isdisjoint(self.AMBIENT))
+        self.assertNotIn("poison", json.dumps(st))
 
 
 class CursorPromptTests(CursorCase):
@@ -1997,6 +2752,41 @@ class CursorPromptTests(CursorCase):
         self.assertIn(json.dumps(staged), call["argv"][-1])                   # only a pointer to the file
         self.assertTrue(call["argv"][-1].startswith("Read "))
 
+    def test_symlinked_run_root_stages_the_canonical_prompt_and_dispatches(self):
+        repo = self.repo()
+        real_root = os.path.join(self.tmp, "real-runs")
+        linked_root = os.path.join(self.tmp, "linked-runs")
+        os.makedirs(real_root)
+        os.symlink(real_root, linked_root)
+        self.setenv(ALLOY_RUN_ROOT=linked_root)
+        rc, out, _err = self.cli(
+            "panel", "--prompt-file", self.prompt(), "--panelists", "cursor",
+            "--repo", repo)
+        self.assertEqual(rc, 0)
+        with open(out.strip().splitlines()[-1]) as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["panelists"][0]["status"], "ok")
+        staged = os.path.realpath(os.path.join(
+            manifest["run_dir"], "cursor", "prompt_in", "prompt.md"))
+        call = self.inference_calls()[-1]
+        self.assertIn(json.dumps(staged), call["argv"][-1])
+        self.assertTrue(os.path.isfile(staged))
+
+    def test_existing_staged_symlinks_are_refused_without_writing_the_target(self):
+        m = self.mod
+        pdir = os.path.join(self.tmp, "staging")
+        pin = os.path.join(pdir, "prompt_in")
+        os.makedirs(pin)
+        target = os.path.join(self.tmp, "outside-prompt")
+        with open(target, "w") as f:
+            f.write("unchanged")
+        os.symlink(target, os.path.join(pin, "prompt.md"))
+        ctx = {"repo": self.repo(), "cwd": self.tmp, "pdir": pdir}
+        with self.assertRaises(m.CursorBoundaryError):
+            m.CursorAgentAdapter().build_args(self.prompt("secret prompt"), "", "consult", ctx)
+        with open(target) as f:
+            self.assertEqual(f.read(), "unchanged")
+
     def test_stdin_hook_is_generalised(self):
         m = self.mod
         self.assertFalse(m.AntigravityAdapter.stdin_from_prompt)
@@ -2013,7 +2803,7 @@ class CursorPromptTests(CursorCase):
         self.assertEqual(tail.count("--mode"), 1)
         self.assertEqual(tail[tail.index("--mode") + 1], "ask")
         self.assertEqual(tail[tail.index("--output-format") + 1], "json")
-        self.assertEqual(tail[tail.index("--model") + 1], "composer-2.5")
+        self.assertEqual(tail[tail.index("--model") + 1], "composer-2.5[fast=false]")
         self.assertEqual(tail[tail.index("--sandbox") + 1], "enabled")
         self.assertEqual(tail[tail.index("--workspace") + 1], os.path.realpath(repo))
         self.assertIn("--trust", tail)
@@ -2040,8 +2830,26 @@ class CursorPromptTests(CursorCase):
         self.setenv(ALLOY_CURSOR_MODEL="gpt-5.6-sol-high", ALLOY_CURSOR_EFFORT="max")
         st = self.dispatch(repo=repo)
         self.assertEqual(st["status"], "ok", st)
-        self.assertEqual(st["command"][st["command"].index("--model") + 1], "gpt-5.6-sol-high[effort=max]")
+        self.assertEqual(st["command"][st["command"].index("--model") + 1],
+                         "gpt-5.6-sol[effort=max,fast=false]")
         self.assertEqual(st["model"], "gpt-5.6-sol-high")
+
+    def test_status_records_the_model_value_actually_sent(self):
+        repo = self.repo()
+        for pin, effort, sent in ((None, None, "composer-2.5[fast=false]"),
+                                  ("gpt-5.6-sol-high", "max", "gpt-5.6-sol[effort=max,fast=false]")):
+            with self.subTest(pin=pin):
+                self.setenv(ALLOY_CURSOR_MODEL=pin, ALLOY_CURSOR_EFFORT=effort)
+                st = self.dispatch(repo=repo, name="m-%s" % (pin or "default"))
+                self.assertEqual(st["status"], "ok", st)
+                self.assertEqual(st["effective_model"], sent)
+                self.assertEqual(st["command"][st["command"].index("--model") + 1], st["effective_model"])
+                self.assertEqual(st["model"], pin or "composer-2.5")            # the configured pin is kept as well
+                with open(os.path.join(self.tmp, "runs", "m-%s" % (pin or "default"), "cursor", "status.json")) as f:
+                    self.assertEqual(json.load(f)["effective_model"], sent)
+        self.setenv(ALLOY_CURSOR_MODEL="auto")                                  # refused before any model value exists
+        st = self.dispatch(repo=repo, name="m-refused")
+        self.assertNotIn("effective_model", st)
 
     def test_unknown_pin_is_refused_without_spawning_the_cli(self):
         for bad in ("auto", "muse-spark-1"):
@@ -2146,6 +2954,15 @@ class CursorAuthAndDoctorTests(CursorCase):
         self.mod = self.fresh()
         self.assertEqual(json.loads(self.cli("estimate")[1])["ready_panelists"], [])
 
+    def test_estimate_uses_the_effective_model_validator(self):
+        self.setenv(ALLOY_PANELISTS="cursor")
+        for bad in ("composer-2.5[fast=1]", "composer-2.5[fast=yes]",
+                    "composer-2.5[effort=ultra]"):
+            with self.subTest(model=bad):
+                self.setenv(ALLOY_CURSOR_MODEL=bad)
+                self.mod = self.fresh()
+                self.assertEqual(json.loads(self.cli("estimate")[1])["ready_panelists"], [])
+
     def test_estimate_boundary_predicate_ignores_allow_unsandboxed(self):
         # The status column already gates this in practice; the predicate is the second lock.
         self.setenv(ALLOY_PANELISTS="cursor", ALLOY_ALLOW_UNSANDBOXED="1")
@@ -2207,6 +3024,7 @@ class CursorJsonTests(CursorCase):
     def test_provider_failure_cannot_be_turned_into_success(self):
         repo = self.repo()
         cases = [("is_error", {}, "is_error"), ("is_error", {"MOCK_CURSOR_EXIT": "2"}, None),
+                 ("is_error_int", {}, "is_error"), ("is_error_string", {}, "is_error"),
                  ("malformed", {}, "JSON"), ("no_result", {}, "result"), ("nonstring", {}, "result"),
                  ("nonobject", {}, "JSON"), ("ok", {"MOCK_CURSOR_EXIT": "3"}, None)]
         for i, (mode, extra, needle) in enumerate(cases):
@@ -2216,7 +3034,7 @@ class CursorJsonTests(CursorCase):
                 self.assertEqual(st["status"], "error")
                 if needle:
                     self.assertIn(needle, st["error"])
-                if mode == "is_error":
+                if mode.startswith("is_error"):
                     self.assertIn("boom", self.read(st, "result.md"))          # a non-empty result did not win
                 if mode == "ok":
                     self.assertEqual(st["exit_code"], 3)
@@ -2241,7 +3059,16 @@ class CursorJsonTests(CursorCase):
 
     def test_secret_shaped_output_is_absent_from_every_persisted_sink(self):
         repo = self.repo()
-        cases = {"jwt": [GOOD_JWT], "assignment": ["hunter2hunter2hunter2"], "header": ["abc123def456ghi789"]}
+        cases = {
+            "jwt": [GOOD_JWT],
+            "assignment": ["hunter2hunter2hunter2"],
+            "assignment_quoted": ["quotedhunter2hunter2"],
+            "header": ["abc123def456ghi789"],
+            "header_basic": ["YWJjMTIzZGVmNDU2"],
+            "header_api_key": ["customheader123456"],
+            "header_schemes": ["schemevalue123456", "secondvalue123456"],
+            "cookie": ["cookiesecret123456", "cookierefresh123456"],
+        }
         for i, (mode, secrets) in enumerate(cases.items()):
             with self.subTest(mode):
                 self.setenv(MOCK_CURSOR_JSON=mode)
@@ -2253,7 +3080,9 @@ class CursorJsonTests(CursorCase):
                 self.assertIn("REDACTED", sinks["result.md"])
                 self.assertIn("REDACTED", sinks["stdout.txt"])
                 self.assertIn("REDACTED", sinks["stderr.txt"])
+                self.assertIn("REDACTED", sinks["status.json"])
                 self.assertGreaterEqual(st["secrets_redacted"], 3)
+                self.assertGreaterEqual(json.loads(sinks["status.json"])["secrets_redacted"], 3)
                 self.assertNotIn(secrets[0], json.dumps(st))                    # nor the value returned for the manifest
 
     def test_secret_in_stderr_tail_is_absent_from_status_json_error(self):
@@ -2391,6 +3220,50 @@ class CursorTripwireTests(CursorCase):
             os.mkdir(os.path.join(repo, "tracked.txt"))
         self.assertIn("tree:tracked.txt", self.moves(repo, swap))                 # a path changing type
 
+    def test_directory_swap_to_symlink_during_walk_is_refused(self):
+        repo = self.repo()
+        nested = os.path.join(repo, "nested")
+        parked = os.path.join(repo, "nested-original")
+        outside = os.path.join(self.tmp, "outside-tree")
+        os.makedirs(nested)
+        os.makedirs(outside)
+        with open(os.path.join(nested, "inside.txt"), "w") as f:
+            f.write("inside")
+        with open(os.path.join(outside, "secret.txt"), "w") as f:
+            f.write("must not be followed")
+        real_open = os.open
+        swapped = {"done": False}
+
+        def racing_open(path, flags, *a, **kw):
+            if path == "nested" and kw.get("dir_fd") is not None and not swapped["done"]:
+                swapped["done"] = True
+                os.rename(nested, parked)
+                os.symlink(outside, nested)
+            return real_open(path, flags, *a, **kw)
+
+        with self.mock.patch.object(os, "open", racing_open):
+            with self.assertRaises(self.mod.CursorBoundaryError):
+                self.fp(repo)
+        self.assertTrue(swapped["done"])
+
+    def test_directory_mutation_during_enumeration_is_refused(self):
+        repo = self.repo()
+        real_listdir = os.listdir
+        state = {"done": False}
+
+        def racing_listdir(path="."):
+            names = real_listdir(path)           # the directory changes right after it was listed
+            if isinstance(path, int) and not state["done"]:
+                state["done"] = True
+                with open(os.path.join(repo, "enumeration-race.txt"), "w") as f:
+                    f.write("changed")
+            return names
+
+        with self.mock.patch.object(os, "listdir", racing_listdir):
+            with self.assertRaises(self.mod.CursorBoundaryError):
+                self.fp(repo)
+        self.assertTrue(state["done"])
+
     def test_unreadable_entries_and_races_refuse(self):
         if os.getuid() == 0:
             self.skipTest("root can read everything")
@@ -2408,7 +3281,8 @@ class CursorTripwireTests(CursorCase):
 
         def recording_open(path, flags, *a, **k):
             fd = real_open(path, flags, *a, **k)
-            opened[fd] = path
+            if os.path.basename(path) == "untracked.txt":
+                opened[fd] = os.path.join(repo, "untracked.txt")
             return fd
 
         def racing_read(fd, n):
@@ -2545,12 +3419,47 @@ class CursorTripwireTests(CursorCase):
         self.setenv(MOCK_TAMPER_WRITE=None)
         self.assertEqual(self.dispatch(repo=wt, name="after")["status"], "ok")
 
+    def test_manifest_uses_the_cursor_content_tripwire_for_repo_tamper(self):
+        repo = self.repo()
+        before = self.mod._repo_fingerprint(repo)
+        ignored = os.path.join(repo, "ignored.txt")
+        self.setenv(MOCK_TAMPER_WRITE=json.dumps([[ignored, "zzzz"]]))
+        rc, manifest, _err = self.panel_cli("--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.mod._repo_fingerprint(repo), before)  # the legacy signal misses it
+        self.assertTrue(manifest["summary"]["repo_tamper"])
+        row = manifest["panelists"][0]
+        self.assertIn("tree:ignored.txt", row["workspace_changes"])
+        self.assertIn("sandbox tripwire", row["error"])
+
     def test_canary_mutation_outside_the_runtime_fails_the_call(self):
         self.setenv(MOCK_TAMPER_CANARY="1")
         st = self.dispatch(repo=self.repo())
         self.assertEqual(st["status"], "error")
         self.assertIn("sandbox tripwire", st["error"])
         self.assertIn("1 canary", st["error"])
+
+    def test_manifest_reports_repo_tamper_for_a_canary_only_tripwire(self):
+        # Only the outside canary moves: the workspace fingerprint is untouched, yet the
+        # run failed on the tripwire, so the manifest must not say the tree is clean.
+        repo = self.repo()
+        self.setenv(MOCK_TAMPER_CANARY="1")
+        rc, manifest, _err = self.panel_cli("--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 3)
+        row = manifest["panelists"][0]
+        self.assertEqual(row["status"], "error")
+        self.assertIn("sandbox tripwire", row["error"])
+        self.assertEqual(row["workspace_changes"], [])
+        self.assertTrue(row["canary_changes"])
+        self.assertTrue(manifest["summary"]["repo_tamper"])
+        self.assertEqual(manifest["summary"]["repo_tamper_check"], "checked")
+        # and a clean run still reports no tamper
+        self.setenv(MOCK_TAMPER_CANARY=None)
+        os.environ.pop("MOCK_TAMPER_CANARY", None)
+        rc, manifest, _err = self.panel_cli("--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 0)
+        self.assertFalse(manifest["summary"]["repo_tamper"])
+        self.assertEqual(manifest["panelists"][0]["canary_changes"], [])
 
     def test_uncertain_fingerprint_refuses_before_any_process_starts(self):
         if os.getuid() == 0:
@@ -2582,6 +3491,86 @@ class CursorTripwireTests(CursorCase):
         st = self.dispatch(repo=self.repo(), timeout_s=2, adapter=Probe())
         self.assertEqual(st["status"], "timeout")
         self.assertEqual(observed, ["dead"])
+
+    def run_in(self, pdir, repo, **kw):
+        return self.mod.run_panelist(self.mod.CursorAgentAdapter(), self.prompt(), pdir, 30, 100000,
+                                     "consult", repo=repo, **kw)
+
+    def test_a_run_directory_inside_the_workspace_is_refused_not_misreported_as_tamper(self):
+        repo = self.repo()
+        link = os.path.join(self.tmp, "run-link")
+        os.symlink(os.path.join(repo, "sub"), link)
+        os.makedirs(os.path.join(repo, "sub"))
+        for name, pdir, kw in (
+                ("pdir below the repo", os.path.join(repo, ".runs", "r", "cursor"), {}),
+                ("pdir is the repo", repo, {}),
+                ("run root below the repo", os.path.join(self.tmp, "elsewhere", "cursor"),
+                 {"run_root": os.path.join(repo, "runs")}),
+                ("pdir reached through a symlink", os.path.join(link, "cursor"), {})):
+            with self.subTest(name):
+                st = self.run_in(pdir, repo, **kw)
+                self.assertEqual(st["status"], "error")
+                self.assertTrue(st["error"].startswith("refused: "), st["error"])
+                self.assertIn("run directory is inside the workspace", st["error"])
+                self.assertIn("--run-dir", st["error"])              # says what to do about it
+                self.assertNotIn("tripwire", st["error"])
+        self.assertEqual(self.inference_calls(), [])
+        # a sibling that merely shares the repository's name as a prefix is NOT inside it
+        st = self.run_in(os.path.join(self.tmp, "repo-runs", "r", "cursor"), repo)
+        self.assertEqual(st["status"], "ok", st)
+        self.assertEqual(len(self.inference_calls()), 1)
+
+    def test_panel_with_a_run_dir_inside_the_repo_reports_the_real_cause(self):
+        repo = self.repo()
+        rc, out, _err = self.cli("panel", "--prompt-file", self.prompt(), "--run-dir", os.path.join(repo, ".alloy-runs"),
+                                 "--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 3)
+        with open(out.strip().splitlines()[-1]) as f:
+            manifest = json.load(f)
+        row = manifest["panelists"][0]
+        self.assertEqual(row["status"], "error")
+        self.assertIn("run directory is inside the workspace", row["error"])
+        self.assertFalse(manifest["summary"]["repo_tamper"])         # Cursor never ran and wrote nothing
+        self.assertEqual(self.inference_calls(), [])
+
+    def test_directory_enumeration_needs_descriptor_support_and_refuses_without_it(self):
+        self.assertIn(os.listdir, os.supports_fd)                      # documented POSIX API since Python 3.3
+        self.assertTrue(self.mod._LISTDIR_BY_FD)
+        repo = self.repo()
+        with self.mock.patch.object(self.mod, "_LISTDIR_BY_FD", False):
+            with self.assertRaisesRegex(self.mod.CursorBoundaryError, "descriptor"):
+                self.fp(repo)
+            st = self.dispatch(repo=repo)                              # and a dispatch refuses instead of skipping the walk
+        self.assertEqual(st["status"], "error")
+        self.assertTrue(st["error"].startswith("refused: "))
+        self.assertEqual(self.inference_calls(), [])
+
+    def test_enumeration_lists_by_descriptor_and_never_depends_on_scandir_of_a_descriptor(self):
+        # os.scandir has no dir_fd parameter, and scandir(fd) is a 3.7+ form: the walk uses only
+        # os.listdir(fd). Every listing during a fingerprint is by an open descriptor (a path
+        # listing could be redirected by a rename), and scandir is never reached.
+        repo = self.repo()
+        os.makedirs(os.path.join(repo, "deep", "er"))
+        with open(os.path.join(repo, "deep", "er", "f.txt"), "w") as f:
+            f.write("x")
+        baseline = self.fp(repo)
+        real_listdir = os.listdir
+        listed = []
+
+        def spy_listdir(path="."):
+            listed.append(path)
+            return real_listdir(path)
+
+        def no_scandir(*_a, **_k):
+            raise AssertionError("os.scandir must not be used for the fingerprint")
+
+        with self.mock.patch.object(os, "listdir", spy_listdir), self.mock.patch.object(os, "scandir", no_scandir):
+            self.assertEqual(self.fp(repo), baseline)
+        self.assertGreaterEqual(len(listed), 3)                       # root, deep and deep/er at least
+        self.assertTrue(all(isinstance(p, int) for p in listed), listed)
+        self.assertIn("tree:deep/er/f.txt", baseline.entries)
+        with self.assertRaises(TypeError):                            # the API the review asked for does not exist
+            os.scandir(".", dir_fd=0)
 
 
 class CursorGitHardeningTests(CursorCase):
@@ -2663,6 +3652,49 @@ class CursorGitHardeningTests(CursorCase):
         self.assertEqual(m._git(repo, "rev-parse", "--show-toplevel").returncode, 0)
         self.assertNotEqual(m._git(os.path.join(self.tmp, "no-such-dir"), "status").returncode, 0)
 
+    def test_streamed_digest_is_exact_and_not_limited_by_the_output_cap(self):
+        m = self.mod
+        repo = self.repo()
+        blob = os.urandom(5 << 20)                                                # larger than the 4 MB output cap
+        path = os.path.join(self.tmp, "big.bin")
+        with open(path, "wb") as f:
+            f.write(blob)
+        sha = git_run(repo, "hash-object", "-w", path).strip()
+        self.assertIsNone(m._git(repo, "cat-file", "blob", sha))                  # the buffered helper gives up ...
+        rc, digest = m._git_digest(repo, "cat-file", "blob", sha)                 # ... the streaming one does not
+        self.assertEqual((rc, digest), (0, hashlib.sha256(blob).hexdigest()))
+        self.assertEqual(m._git_digest(repo, "cat-file", "blob", "0" * 40)[0], 128)   # a git failure keeps its code
+
+    def test_a_large_status_no_longer_silently_disables_the_repo_tamper_check(self):
+        m = self.mod
+        repo = self.repo()
+        status = ("status", "--porcelain=v1", "--untracked-files=all")
+        with self.mock.patch.object(m, "_GIT_OUTPUT_CAP", 16):
+            self.assertIsNone(m._git(repo, *status))          # what used to turn the check off without a word
+            before = m._repo_fingerprint(repo)
+            self.assertIsNotNone(before)
+            self.assertEqual(m._repo_fingerprint(repo), before)                 # deterministic
+            with open(os.path.join(repo, "added-by-a-panelist.txt"), "w") as f:
+                f.write("x")
+            self.assertNotEqual(m._repo_fingerprint(repo), before)              # and still detects the change
+        self.assertIsNone(m._repo_fingerprint(os.path.join(self.tmp, "no-such-dir")))
+
+    def test_an_unavailable_tamper_check_is_recorded_in_the_manifest(self):
+        repo = self.repo()
+        rc, manifest, err = self.panel_cli("--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 0)
+        self.assertEqual(manifest["summary"]["repo_tamper_check"], "checked")
+        self.assertFalse(manifest["summary"]["repo_tamper"])
+        with self.mock.patch.object(self.mod, "_git_digest", return_value=None):      # Git did not complete
+            rc, manifest, err = self.panel_cli("--panelists", "cursor", "--repo", repo)
+        self.assertEqual(rc, 0)
+        self.assertEqual(manifest["summary"]["repo_tamper_check"], "unavailable")
+        self.assertIn("tamper check was unavailable", err)                      # visible on the matrix too
+        self.assertFalse(manifest["summary"]["repo_tamper"])                     # never reported as "clean" evidence
+        rc, manifest, err = self.panel_cli("--panelists", "cursor")              # ALLOY_REPO=none: nothing to check
+        self.assertEqual(manifest["summary"]["repo_tamper_check"], "no_repo")
+        self.assertNotIn("unavailable", err)
+
 
 class CursorManagedMakerTests(CursorCase):
     def maker(self):
@@ -2694,6 +3726,19 @@ class CursorManagedMakerTests(CursorCase):
         self.assertEqual(st["permissions"]["command_execution"], "allowed_in_worktree")
         self.assertEqual(st["permissions"]["enforcement"], "macos_sandbox_exec")
 
+    def test_maker_worktree_edits_are_exposed_for_allow_path_classification(self):
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        changed = os.path.join(wt, "tracked.txt")
+        self.setenv(MOCK_TAMPER_WRITE=json.dumps([[changed, "maker edit\n"]]))
+        st = self.dispatch(repo=wt, adapter=self.maker(), managed=True, mode="make")
+        self.assertEqual(st["status"], "ok", st)
+        self.assertEqual(st["changed_paths"], ["tracked.txt"])
+        self.assertIn("tree:tracked.txt", st["workspace_changes"])
+        with open(st["result_path"].replace("result.md", "status.json")) as f:
+            persisted = json.load(f)
+        self.assertEqual(persisted["changed_paths"], ["tracked.txt"])
+
     def test_maker_with_boundary_down_never_spawns_even_though_read_only_is_false(self):
         self.setenv(MOCK_SANDBOX_PREFLIGHT="exec_leak", ALLOY_ALLOW_UNSANDBOXED="1")
         self.mod = self.fresh()
@@ -2716,6 +3761,49 @@ class CursorManagedMakerTests(CursorCase):
         self.assertEqual(st["status"], "error")
         self.assertIn("refused", st["error"])
         self.assertEqual(self.cursor_calls(), [])
+
+    def test_maker_gateway_requires_a_managed_linked_worktree_and_a_matching_cwd(self):
+        m = self.mod
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        separate = os.path.join(self.tmp, "separate")
+        os.makedirs(separate)
+        git_run(separate, "init", "-q", "-b", "main", "--separate-git-dir", os.path.join(self.tmp, "separate.gitdir"))
+        self.assertTrue(os.path.isfile(os.path.join(separate, ".git")))       # a .git pointer that is NOT a linked worktree
+        self.gateway("maker", wt)                                              # the well-formed call is accepted
+        cases = {
+            "not a managed dispatch": (wt, {"managed_worktree": False}),
+            "managed flag unset": (wt, {"managed_worktree": None}),
+            "cwd is another directory": (wt, {"cwd": self.tmp}),
+            "cwd is the source checkout": (wt, {"cwd": repo}),
+            "cwd missing": (wt, {"cwd": None}),
+            "the user's main checkout": (repo, {}),
+            "a pointer-file checkout that is not a linked worktree": (separate, {}),
+        }
+        for name, (workspace, kw) in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(m.CursorBoundaryError, "Maker"):
+                self.gateway("maker", workspace, **kw)
+        self.assertEqual(self.inference_calls(), [])
+        # the same gates are not imposed on the read-only panel role
+        self.gateway("panel", repo)
+
+    def test_a_maker_outside_managed_mode_never_gets_a_write_grant_or_a_process(self):
+        repo = self.repo()
+        wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
+        # write-capable but not managed: it would otherwise run in a disposable copy while the
+        # profile and instruction granted the REAL repository
+        st = self.dispatch(repo=wt, adapter=self.maker(), managed=False, mode="make", name="unmanaged")
+        self.assertEqual(st["status"], "error")
+        self.assertTrue(st["error"].startswith("refused: "), st["error"])
+        self.assertIn("managed", st["error"])
+        # a managed dispatch whose workspace is the ordinary checkout is refused as well
+        st = self.dispatch(repo=repo, adapter=self.maker(), managed=True, mode="make", name="main-checkout")
+        self.assertEqual(st["status"], "error")
+        self.assertTrue(st["error"].startswith("refused: "), st["error"])
+        self.assertIn("linked Git worktree", st["error"])
+        self.assertEqual(self.cursor_calls(), [])
+        # no profile ever named either directory: only the preflight's fixtures were profiled
+        self.assertFalse(any(wt in p or repo in p for p in self.profiles()))
 
 
 if __name__ == "__main__":

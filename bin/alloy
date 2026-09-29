@@ -49,6 +49,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -281,7 +282,19 @@ SECRET_PATTERNS = [
     ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b")),
-    ("bearer", re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-]+")),
+    # Header values are opaque. Cover every Authorization scheme (and proxy
+    # form), plus cookie headers; name-shaped custom headers such as X-Api-Key
+    # and X-Auth-Token are handled by ASSIGNED_SECRET_RE below.
+    ("authorization_header", re.compile(
+        r"(?i)\b(?:Proxy-)?Authorization\s*:\s*[^\r\n]+")),
+    ("cookie_header", re.compile(
+        r"(?i)\b(?:Set-)?Cookie\s*:\s*[^\r\n]+")),
+    # Custom authentication headers may carry a scheme word before the actual
+    # value (`X-Auth-Token: Bearer ...`, `X-Api-Key: Token ...`). Match the
+    # complete header so the assignment backstop cannot redact only the scheme.
+    ("custom_secret_header", re.compile(
+        r"(?i)\bX-(?:[A-Za-z0-9]+-)*(?:Api-Key|Auth-Token|Key|Token|Secret|Password)"
+        r"(?:-[A-Za-z0-9]+)*\s*:\s*[^\r\n]+")),
     # Whole PEM block (BEGIN..END), or BEGIN..end-of-text if truncated.
     ("private_key", re.compile(
         r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"
@@ -295,8 +308,15 @@ SECRET_PATTERNS = [
 # (4) matching closing quote -- so the replacement preserves the operator and
 # quotes and the redacted line stays valid syntax for the host to read.
 ASSIGNED_SECRET_RE = re.compile(
-    r"(?i)(\b[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*"
+    r"(?i)(\b[A-Z0-9_-]*(?:API[-_]?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_-]*"
     r"\s*[:=]\s*)(['\"]?)([^\s'\"]{6,})(\2)"
+)
+# Fallback for malformed/raw JSON text. Valid JSON is structurally redacted
+# before persistence, but an escaped quoted assignment must still fail safe when
+# parsing fails: API_KEY=\"value\".
+ESCAPED_ASSIGNED_SECRET_RE = re.compile(
+    r"(?i)(\b[A-Z0-9_-]*(?:API[-_]?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_-]*"
+    r'\s*[:=]\s*)(\\")([^"\\\s]{6,})(\\")'
 )
 
 
@@ -305,6 +325,11 @@ def redact_secrets(text: str) -> "tuple[str, int]":
 
     # Run the assignment backstop FIRST so it cannot re-match (and double-count)
     # the [REDACTED:...] placeholders the value patterns below insert.
+    def _sub_escaped_assigned(m: "re.Match[str]") -> str:
+        nonlocal count
+        count += 1
+        return f"{m.group(1)}{m.group(2)}[REDACTED]{m.group(4)}"
+
     def _sub_assigned(m: "re.Match[str]") -> str:
         nonlocal count
         if "[REDACTED" in m.group(3):
@@ -312,6 +337,7 @@ def redact_secrets(text: str) -> "tuple[str, int]":
         count += 1
         return f"{m.group(1)}{m.group(2)}[REDACTED]{m.group(4)}"
 
+    text = ESCAPED_ASSIGNED_SECRET_RE.sub(_sub_escaped_assigned, text)
     text = ASSIGNED_SECRET_RE.sub(_sub_assigned, text)
 
     for name, pat in SECRET_PATTERNS:
@@ -340,6 +366,21 @@ def redact_tree(obj):
         items = [redact_tree(v) for v in obj]
         return [v for v, _ in items], sum(n for _, n in items)
     return obj, 0
+
+
+def redact_json_text(text: str) -> "tuple[str, int]":
+    """Redact every string leaf in one JSON value before re-serializing it.
+    Malformed output still receives the text scrubber, including escaped
+    assignment handling, so raw JSON syntax never creates a redaction bypass."""
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return redact_secrets(text)
+    redacted, count = redact_tree(value)
+    if not count:
+        return text, 0
+    body = json.dumps(redacted, ensure_ascii=False, separators=(",", ":"))
+    return body + ("\n" if text.endswith("\n") else ""), count
 
 
 def cap_chars(text: str, max_chars: int) -> "tuple[str, bool]":
@@ -513,7 +554,8 @@ class Adapter:
         }
 
     # -- dispatch hooks (no-ops unless an adapter needs them) ----------------- #
-    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool):
+    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool,
+                   run_root: "str | None" = None):
         """Per-dispatch resources (returned object is close()d after the group is dead)."""
         return None
 
@@ -531,6 +573,11 @@ class Adapter:
     def output_error(self, stdout: str, stderr: str) -> "str | None":
         """A provider-reported failure that an exit status of zero would hide."""
         return None
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        """Sanitize captured stdout for persistence. Structured adapters override
+        this so escaped JSON syntax cannot hide string-leaf secrets."""
+        return redact_secrets(stdout)
 
     def provider_meta(self, stdout: str) -> dict:
         return {}
@@ -1118,15 +1165,102 @@ def _first_setting(*keys: str) -> "str | None":
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"     # never resolved through PATH
 SANDBOX_TRUSTED_UID = 0
 CURSOR_PLATFORM = "darwin"                 # the only supported Cursor execution platform
-CURSOR_SANDBOX_PROFILE_VERSION = 1
-CURSOR_MIN_VERSION = (2026, 9, 28)         # the release whose ask-mode behaviour was measured
-CURSOR_VERSION_RE = re.compile(r"\b(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-[0-9A-Fa-f]+)?\b")
+CURSOR_SANDBOX_PROFILE_VERSION = 3      # 3: Mach lookups are default-deny with an allowlist + Mach probe
+# Ask mode's no-shell behaviour is evidence-backed only for these exact builds.
+# A date floor would silently trust every later or same-day unmeasured build.
+CURSOR_SUPPORTED_VERSIONS = ("2026.09.28-64d2043",)
+CURSOR_VERSION_RE = re.compile(r"\b(\d{4}\.\d{1,2}\.\d{1,2}-[0-9A-Za-z]+)\b")
 CURSOR_DEFAULT_MODEL = "composer-2.5"
 CURSOR_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 CURSOR_BOUNDARY_MESSAGE = ("Cursor installed/authenticated, but no supported OS write sandbox "
                            "is available; Cursor roles are refused.")
 CURSOR_FP_MAX_ENTRIES = 1_000_000
 CURSOR_FP_MAX_BYTES = 16 << 30
+# The only Unix-domain socket a Cursor process may connect to: the resolver.
+CURSOR_ALLOWED_UNIX_SOCKET = "/private/var/run/mDNSResponder"
+# Mach services a Cursor process may look up. Every other lookup is denied: a service
+# that is not listed here cannot be asked to act for the caller outside its sandbox.
+# Seeded from Apple's own baseline for system processes
+# (/System/Library/Sandbox/Profiles/system.sb: the base `(allow mach-lookup ...)` block
+# and the `(system-network)` block) plus the Security API the CLI's keychain login item
+# needs (plan section 2). This is NOT a measurement of the installed CLI or of a Maker's
+# toolchains: the preflight proves the CLI still starts under it and that the relays
+# below stay unreachable, and the Lane 6 release gate measures the rest on the real
+# sandbox. An incomplete list makes the boundary unavailable (Cursor refused); it can
+# never make it wider.
+CURSOR_MACH_ALLOW = (
+    # logging, preferences, notifications, directory and trust lookups: system.sb base block
+    "com.apple.analyticsd", "com.apple.analyticsd.messagetracer", "com.apple.appsleep",
+    "com.apple.bsd.dirhelper", "com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon",
+    "com.apple.diagnosticd", "com.apple.dt.automationmode.reader", "com.apple.espd",
+    "com.apple.logd", "com.apple.logd.events", "com.apple.runningboard", "com.apple.secinitd",
+    "com.apple.system.DirectoryService.libinfo_v1", "com.apple.system.logger",
+    "com.apple.system.notification_center", "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership", "com.apple.trustd", "com.apple.trustd.agent",
+    "com.apple.xpc.activity.unmanaged",
+    # DNS, reachability, proxies and TLS-adjacent network services: system.sb `(system-network)`
+    "com.apple.SystemConfiguration.PPPController", "com.apple.SystemConfiguration.SCNetworkReachability",
+    "com.apple.dnssd.service", "com.apple.nehelper", "com.apple.nesessionmanager",
+    "com.apple.networkd", "com.apple.networkscored", "com.apple.symptomsd", "com.apple.usymptomsd",
+    "com.apple.cfnetwork.cfnetworkagent", "com.apple.AppSSO.service-xpc",
+    # SCDynamicStore reads (proxy and DNS configuration)
+    "com.apple.SystemConfiguration.configd",
+    # Security API for the CLI's login item: securityd (file keychain), secd (data-protection)
+    "com.apple.SecurityServer", "com.apple.securityd.xpc",
+)
+# The allowed name the self-test must reach from inside the sandbox (proves the probe client
+# runs under the profile and that the allowlist is not simply "everything denied").
+CURSOR_MACH_PROBE_ALLOWED = "com.apple.system.opendirectoryd.libinfo"
+# Mach services that perform actions for a caller outside its sandbox. None may ever be in
+# CURSOR_MACH_ALLOW; the self-test proves every one of them is unreachable.
+CURSOR_MACH_RELAY_SERVICES = (
+    "com.apple.coreservices.launchservicesd",   # LaunchServices: open documents and applications
+    "com.apple.coreservices.appleevents",       # Apple Event delivery to other applications
+    "com.apple.axserver",                       # accessibility / UI scripting
+    "com.apple.universalaccessd",
+    "com.apple.hiservices-xpcservice",
+    "com.apple.windowserver.active",            # synthetic input and screen capture
+    "com.apple.pasteboard.1",                   # clipboard
+    "com.apple.pboard",
+)
+# The Cursor child environment is an explicit allowlist, never "everything minus known
+# secrets": ambient credentials (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, ...) and IPC
+# hooks (SSH_AUTH_SOCK, TMUX, STY, DOCKER_HOST, VSCODE_IPC_HOOK*, ...) never reach it.
+CURSOR_ENV_ALLOW = (
+    "PATH", "LANG", "LANGUAGE", "TZ", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+    "NO_COLOR", "CI", "DEVELOPER_DIR", "__CF_USER_TEXT_ENCODING",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+)
+CURSOR_ENV_ALLOW_PREFIXES = ("LC_",)
+_CURSOR_PROXY_ENV = frozenset(n for n in CURSOR_ENV_ALLOW if n.upper().endswith("_PROXY"))
+_URL_USERINFO_RE = re.compile(r"://[^/?#\s]*@")
+# The one non-shell tool the sandbox self-test may execute: a Unix-socket client.
+CURSOR_SOCKET_PROBE_TOOL = "/usr/bin/nc"
+# The Mach-lookup client the self-test may execute: the running interpreter, resolving names
+# with bootstrap_look_up (no message is ever sent to a service). Its exit status is
+# 64 + the number of names that resolved, and 99 on any error. The offset keeps the codes a
+# crashing or refused launcher produces (1, 126, 127, a signal) from ever reading as a
+# resolved name, so a client that failed to start or to load libSystem can be told apart
+# from a lookup the sandbox denied.
+CURSOR_MACH_EXIT_BASE = 64
+CURSOR_MACH_EXIT_ERROR = 99
+_MACH_PROBE_PY = (
+    "import sys\n"
+    "try:\n"
+    " import ctypes\n"
+    " l=ctypes.CDLL(None)\n"
+    " l.bootstrap_look_up.argtypes=[ctypes.c_uint,ctypes.c_char_p,ctypes.POINTER(ctypes.c_uint)]\n"
+    " l.bootstrap_look_up.restype=ctypes.c_int\n"
+    " b=ctypes.c_uint.in_dll(l,'bootstrap_port')\n"
+    " n=0\n"
+    " for s in sys.argv[1:]:\n"
+    "  p=ctypes.c_uint(0)\n"
+    "  n+=l.bootstrap_look_up(b.value,s.encode(),ctypes.byref(p))==0\n"
+    "except BaseException:\n"
+    " sys.exit(%d)\n"
+    "sys.exit(%d+n)\n") % (CURSOR_MACH_EXIT_ERROR, CURSOR_MACH_EXIT_BASE)
 
 
 class CursorBoundaryError(Exception):
@@ -1139,8 +1273,11 @@ class _Drain:
     """Drain one pipe into a bounded in-memory buffer so a chatty child can never
     deadlock on a full pipe and a runaway one cannot exhaust memory."""
 
-    def __init__(self, stream, cap: int):
+    def __init__(self, stream, cap: int, digest: bool = False):
         self.stream, self.cap, self.buf, self.total = stream, cap, bytearray(), 0
+        # With `digest`, every byte is hashed as it streams and none is retained, so
+        # the amount of output can never make the result unavailable.
+        self.digest = hashlib.sha256() if digest else None
         self.thread = threading.Thread(target=self._run, args=(stream,), daemon=True)
         self.thread.start()
 
@@ -1151,6 +1288,8 @@ class _Drain:
                 if not chunk:
                     return
                 self.total += len(chunk)
+                if self.digest is not None:
+                    self.digest.update(chunk)
                 room = self.cap - len(self.buf)
                 if room > 0:
                     self.buf += chunk[:room]
@@ -1165,7 +1304,7 @@ class _Drain:
 
     @property
     def overflow(self) -> bool:
-        return self.total > self.cap
+        return self.digest is None and self.total > self.cap
 
 
 def _wait_group_dead(pgid: int, seconds: float = 5.0) -> bool:
@@ -1184,12 +1323,15 @@ def _wait_group_dead(pgid: int, seconds: float = 5.0) -> bool:
 
 
 def _run_bounded(argv: "list[str]", env: dict, cwd: "str | None" = None,
-                 timeout: float = 20.0, cap: int = 1 << 20) -> dict:
+                 timeout: float = 20.0, cap: int = 1 << 20, hash_stdout: bool = False) -> dict:
     """Run argv with stdin=DEVNULL in its own process group, bounded output and a
-    deadline. Returns rc (None on timeout), out, err (bytes), overflow, group_dead."""
+    deadline. Returns rc (None on timeout), out, err (bytes), overflow, group_dead.
+    With `hash_stdout` stdout is hashed as it streams instead of buffered: `out` is
+    empty, `digest` is its SHA-256 and only stderr is bounded by `cap`."""
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, cwd=cwd, env=env, start_new_session=True)
-    out, err = _Drain(proc.stdout, cap), _Drain(proc.stderr, cap)
+    out = _Drain(proc.stdout, 0 if hash_stdout else cap, digest=hash_stdout)
+    err = _Drain(proc.stderr, cap)
     timed_out = False
     try:
         proc.wait(timeout=timeout)
@@ -1202,8 +1344,10 @@ def _run_bounded(argv: "list[str]", env: dict, cwd: "str | None" = None,
         except subprocess.TimeoutExpired:
             pass
     dead = _wait_group_dead(proc.pid)
-    return {"rc": None if timed_out else proc.returncode, "out": out.finish(), "err": err.finish(),
-            "overflow": out.overflow or err.overflow, "group_dead": dead}
+    out_bytes, err_bytes = out.finish(), err.finish()
+    return {"rc": None if timed_out else proc.returncode, "out": out_bytes, "err": err_bytes,
+            "overflow": out.overflow or err.overflow, "group_dead": dead,
+            "digest": out.digest.hexdigest() if out.digest is not None else None}
 
 
 # -- Git: one hardened helper for every parent-side Git call ---------------- #
@@ -1218,19 +1362,41 @@ def _git_env() -> dict:
     return env
 
 
-def _git(root: str, *args: str, timeout: int = 20, cap: int = 4_000_000):
+_GIT_OUTPUT_CAP = 4_000_000
+
+
+def _git_argv(root: str, args: "tuple[str, ...]") -> "list[str]":
+    return ["git", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args]
+
+
+def _git(root: str, *args: str, timeout: int = 20, cap: "int | None" = None):
     """`git -C root ...` with hooks and command-valued fsmonitor disabled, system
     config ignored, stdin detached, bounded output and a deadline. Returns a
     CompletedProcess (str output) or None when Git could not be run to completion."""
-    argv = ["git", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args]
+    argv = _git_argv(root, args)
     try:
-        ran = _run_bounded(argv, env=_git_env(), timeout=timeout, cap=cap)
+        ran = _run_bounded(argv, env=_git_env(), timeout=timeout,
+                           cap=_GIT_OUTPUT_CAP if cap is None else cap)
     except Exception:
         return None
     if ran["rc"] is None or ran["overflow"] or not ran["group_dead"]:
         return None
     return subprocess.CompletedProcess(argv, ran["rc"], ran["out"].decode("utf-8", "replace"),
                                        ran["err"].decode("utf-8", "replace"))
+
+
+def _git_digest(root: str, *args: str, timeout: int = 120) -> "tuple[int, str] | None":
+    """The hardened `_git` contract, but stdout is hashed as it streams instead of
+    buffered, so no amount of output can make a tamper check silently unavailable.
+    Returns (returncode, sha256 hex of stdout) or None when Git did not complete."""
+    try:
+        ran = _run_bounded(_git_argv(root, args), env=_git_env(), timeout=timeout,
+                           cap=65536, hash_stdout=True)
+    except Exception:
+        return None
+    if ran["rc"] is None or ran["overflow"] or not ran["group_dead"]:
+        return None
+    return ran["rc"], ran["digest"]
 
 
 def _git_toplevel(path: str) -> "str | None":
@@ -1244,10 +1410,18 @@ def _git_toplevel(path: str) -> "str | None":
 # -- paths -------------------------------------------------------------------- #
 def cursor_login_home() -> str:
     """The real login home (never $HOME, never the private runtime)."""
+    if pwd is None:
+        raise CursorBoundaryError("the login home is unavailable from the account database")
     try:
-        return os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+        value = pwd.getpwuid(os.getuid()).pw_dir
     except (KeyError, AttributeError, OSError):
-        return os.path.realpath(os.path.expanduser("~"))
+        raise CursorBoundaryError("the login home is unavailable from the account database")
+    if not isinstance(value, str) or not os.path.isabs(value):
+        raise CursorBoundaryError("the account database returned an invalid login home")
+    home = os.path.realpath(value)
+    if not os.path.isdir(home):
+        raise CursorBoundaryError("the account database login home does not exist")
+    return home
 
 
 def _canon_nofollow(path: str) -> str:
@@ -1279,6 +1453,13 @@ def _sb_path(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _sb_mach_name(name: str) -> str:
+    """A Mach global name for an SBPL string literal; anything else is refused."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        raise CursorBoundaryError("uncertain Mach service name in sandbox profile")
+    return name
+
+
 def _rx_escape(text: str) -> str:
     if '"' in text or any(ord(c) < 32 or ord(c) == 127 for c in text):
         raise CursorBoundaryError("uncertain path in sandbox profile")
@@ -1292,7 +1473,7 @@ _CURSOR_HOME_DENIALS = (
     ".cswarm", ".codex/auth.json", ".claude/.credentials.json", ".gemini", ".grok",
     ".config/op",
 )
-CursorDenials = namedtuple("CursorDenials", "paths regexes")
+CursorDenials = namedtuple("CursorDenials", "paths regexes anchors", defaults=((),))
 
 
 def _alloy_secret_paths() -> "list[str]":
@@ -1339,7 +1520,14 @@ def cursor_denials(home: "str | None" = None, extra: "str | None" = None) -> Cur
         "^" + _rx_escape(home) + "/Library/Group Containers/[^/]*1password[^/]*(/.*)?$",
         "^/private/tmp/anvil-secret\\.[^/]*(/.*)?$",
     ]
-    return CursorDenials(tuple(paths), tuple(regexes))
+    # Literal roots beneath which a regex denial may materialize. They are not
+    # themselves denied; they let overlap checks refuse a fingerprint root that
+    # would contain a matching path and therefore make Alloy read through it.
+    anchors = (
+        os.path.join(home, "Library", "Group Containers"),
+        "/private/tmp",
+    )
+    return CursorDenials(tuple(paths), tuple(regexes), anchors)
 
 
 def _denial_covers(den: CursorDenials, path: str) -> bool:
@@ -1350,10 +1538,22 @@ def _denial_covers(den: CursorDenials, path: str) -> bool:
 
 
 def _check_overlap(den: CursorDenials, required: "list[str]") -> None:
-    """A denial that covers something Cursor must read fails closed: the denial is
-    never dropped to make the run work."""
+    """A denial overlapping something Cursor must read fails closed.
+
+    Check both directions: a denial may cover a required path, or a required
+    workspace/fingerprint root may contain a denied credential path. The latter
+    prevents Alloy's unsandboxed parent from walking a keychain or other denied
+    tree while constructing the content tripwire.
+    """
     for path in required:
-        if path and _denial_covers(den, path):
+        if not path:
+            continue
+        path = os.path.realpath(path)
+        contains_denial = any(d == path or d.startswith(path.rstrip("/") + "/")
+                              for d in den.paths)
+        contains_regex_match = any(a == path or a.startswith(path.rstrip("/") + "/")
+                                   for a in den.anchors)
+        if _denial_covers(den, path) or contains_denial or contains_regex_match:
             raise CursorBoundaryError("a sensitive-read denial covers a path Cursor requires")
 
 
@@ -1364,15 +1564,47 @@ def cursor_sbpl(role: str, *, exe: str, runtime, denials: CursorDenials,
     """The sandbox profile for one Cursor process. `panel` (panel, Checker and all
     metadata/discovery calls) and `maker` differ only in their grants.
 
-    SBPL is last-match-wins, so the shape is: allow everything, deny writes and
-    (panel) process execution, add the role's exact grants, then the explicit
-    Git-metadata write denials, the hard-link denial and finally the
+    SBPL is last-match-wins, so the shape is: allow everything, deny the delegation
+    routes (Unix sockets, other processes, Mach lookups except an exact allowlist),
+    deny writes and (panel) process execution, add the role's exact grants, then the
+    explicit Git-metadata write denials, the hard-link denial and finally the
     sensitive-read denials so no grant above can override them. One rule per line."""
     if role not in ("panel", "maker"):
         raise CursorBoundaryError("unknown sandbox role")
     lines = ["(version 1)",
              ";; alloy cursor sandbox profile v%d role=%s" % (CURSOR_SANDBOX_PROFILE_VERSION, role),
              "(allow default)",
+             # Prevent a sandboxed process from asking an unsandboxed service to
+             # perform writes on its behalf. Maker process execution does not
+             # relax these delegation boundaries.
+             "(deny job-creation)",
+             "(deny lsopen)",
+             "(deny appleevent-send)",
+             "(deny user-preference-write)",
+             # Local IPC is the other delegation route: tmux, Docker, an ssh agent or an
+             # IDE's command-line hook are unsandboxed servers behind a Unix-domain
+             # socket that will run a command or perform a write for whoever connects.
+             # A path filter on a network operation matches the socket's resolved
+             # path, so every Unix socket is denied for connect and bind except the
+             # resolver socket name resolution needs. TCP/UDP (the provider network)
+             # is untouched: those endpoints are not paths.
+             '(deny network-outbound (subpath "/"))',
+             '(allow network-outbound (literal "%s"))' % CURSOR_ALLOWED_UNIX_SOCKET,
+             '(deny network-bind (subpath "/"))',
+             # Other processes: no process inspection and no task-port read beyond the
+             # caller and its own children.
+             "(deny process-info*)",
+             "(allow process-info-codesignature)",
+             "(allow process-info* (target self) (target children))",
+             "(deny mach-task-read (target others))",
+             # Mach services are the third delegation route: LaunchServices opens an app or
+             # document, Apple Events drive another application, the window server and
+             # accessibility servers synthesize input, and any other unsandboxed daemon
+             # acts for whoever can look it up. So no lookup is allowed by default: deny
+             # them all, then allow exactly CURSOR_MACH_ALLOW (later rule wins).
+             "(deny mach-lookup)",
+             "(allow mach-lookup " + " ".join(
+                 '(global-name "%s")' % _sb_mach_name(name) for name in CURSOR_MACH_ALLOW) + ")",
              "(deny file-write*)"]
     if role == "panel":
         lines.append("(deny process-exec*)")
@@ -1408,17 +1640,25 @@ def cursor_split_model(model: str) -> "tuple[str, dict]":
     if not m:
         return model or "", {}
     fields = {}
-    for part in (m.group(2) or "").split(","):
-        if "=" in part:
-            key, _, value = part.partition("=")
-            fields[key.strip()] = value.strip()
+    bracket = m.group(2)
+    for part in bracket.split(",") if bracket is not None and bracket != "" else ():
+        key, sep, value = part.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key or not value:
+            raise CursorBoundaryError("Cursor model has a malformed bracket control")
+        if key in fields:
+            raise CursorBoundaryError("Cursor model has a duplicate bracket control")
+        fields[key] = value
     return m.group(1), fields
 
 
 def cursor_model_family(model: "str | None") -> "str | None":
     """Family of a Cursor model ID after removing bracket overrides and a trailing
     `-fast`; None for `auto`, an empty ID or any unknown prefix (ineligible)."""
-    base, _fields = cursor_split_model(model or "")
+    try:
+        base, _fields = cursor_split_model(model or "")
+    except CursorBoundaryError:
+        return None
     base = base.strip()
     if base.endswith("-fast"):
         base = base[:-len("-fast")]
@@ -1441,10 +1681,60 @@ def cursor_validate_model(model: "str | None") -> str:
     """The family of a model that may be spawned, or CursorBoundaryError."""
     if not isinstance(model, str) or not _CURSOR_MODEL_RE.match(model):
         raise CursorBoundaryError("Cursor model is empty or malformed")
+    cursor_split_model(model)       # rejects malformed or duplicate bracket controls
     family = cursor_model_family(model)
     if family is None:
         raise CursorBoundaryError("Cursor model has no known family (auto and unknown IDs are refused)")
     return family
+
+
+def cursor_effective_model(model: str, effort: "str | None" = None,
+                           cursor_fast: bool = False) -> str:
+    """Normalize one Cursor model into explicit effort/fast bracket controls.
+
+    A configured effort overrides a bracket or generic trailing effort. The
+    documented `gpt-5.5-extra-high` ID is indivisible and therefore is never
+    shortened to `gpt-5.5-extra`.
+    """
+    cursor_validate_model(model)
+    if not isinstance(cursor_fast, bool):
+        raise CursorBoundaryError("cursor_fast must be boolean")
+    base, fields = cursor_split_model(model)
+    bracket_effort = fields.pop("effort", None)
+    bracket_fast = fields.pop("fast", None)
+    if bracket_effort is not None:
+        bracket_effort = bracket_effort.lower()
+        if bracket_effort not in CURSOR_EFFORTS:
+            raise CursorBoundaryError("unsupported Cursor effort")
+    if bracket_fast is not None and bracket_fast.lower() not in ("true", "false"):
+        raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+
+    base_fast = base.endswith("-fast")
+    if base_fast:
+        if not cursor_fast:
+            raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+        base = base[:-len("-fast")]
+    if not cursor_fast and bracket_fast is not None and bracket_fast.lower() != "false":
+        raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+
+    suffix_effort = None
+    if base != "gpt-5.5-extra-high":
+        for value in sorted(CURSOR_EFFORTS, key=len, reverse=True):
+            suffix = "-" + value
+            if base.endswith(suffix):
+                base, suffix_effort = base[:-len(suffix)], value
+                break
+    effective_effort = effort.lower() if isinstance(effort, str) else effort
+    if effective_effort is not None and effective_effort not in CURSOR_EFFORTS:
+        raise CursorBoundaryError("unsupported Cursor effort")
+    effective_effort = effective_effort or bracket_effort or suffix_effort
+
+    if effective_effort:
+        fields["effort"] = effective_effort
+    fields["fast"] = "true" if cursor_fast else "false"
+    effective = base + "[" + ",".join("%s=%s" % item for item in fields.items()) + "]"
+    cursor_validate_model(effective)
+    return effective
 
 
 # -- the closed argv grammars --------------------------------------------------- #
@@ -1485,7 +1775,8 @@ def _cursor_auth_control(tok: str) -> bool:
 
 
 def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None" = None,
-                         staged: "str | None" = None) -> None:
+                         staged: "str | None" = None,
+                         expected_model: "str | None" = None) -> None:
     """Parse a FULL Cursor argv (after the executable) against the role's closed
     grammar. There is no substring denylist: anything not recognised is refused,
     including unknown options, `--flag=value` and attached short forms, duplicate
@@ -1539,9 +1830,16 @@ def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None
     if len(positional) != 1:
         raise CursorBoundaryError("exactly one staged-file instruction is required")
     ws = seen["--workspace"]
-    if not os.path.isabs(str(ws)) or not workspace or os.path.realpath(str(ws)) != os.path.realpath(workspace):
+    if (not isinstance(workspace, str) or workspace != os.path.realpath(workspace)
+            or not os.path.isabs(str(ws)) or str(ws) != workspace):
         raise CursorBoundaryError("--workspace is not the verified workspace")
-    cursor_validate_model(str(seen["--model"]))
+    if not expected_model:
+        raise CursorBoundaryError("the expected effective Cursor model is missing")
+    cursor_validate_model(expected_model)
+    if seen["--model"] != expected_model:
+        raise CursorBoundaryError("--model changed after effective-model validation")
+    if not staged:
+        raise CursorBoundaryError("the staged prompt path is missing")
     text = positional[0]
     m = re.match(r'^Read ("(?:[^"\\\n]|\\.)*") in full for your instructions and answer them\.', text)
     try:
@@ -1549,8 +1847,7 @@ def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None
     except ValueError:
         quoted = None
     if (len(text) > CURSOR_INSTRUCTION_MAX or not isinstance(quoted, str) or not os.path.isabs(quoted)
-            or (staged and quoted != staged)
-            or text != cursor_instruction(role, quoted, os.path.realpath(workspace))):
+            or quoted != staged or text != cursor_instruction(role, staged, workspace)):
         raise CursorBoundaryError("the instruction is not the bounded staged-file instruction")
 
 
@@ -1561,27 +1858,42 @@ _GIT_FILES = ("commondir", "config", "config.worktree", "HEAD", "packed-refs",
 _GIT_TREES = ("hooks", "refs")
 
 
-def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
-    """(kind, mode, link-target-or-size, sha256[, mtime_ns]) via lstat: a symlink is
-    recorded, never followed; a regular file is hashed through O_NOFOLLOW and any
-    change of identity, size or mtime while reading is a race and refuses."""
+def _fp_stat_sig(st) -> tuple:
+    """Identity and mutation-sensitive metadata used before/after every read."""
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _fp_count(budget: dict) -> None:
+    budget["entries"] += 1
+    if budget["entries"] > CURSOR_FP_MAX_ENTRIES:
+        raise CursorBoundaryError("fingerprint refused: too many entries")
+
+
+def _fp_entry_at(dir_fd: int, name: str, display: str, budget: dict,
+                 meta: bool = False) -> tuple:
+    """Fingerprint one child relative to an already-open directory. All opens and
+    revalidation stay anchored to that directory FD, so a renamed parent or a
+    symlink substitution cannot redirect a read outside the tree."""
     try:
-        st = os.lstat(path)
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         mode = stat.S_IMODE(st.st_mode)
         extra = (st.st_mtime_ns,) if meta else ()
-        budget["entries"] += 1
-        if budget["entries"] > CURSOR_FP_MAX_ENTRIES:
-            raise CursorBoundaryError("fingerprint refused: too many entries")
+        _fp_count(budget)
         if stat.S_ISLNK(st.st_mode):
-            return ("l", mode, os.readlink(path), "") + extra
+            target = os.readlink(name, dir_fd=dir_fd)
+            if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+                raise CursorBoundaryError("fingerprint refused: a path changed while reading")
+            return ("l", mode, target, "") + extra
         if stat.S_ISDIR(st.st_mode):
             return ("d", mode, "", "") + extra
         if not stat.S_ISREG(st.st_mode):
+            if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+                raise CursorBoundaryError("fingerprint refused: a path changed while reading")
             return ("o", mode, str(stat.S_IFMT(st.st_mode)), "") + extra   # never open a FIFO/device
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
         try:
             fst = os.fstat(fd)
-            if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev) or not stat.S_ISREG(fst.st_mode):
+            if _fp_stat_sig(fst) != _fp_stat_sig(st) or not stat.S_ISREG(fst.st_mode):
                 raise CursorBoundaryError("fingerprint refused: a path changed while reading")
             digest, total = hashlib.sha256(), 0
             while True:
@@ -1594,12 +1906,35 @@ def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
                     raise CursorBoundaryError("fingerprint refused: too many bytes")
                 digest.update(chunk)
             after = os.fstat(fd)
-            if (total != fst.st_size or after.st_size != fst.st_size
-                    or after.st_mtime_ns != fst.st_mtime_ns):
+            if total != fst.st_size or _fp_stat_sig(after) != _fp_stat_sig(fst):
                 raise CursorBoundaryError("fingerprint refused: a file changed while reading")
         finally:
             os.close(fd)
+        if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+            raise CursorBoundaryError("fingerprint refused: a path changed while reading")
         return ("f", mode, str(total), digest.hexdigest()) + extra
+    except CursorBoundaryError:
+        raise
+    except OSError as exc:
+        raise CursorBoundaryError("fingerprint refused: %s on %s" % (
+            exc.strerror or "error", os.path.basename(display)))
+
+
+def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
+    """Path entry wrapper anchored by a non-following parent directory FD."""
+    path = os.path.abspath(path)
+    parent, name = os.path.split(path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        pfd = os.open(parent, flags)
+        try:
+            before = os.fstat(pfd)
+            entry = _fp_entry_at(pfd, name, path, budget, meta)
+            if _fp_stat_sig(os.fstat(pfd)) != _fp_stat_sig(before):
+                raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+            return entry
+        finally:
+            os.close(pfd)
     except CursorBoundaryError:
         raise
     except OSError as exc:
@@ -1607,25 +1942,87 @@ def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
             exc.strerror or "error", os.path.basename(path)))
 
 
+# The walk needs only entry names, and every entry is then examined with fstatat-style
+# calls against the same descriptor. os.listdir(fd) is the documented descriptor form
+# (POSIX, Python 3.3+, listed in os.supports_fd). os.scandir has no dir_fd parameter: its
+# only descriptor form is scandir(fd), which needs 3.7+, so it is deliberately not used.
+_LISTDIR_BY_FD = os.listdir in os.supports_fd
+
+
 def _fp_walk(root: str, prefix: str, out: dict, budget: dict, skip_top: "tuple" = (),
              meta: bool = False) -> None:
-    stack = [""]
-    while stack:
-        rel = stack.pop()
-        here = os.path.join(root, rel) if rel else root
+    """Walk from directory FDs opened with O_DIRECTORY|O_NOFOLLOW. Each directory,
+    including the supplied root, is checked before and after enumeration and
+    after its children for identity, type, mode, size, mtime and ctime changes."""
+    # Where the platform cannot list a directory by descriptor the walk refuses rather
+    # than falling back to a path-based listing that a rename could redirect.
+    if not _LISTDIR_BY_FD:
+        raise CursorBoundaryError("fingerprint refused: directory enumeration by descriptor is unsupported")
+    root = os.path.abspath(root)
+    parent, root_name = os.path.split(root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def walk(fd: int, rel: str, expected) -> None:
+        before = os.fstat(fd)
+        if _fp_stat_sig(before) != _fp_stat_sig(expected) or not stat.S_ISDIR(before.st_mode):
+            raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
         try:
-            with os.scandir(here) as it:
-                names = sorted(e.name for e in it)
+            names = sorted(os.listdir(fd))
         except OSError as exc:
-            raise CursorBoundaryError("fingerprint refused: cannot enumerate (%s)" % (exc.strerror or "error"))
+            raise CursorBoundaryError("fingerprint refused: cannot enumerate (%s)" % (
+                exc.strerror or "error"))
+        if _fp_stat_sig(os.fstat(fd)) != _fp_stat_sig(before):
+            raise CursorBoundaryError("fingerprint refused: a directory changed during enumeration")
         for name in names:
             child = os.path.join(rel, name) if rel else name
             if not rel and name in skip_top:
                 continue
-            entry = _fp_entry(os.path.join(root, child), budget, meta)
+            entry = _fp_entry_at(fd, name, os.path.join(root, child), budget, meta)
             out[prefix + child] = entry
             if entry[0] == "d":
-                stack.append(child)
+                try:
+                    child_fd = os.open(name, flags, dir_fd=fd)
+                except OSError as exc:
+                    raise CursorBoundaryError("fingerprint refused: cannot open directory (%s)" % (
+                        exc.strerror or "error"))
+                try:
+                    child_st = os.fstat(child_fd)
+                    named_st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if _fp_stat_sig(child_st) != _fp_stat_sig(named_st):
+                        raise CursorBoundaryError("fingerprint refused: a directory changed while opening")
+                    walk(child_fd, child, child_st)
+                    if (_fp_stat_sig(os.fstat(child_fd)) != _fp_stat_sig(child_st)
+                            or _fp_stat_sig(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                            != _fp_stat_sig(child_st)):
+                        raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+                finally:
+                    os.close(child_fd)
+        if _fp_stat_sig(os.fstat(fd)) != _fp_stat_sig(before):
+            raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+
+    try:
+        parent_fd = os.open(parent, flags)
+        try:
+            root_before = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(root_name, flags, dir_fd=parent_fd)
+            try:
+                opened = os.fstat(root_fd)
+                if _fp_stat_sig(opened) != _fp_stat_sig(root_before):
+                    raise CursorBoundaryError("fingerprint refused: the root changed while opening")
+                walk(root_fd, "", opened)
+                if (_fp_stat_sig(os.fstat(root_fd)) != _fp_stat_sig(opened)
+                        or _fp_stat_sig(os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False))
+                        != _fp_stat_sig(opened)):
+                    raise CursorBoundaryError("fingerprint refused: the root changed while reading")
+            finally:
+                os.close(root_fd)
+        finally:
+            os.close(parent_fd)
+    except CursorBoundaryError:
+        raise
+    except (OSError, RecursionError) as exc:
+        detail = exc.strerror if isinstance(exc, OSError) else "directory nesting is too deep"
+        raise CursorBoundaryError("fingerprint refused: cannot enumerate (%s)" % (detail or "error"))
 
 
 def _resolve_git_dir(dotgit: str, top: str) -> "tuple[str, str, bool]":
@@ -1694,11 +2091,13 @@ def cursor_git_locations(path: str) -> "dict | None":
             "gitdir": gitdir, "common": common}
 
 
-def cursor_fingerprint(path: str, git: "dict | None" = None) -> CursorFingerprint:
+def cursor_fingerprint(path: str, git: "dict | None" = None,
+                       denials: "CursorDenials | None" = None) -> CursorFingerprint:
     """Deterministic content fingerprint: every entry of the working tree (tracked,
     untracked AND ignored; type, mode, symlink target, file bytes) plus the Git
     internals that can change behaviour. Refuses when anything is uncertain."""
     root = os.path.realpath(path)
+    _check_overlap(denials or cursor_denials(), [root])
     git = git if git is not None else cursor_git_locations(root)
     budget = {"entries": 0, "bytes": 0}
     entries: "dict[str, tuple]" = {}
@@ -1766,18 +2165,80 @@ class CursorRuntime:
         before = self.canary_before or {}
         return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
 
-    def close(self) -> None:
-        _LIVE_RUNTIMES.discard(self)
+    def close(self, best_effort: bool = False) -> bool:
+        """Remove and verify both private trees. Dispatch cleanup is strict;
+        process-exit cleanup alone is best-effort because it cannot report a
+        failed call to the user."""
+        failed = []
         for path in (self.root, self.canary_outside):
-            shutil.rmtree(path, ignore_errors=True)
+            try:
+                if os.path.lexists(path):
+                    shutil.rmtree(path)
+            except OSError:
+                failed.append(path)
+            if os.path.lexists(path) and path not in failed:
+                failed.append(path)
+        if failed:
+            if best_effort:
+                return False
+            _LIVE_RUNTIMES.add(self)
+            raise CursorBoundaryError("private runtime cleanup could not be verified")
+        _LIVE_RUNTIMES.discard(self)
+        return True
 
 
 # An interrupted run (SIGINT/SIGTERM) still removes its private runtimes at exit.
 _LIVE_RUNTIMES: "set[CursorRuntime]" = set()
-atexit.register(lambda: [rt.close() for rt in list(_LIVE_RUNTIMES)])
+atexit.register(lambda: [rt.close(best_effort=True) for rt in list(_LIVE_RUNTIMES)])
 
 
-def cursor_make_runtime(forbidden: "tuple | list" = ()) -> CursorRuntime:
+def _cursor_containing_repo(path: str) -> "str | None":
+    """Repository containing path, even when the configured path is not created."""
+    probe = os.path.realpath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    cp = _git(probe, "rev-parse", "--show-toplevel")
+    if cp is None:
+        raise CursorBoundaryError("a protected path could not be checked against Git")
+    return os.path.realpath(cp.stdout.strip()) if cp.returncode == 0 and cp.stdout.strip() else None
+
+
+def _cursor_runtime_forbidden(*, run_root: "str | None" = None,
+                              pdir: "str | None" = None,
+                              source: "str | None" = None,
+                              worktree: "str | None" = None,
+                              git: "dict | None" = None,
+                              extra: "tuple | list" = ()) -> "list[str]":
+    """Central runtime placement deny set. The configured/default and effective
+    caller run roots, plus every repository containing them, are mandatory;
+    dispatch callers also add explicit artifact/source/worktree/Git locations."""
+    configured_root = os.path.realpath(os.path.abspath(os.path.expanduser(
+        setting("ALLOY_RUN_ROOT") or default_run_root())))
+    run_roots = [configured_root]
+    if run_root:
+        run_roots.append(os.path.realpath(os.path.abspath(os.path.expanduser(run_root))))
+    roots = []
+    for protected_root in dict.fromkeys(run_roots):
+        roots.append(protected_root)
+        containing = _cursor_containing_repo(protected_root)
+        if containing:
+            roots.append(containing)
+    roots.extend(p for p in (pdir, source, worktree) if p)
+    if git:
+        roots.extend(git.get(k) for k in ("top", "dotgit", "gitdir", "common") if git.get(k))
+    roots.extend(p for p in extra if p)
+    return list(dict.fromkeys(os.path.realpath(p) for p in roots))
+
+
+def cursor_make_runtime(forbidden: "tuple | list" = (), *,
+                        run_root: "str | None" = None,
+                        pdir: "str | None" = None,
+                        source: "str | None" = None,
+                        worktree: "str | None" = None,
+                        git: "dict | None" = None) -> CursorRuntime:
     """Create and verify a runtime, refusing (and removing it) when it sits under,
     or over, any relevant path or inside any Git repository."""
     root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-"))
@@ -1792,7 +2253,8 @@ def cursor_make_runtime(forbidden: "tuple | list" = ()) -> CursorRuntime:
                            (outside, "canary.txt")):
             with open(os.path.join(base, name), "w", encoding="utf-8") as f:
                 f.write("alloy canary: never written by a Cursor process\n")
-        roots = [os.path.realpath(p) for p in forbidden if p]
+        roots = _cursor_runtime_forbidden(run_root=run_root, pdir=pdir, source=source,
+                                          worktree=worktree, git=git, extra=forbidden)
         for p in (root, rt.state, rt.cache, rt.tmp, outside):
             if any(_related(p, r) for r in roots):
                 raise CursorBoundaryError("the private runtime overlaps a repository or run path")
@@ -1813,12 +2275,14 @@ def cursor_make_runtime(forbidden: "tuple | list" = ()) -> CursorRuntime:
 CursorBoundary = namedtuple("CursorBoundary", "ready reason version exe")
 _CURSOR_PREFLIGHT: "dict[tuple, CursorBoundary]" = {}
 
-# Probe run under the production profile with /bin/bash (and /bin/ln) as the only
-# extra executables. /bin/sh is NOT used: on macOS it is a small shim that re-execs
-# the /var/select/sh target, which the panel profile's exec denial would refuse.
+# Probe run under the production profile with /bin/bash (plus /bin/ln, the Unix-socket
+# client CURSOR_SOCKET_PROBE_TOOL and the Mach-lookup client, the running interpreter) as
+# the only extra executables. /bin/sh is NOT used: on macOS it is a small shim that
+# re-execs the /var/select/sh target, which the panel profile's exec denial would refuse.
 # One line per operation; a mock sandbox-exec recognises the marker on line one.
 _PREFLIGHT_SCRIPT = r'''# ALLOY_PREFLIGHT_PROBE
-T=$1 W=$2 O=$3 D=$4 L=$5 G=$6 C=$7 P=$8
+T=$1 W=$2 O=$3 D=$4 L=$5 G=$6 C=$7 P=$8 S=$9 N=${10} M=${11} Y=${12} Z=${13} A=${14}
+shift 14
 w() { ( : > "$1" ) 2>/dev/null && echo "$2=allow" || echo "$2=deny"; }
 w "$T/probe" tmp_write
 w "$W/probe" workspace_write
@@ -1829,15 +2293,101 @@ w "$P" dotgit_write
 ( read _x < "$D" ) 2>/dev/null && echo denied_read=allow || echo denied_read=deny
 ( /bin/ln "$L" "$T/link" ) 2>/dev/null && echo link=allow || echo link=deny
 ( /usr/bin/true ) 2>/dev/null && echo exec=allow || echo exec=deny
+( "$N" -U -w 1 "$M" </dev/null ) >/dev/null 2>&1 && echo unix_allowed=allow || echo unix_allowed=deny
+( "$N" -U -w 1 "$S" </dev/null ) >/dev/null 2>&1 && echo unix_connect=allow || echo unix_connect=deny
+( "$Y" -I -S -c "$Z" "$A" ) >/dev/null 2>&1; [ $? -eq 65 ] && echo mach_allowed=allow || echo mach_allowed=deny
+( "$Y" -I -S -c "$Z" "$@" ) >/dev/null 2>&1; [ $? -eq 64 ] && echo mach_relay=deny || echo mach_relay=allow
 '''
+# `unix_allowed` is the positive control (the resolver socket the profile permits must
+# connect, which also proves the client tool runs under the profile); `unix_connect` is
+# the parent's fixture socket and must be denied. The parent also counts what its
+# listener actually accepted, so a client that silently failed cannot pass as "denied".
+# `mach_allowed` is the Mach positive control (exit 65: exactly one allowlisted name
+# resolved, so the client runs and the allowlist is not "everything denied"); `mach_relay`
+# passes only on exit 64: the client ran and NONE of CURSOR_MACH_RELAY_SERVICES resolved.
+# Every other status (launcher crash 1, exec denied 126, missing 127, error 99, a signal)
+# reads as a failed control or a leak, never as a denial. The script's 64/65 are
+# CURSOR_MACH_EXIT_BASE (+0 and +1).
 _PREFLIGHT_EXPECTED = {
     "panel": {"tmp_write": "allow", "workspace_write": "deny", "outside_write": "deny",
               "gitdir_write": "deny", "common_write": "deny", "dotgit_write": "deny",
-              "denied_read": "deny", "link": "deny", "exec": "deny"},
+              "denied_read": "deny", "link": "deny", "exec": "deny",
+              "unix_allowed": "allow", "unix_connect": "deny",
+              "mach_allowed": "allow", "mach_relay": "deny"},
     "maker": {"tmp_write": "allow", "workspace_write": "allow", "outside_write": "deny",
               "gitdir_write": "deny", "common_write": "deny", "dotgit_write": "deny",
-              "denied_read": "deny", "link": "deny", "exec": "allow"},
+              "denied_read": "deny", "link": "deny", "exec": "allow",
+              "unix_allowed": "allow", "unix_connect": "deny",
+              "mach_allowed": "allow", "mach_relay": "deny"},
 }
+
+
+class _ProbeSocket:
+    """A listening Unix-domain socket owned by the parent. It exists only so the
+    sandbox self-test can prove a sandboxed client cannot reach an unsandboxed
+    server: `accepted` counts real connections."""
+
+    def __init__(self, path: str):
+        if len(os.fsencode(path)) > 100:
+            raise CursorBoundaryError("the sandbox self-test socket path is too long")
+        self.path, self.accepted = path, 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.srv.bind(path)
+            self.srv.listen(8)
+            self.srv.settimeout(0.2)
+        except OSError:
+            self.srv.close()
+            raise CursorBoundaryError("the sandbox self-test socket could not be created")
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            conn.close()
+            with self._lock:
+                self.accepted += 1
+
+    def take(self, wait: float = 0.0) -> int:
+        """Connections accepted since the last call (optionally after a short settle)."""
+        if wait:
+            time.sleep(wait)
+        with self._lock:
+            count, self.accepted = self.accepted, 0
+        return count
+
+    def control(self) -> None:
+        """An unsandboxed client must reach the listener, or a later 'denied' proves nothing."""
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(2)
+            client.connect(self.path)
+        except OSError:
+            raise CursorBoundaryError("the sandbox self-test socket is not reachable")
+        finally:
+            client.close()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if self.take():
+                return
+            time.sleep(0.02)
+        raise CursorBoundaryError("the sandbox self-test socket did not accept a control connection")
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+        self.thread.join(2)
 
 
 def _verify_sandbox_exec() -> tuple:
@@ -1856,6 +2406,32 @@ def _verify_sandbox_exec() -> tuple:
     return (SANDBOX_EXEC, st.st_ino, st.st_size, st.st_mtime_ns, st.st_uid)
 
 
+def _cursor_probe_interpreters() -> "tuple[str, ...]":
+    """The interpreter the Mach self-test runs (first) and every image its exec chain
+    reaches. On macOS a framework Python's `bin/python3` is a launcher that execs
+    `Python.app/Contents/MacOS/Python`, and `sys.executable` names the launcher, not the
+    image. The panel profile denies every exec it does not list, so a chain with one
+    unlisted link would refuse the client on every real machine (the same trap as the
+    `/bin/sh` shim). The running image is asked of dyld; if it cannot be identified the
+    self-test cannot be trusted and the boundary is refused."""
+    launcher = os.path.realpath(sys.executable) if sys.executable else ""
+    if not launcher or not os.path.isfile(launcher) or not os.access(launcher, os.X_OK):
+        raise CursorBoundaryError("the sandbox self-test needs the running Python interpreter")
+    if sys.platform != "darwin":        # no launcher chain; Cursor itself is refused off macOS
+        return (launcher,)
+    try:
+        import ctypes
+        buf = ctypes.create_string_buffer(4096)
+        size = ctypes.c_uint32(len(buf))
+        rc = ctypes.CDLL(None)._NSGetExecutablePath(buf, ctypes.byref(size))
+        image = os.path.realpath(os.fsdecode(buf.value)) if rc == 0 and buf.value else ""
+    except Exception:
+        image = ""
+    if not image or not os.path.isfile(image) or not os.access(image, os.X_OK):
+        raise CursorBoundaryError("the sandbox self-test could not identify the running Python image")
+    return tuple(dict.fromkeys((launcher, image)))
+
+
 def _cursor_exe(path: "str | None") -> "tuple[str, tuple]":
     if not path:
         raise CursorBoundaryError("the Cursor CLI was not found")
@@ -1869,13 +2445,27 @@ def _cursor_exe(path: "str | None") -> "tuple[str, tuple]":
     return real, (real, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
+def cursor_base_env(source: "dict | None" = None) -> dict:
+    """The allowlisted part of an environment. A proxy variable that embeds
+    credentials (`scheme://user:secret@host`) is dropped rather than forwarded."""
+    env = {}
+    for name, value in (os.environ if source is None else source).items():
+        if not isinstance(value, str):
+            continue
+        if not (name in CURSOR_ENV_ALLOW or name.startswith(CURSOR_ENV_ALLOW_PREFIXES)):
+            continue
+        if name in _CURSOR_PROXY_ENV and _URL_USERINFO_RE.search(value):
+            continue
+        env[name] = value
+    return env
+
+
 def cursor_child_env(rt: CursorRuntime, home: "str | None" = None) -> dict:
-    """Cleaned child environment: router credentials and both Cursor API overrides
-    removed; only the exact private runtime children are exported; HOME stays the
-    real login location (write-denied by the profile)."""
-    env = dict(routing.clean_env())
-    for name in ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT"):
-        env.pop(name, None)
+    """Child environment for every Cursor process: an explicit allowlist (no router
+    or Cursor API credential, no ambient cloud/VCS token, no IPC hook such as
+    SSH_AUTH_SOCK or TMUX), plus only the exact private runtime children. HOME stays
+    the real login location (write-denied by the profile)."""
+    env = cursor_base_env()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("CI", "1")
@@ -1889,16 +2479,17 @@ def _write_profile(rt: CursorRuntime, text: str) -> None:
         f.write(text)
 
 
-def _run_preflight(exe: str, home: str, den: CursorDenials) -> CursorBoundary:
+def _run_preflight(exe: str, home: str, den: CursorDenials,
+                   run_root: "str | None" = None) -> CursorBoundary:
     """Prove, through the production profile generator, that reads/writes/links/
-    process execution behave as the roles require AND that the CLI still starts."""
-    root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-preflight-"))
+    process execution, Unix sockets and Mach lookups behave as the roles require AND
+    that the CLI still starts (which is what proves the Mach allowlist is sufficient)."""
+    rt = cursor_make_runtime(forbidden=[exe], run_root=run_root)
+    root = rt.root
     try:
-        rt = CursorRuntime(root, root)
-        for d in (rt.state, rt.cache, rt.tmp):
-            os.makedirs(d, mode=0o700)
         wt, gitdir, common = (os.path.join(root, n) for n in ("wt", "gitdir", "common"))
-        denied, outside = os.path.join(root, "denied"), os.path.join(root, "outside")
+        denied = os.path.join(rt.canary_outside, "denied")
+        outside = os.path.join(root, "outside")
         for d in (wt, gitdir, common, denied, outside):
             os.makedirs(d, mode=0o700)
         for path, body in ((os.path.join(wt, "tracked.txt"), "x\n"), (os.path.join(wt, ".git"), "gitdir: %s\n" % gitdir),
@@ -1906,46 +2497,62 @@ def _run_preflight(exe: str, home: str, den: CursorDenials) -> CursorBoundary:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(body)
         # The fixture denial is a CONFIGURED one, added to the real set.
-        probe_den = CursorDenials(den.paths + (denied,), den.regexes)
+        probe_den = CursorDenials(den.paths + (denied,), den.regexes, den.anchors)
         git = {"top": wt, "dotgit": os.path.join(wt, ".git"), "dotgit_is_file": True,
                "gitdir": gitdir, "common": common}
         required = [exe, root]
         _check_overlap(den, required)
         version = ""
-        for role in ("panel", "maker"):
-            _write_profile(rt, cursor_sbpl(role, exe="/bin/bash", runtime=rt, denials=probe_den,
-                                           worktree=wt, git=git, extra_exec=("/bin/ln",)))
-            ran = _run_bounded(
-                [SANDBOX_EXEC, "-f", rt.profile, "/bin/bash", "-c", _PREFLIGHT_SCRIPT, "bash",
-                 rt.tmp, wt, outside, os.path.join(denied, "sentinel.txt"), os.path.join(wt, "tracked.txt"),
-                 gitdir, common, os.path.join(wt, ".git")],
-                env=cursor_child_env(rt, home), cwd=rt.tmp, timeout=20, cap=65536)
-            if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"]:
-                raise CursorBoundaryError("the OS sandbox self-test did not run (%s profile)" % role)
-            got = dict(line.split("=", 1) for line in ran["out"].decode("utf-8", "replace").split()
-                       if line.count("=") == 1)
-            if got != _PREFLIGHT_EXPECTED[role]:
-                bad = sorted(k for k in _PREFLIGHT_EXPECTED[role] if got.get(k) != _PREFLIGHT_EXPECTED[role][k])
-                raise CursorBoundaryError("the OS sandbox self-test failed for the %s profile: %s" % (
-                    role, ", ".join(bad) or "unparseable result"))
-            # Same generator, real CLI, no extra executables: it must still start.
-            _write_profile(rt, cursor_sbpl(role, exe=exe, runtime=rt, denials=probe_den,
-                                           worktree=wt, git=git))
-            ran = _run_bounded([SANDBOX_EXEC, "-f", rt.profile, exe, "--version"], env=cursor_child_env(rt, home), cwd=rt.tmp,
-                               timeout=30, cap=65536)
-            text = strip_ansi((ran["out"] + ran["err"]).decode("utf-8", "replace")).strip()
-            m = CURSOR_VERSION_RE.search(text)
-            if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"] or not m:
-                raise CursorBoundaryError("the Cursor CLI does not start under the %s profile" % role)
-            if tuple(int(x) for x in m.groups()) < CURSOR_MIN_VERSION:
-                raise CursorBoundaryError("unsupported Cursor CLI version (minimum %d.%02d.%02d)" % CURSOR_MIN_VERSION)
-            version = text.splitlines()[0][:80]
+        interpreters = _cursor_probe_interpreters()
+        python = interpreters[0]            # what bash execs; the rest of the chain is allowed too
+        fixture = _ProbeSocket(os.path.join(root, "probe.sock"))
+        try:
+            fixture.control()
+            for role in ("panel", "maker"):
+                _write_profile(rt, cursor_sbpl(role, exe="/bin/bash", runtime=rt, denials=probe_den,
+                                               worktree=wt, git=git,
+                                               extra_exec=("/bin/ln", CURSOR_SOCKET_PROBE_TOOL) + interpreters))
+                ran = _run_bounded(
+                    [SANDBOX_EXEC, "-f", rt.profile, "/bin/bash", "-c", _PREFLIGHT_SCRIPT, "bash",
+                     rt.tmp, wt, outside, os.path.join(denied, "sentinel.txt"), os.path.join(wt, "tracked.txt"),
+                     gitdir, common, os.path.join(wt, ".git"), fixture.path, CURSOR_SOCKET_PROBE_TOOL,
+                     CURSOR_ALLOWED_UNIX_SOCKET, python, _MACH_PROBE_PY, CURSOR_MACH_PROBE_ALLOWED,
+                     *CURSOR_MACH_RELAY_SERVICES],
+                    env=cursor_child_env(rt, home), cwd=rt.tmp, timeout=20, cap=65536)
+                if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"]:
+                    raise CursorBoundaryError("the OS sandbox self-test did not run (%s profile)" % role)
+                got = dict(line.split("=", 1) for line in ran["out"].decode("utf-8", "replace").split()
+                           if line.count("=") == 1)
+                if fixture.take(wait=0.3):      # the listener's own count outranks the client's report
+                    got["unix_connect"] = "allow"
+                if got != _PREFLIGHT_EXPECTED[role]:
+                    bad = sorted(k for k in _PREFLIGHT_EXPECTED[role]
+                                 if got.get(k) != _PREFLIGHT_EXPECTED[role][k])
+                    raise CursorBoundaryError("the OS sandbox self-test failed for the %s profile: %s" % (
+                        role, ", ".join(bad) or "unparseable result"))
+                # Same generator, real CLI, no extra executables: it must still start.
+                argv = _cursor_validated_spawn(
+                    "version", ["--version"], exe=exe, runtime=rt, profile_role=role,
+                    denials=probe_den, worktree=wt if role == "maker" else None,
+                    git=git, required=[exe, root, wt, gitdir, common])
+                ran = _run_bounded(argv, env=cursor_child_env(rt, home), cwd=rt.tmp,
+                                   timeout=30, cap=65536)
+                text = strip_ansi((ran["out"] + ran["err"]).decode("utf-8", "replace")).strip()
+                m = CURSOR_VERSION_RE.search(text)
+                if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"] or not m:
+                    raise CursorBoundaryError("the Cursor CLI does not start under the %s profile" % role)
+                if m.group(1) not in CURSOR_SUPPORTED_VERSIONS:
+                    raise CursorBoundaryError("unsupported Cursor CLI version/build")
+                version = text.splitlines()[0][:80]
+        finally:
+            fixture.close()
         return CursorBoundary(True, "", version, exe)
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        rt.close()
 
 
-def cursor_boundary(bin_path: "str | None") -> CursorBoundary:
+def cursor_boundary(bin_path: "str | None",
+                    run_root: "str | None" = None) -> CursorBoundary:
     """Whether ANY Cursor process may start. Independent of the role's read_only
     flag; ALLOY_ALLOW_UNSANDBOXED never affects it. macOS only. Cached per process
     on everything the verdict depends on."""
@@ -1956,10 +2563,13 @@ def cursor_boundary(bin_path: "str | None") -> CursorBoundary:
         exe, exe_sig = _cursor_exe(bin_path)
         home = cursor_login_home()
         den = cursor_denials(home)
-        key = (sandbox_sig, exe_sig, CURSOR_SANDBOX_PROFILE_VERSION, ALLOY_VERSION, home, den)
+        effective_root = (os.path.realpath(os.path.abspath(os.path.expanduser(run_root)))
+                          if run_root else None)
+        key = (sandbox_sig, exe_sig, CURSOR_SANDBOX_PROFILE_VERSION, ALLOY_VERSION,
+               home, den, effective_root)
         if key not in _CURSOR_PREFLIGHT:
             try:
-                _CURSOR_PREFLIGHT[key] = _run_preflight(exe, home, den)
+                _CURSOR_PREFLIGHT[key] = _run_preflight(exe, home, den, effective_root)
             except CursorBoundaryError as exc:
                 _CURSOR_PREFLIGHT[key] = CursorBoundary(False, str(exc), "", exe)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -1971,17 +2581,147 @@ def cursor_boundary(bin_path: "str | None") -> CursorBoundary:
 
 
 # -- the spawn gateway ------------------------------------------------------------- #
+def _cursor_staged_file(path: "str | None") -> str:
+    """Canonical regular, non-symlink staged prompt. Merely checking its parent
+    would let an exact-file denial or a final symlink bypass the gateway."""
+    if not isinstance(path, str) or not os.path.isabs(path) or path != os.path.realpath(path):
+        raise CursorBoundaryError("the staged prompt is not canonical")
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise CursorBoundaryError("the staged prompt is not a regular non-symlink file")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            fst = os.fstat(fd)
+            if _fp_stat_sig(fst) != _fp_stat_sig(st) or not stat.S_ISREG(fst.st_mode):
+                raise CursorBoundaryError("the staged prompt changed while being validated")
+        finally:
+            os.close(fd)
+    except CursorBoundaryError:
+        raise
+    except OSError:
+        raise CursorBoundaryError("the staged prompt could not be validated")
+    return path
+
+
+def _cursor_stage_prompt(prompt_path: str, pdir: str) -> str:
+    """Create the staged prompt once beneath canonical, non-symlink directories.
+
+    O_EXCL and O_NOFOLLOW ensure an existing file or symlink is refused before
+    any prompt byte is written.
+    """
+    pdir = os.path.realpath(os.path.abspath(pdir))
+    os.makedirs(pdir, mode=0o700, exist_ok=True)
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    pfd = pinfd = srcfd = dstfd = None
+    created = complete = False
+    try:
+        pfd = os.open(pdir, dir_flags)
+        try:
+            os.mkdir("prompt_in", mode=0o700, dir_fd=pfd)
+        except FileExistsError:
+            pass
+        named = os.stat("prompt_in", dir_fd=pfd, follow_symlinks=False)
+        if not stat.S_ISDIR(named.st_mode):
+            raise CursorBoundaryError("the prompt staging directory is not a regular directory")
+        pinfd = os.open("prompt_in", dir_flags, dir_fd=pfd)
+        if _fp_stat_sig(os.fstat(pinfd)) != _fp_stat_sig(named):
+            raise CursorBoundaryError("the prompt staging directory changed while opening")
+        os.fchmod(pinfd, 0o700)
+
+        srcfd = os.open(prompt_path, os.O_RDONLY)
+        source_before = os.fstat(srcfd)
+        dstfd = os.open("prompt.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=pinfd)
+        created = True
+        total = 0
+        while True:
+            chunk = os.read(srcfd, 1 << 20)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dstfd, view)
+                if written <= 0:
+                    raise OSError("short prompt write")
+                view = view[written:]
+            total += len(chunk)
+        source_after = os.fstat(srcfd)
+        staged_stat = os.fstat(dstfd)
+        if (_fp_stat_sig(source_after) != _fp_stat_sig(source_before)
+                or total != source_before.st_size or staged_stat.st_size != total
+                or not stat.S_ISREG(staged_stat.st_mode)):
+            raise OSError("prompt changed or copied incompletely")
+        os.fchmod(dstfd, 0o600)
+        complete = True
+        return os.path.join(pdir, "prompt_in", "prompt.md")
+    except CursorBoundaryError:
+        raise
+    except OSError:
+        raise CursorBoundaryError("the prompt could not be staged")
+    finally:
+        if created and not complete and pinfd is not None:
+            try:
+                os.unlink("prompt.md", dir_fd=pinfd)
+            except OSError:
+                pass
+        for fd in (dstfd, srcfd, pinfd, pfd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def _cursor_validated_spawn(validation_role: str, tail: "list[str]", *,
+                            exe: str, runtime: CursorRuntime, profile_role: str,
+                            denials: CursorDenials, workspace: "str | None" = None,
+                            staged: "str | None" = None,
+                            expected_model: "str | None" = None,
+                            worktree: "str | None" = None,
+                            git: "dict | None" = None,
+                            required: "tuple | list" = ()) -> "list[str]":
+    """Non-recursive final spawn builder shared by preflight and normal calls."""
+    cursor_validate_argv(validation_role, tail, workspace=workspace, staged=staged,
+                         expected_model=expected_model)
+    _check_overlap(denials, [exe, runtime.root] + list(required))
+    _write_profile(runtime, cursor_sbpl(profile_role, exe=exe, runtime=runtime,
+                                        denials=denials, worktree=worktree, git=git))
+    return [SANDBOX_EXEC, "-f", runtime.profile, exe] + list(tail)
+
+
+def _cursor_require_owned_worktree(ws: str, git: "dict | None", managed_worktree: bool,
+                                   cwd: "str | None") -> None:
+    """A Maker's write grant is its whole workspace, so that workspace must be
+    provably the Alloy-owned linked worktree the run was dispatched into: a managed
+    dispatch, a linked worktree (its `.git` is a pointer to `<common>/worktrees/<id>`,
+    never an ordinary checkout's `.git` directory) and a working directory equal to
+    the workspace, so the grant and the process's own cwd cannot disagree."""
+    if managed_worktree is not True:
+        raise CursorBoundaryError("a Maker runs only in a managed, Alloy-owned worktree")
+    if (not git or git["top"] != ws or not git["dotgit_is_file"]
+            or not os.path.basename(git["gitdir"])
+            or os.path.dirname(git["gitdir"]) != os.path.join(git["common"], "worktrees")):
+        raise CursorBoundaryError("a Maker workspace must be the root of a linked Git worktree "
+                                  "(its .git pointer must resolve to <common>/worktrees/<id>)")
+    if not cwd or os.path.realpath(cwd) != ws:
+        raise CursorBoundaryError("a Maker's working directory must be its workspace")
+
+
 def cursor_command(role: str, tail: "list[str]", *, exe: str, runtime: CursorRuntime,
-                   workspace: "str | None" = None, staged: "str | None" = None) -> "list[str]":
+                   workspace: "str | None" = None, staged: "str | None" = None,
+                   expected_model: "str | None" = None,
+                   run_root: "str | None" = None, managed_worktree: bool = False,
+                   cwd: "str | None" = None) -> "list[str]":
     """The ONLY way to obtain a Cursor argv: validates the boundary, validates the
     final argv (after every rewrite) against the role's closed grammar, creates
     the owner-private profile and returns `sandbox-exec -f <profile> <exe> ...`.
-    Raises CursorBoundaryError when anything is not provably safe."""
-    boundary = cursor_boundary(exe)
+    Raises CursorBoundaryError when anything is not provably safe. A Maker
+    additionally needs `managed_worktree` and a `cwd` equal to the workspace."""
+    boundary = cursor_boundary(exe, run_root=run_root)
     if not boundary.ready:
         raise CursorBoundaryError(boundary.reason)
     exe = boundary.exe
-    cursor_validate_argv(role, tail, workspace=workspace, staged=staged)
     home = cursor_login_home()
     den = cursor_denials(home)
     profile_role = "maker" if role == "maker" else "panel"
@@ -1989,31 +2729,35 @@ def cursor_command(role: str, tail: "list[str]", *, exe: str, runtime: CursorRun
     required = [exe, runtime.root]
     if role in ("panel", "maker"):
         ws = _canon_grant(workspace, "the workspace")
+        staged = _cursor_staged_file(staged)
         git = cursor_git_locations(ws)
-        required += [ws] + ([os.path.dirname(staged)] if staged else [])
+        required += [ws, os.path.dirname(staged), staged]
         if git:
             required += [git["gitdir"], git["common"]]
         if role == "maker":
             worktree = ws
-            if not git or git["top"] != ws:
-                raise CursorBoundaryError("a Maker workspace must be the root of its own Git worktree")
-    _check_overlap(den, required)
-    _write_profile(runtime, cursor_sbpl(profile_role, exe=exe, runtime=runtime, denials=den,
-                                        worktree=worktree, git=git))
-    return [SANDBOX_EXEC, "-f", runtime.profile, exe] + list(tail)
+            _cursor_require_owned_worktree(ws, git, managed_worktree, cwd)
+    else:
+        ws = None
+    return _cursor_validated_spawn(
+        role, tail, exe=exe, runtime=runtime, profile_role=profile_role,
+        denials=den, workspace=ws, staged=staged, expected_model=expected_model,
+        worktree=worktree, git=git, required=required)
 
 
-def cursor_metadata(kind: str, bin_path: "str | None", timeout: float = 20.0) -> "tuple[int | None, str]":
+def cursor_metadata(kind: str, bin_path: "str | None", timeout: float = 20.0,
+                    run_root: "str | None" = None) -> "tuple[int | None, str]":
     """Run `status`, `--version`, `--help` or `--list-models` through the gateway
     with the private runtime, cleaned env, stdin=DEVNULL and bounded output.
     Returns (returncode or None on timeout, ANSI-stripped text). Raises
     CursorBoundaryError when the boundary is not ready."""
-    boundary = cursor_boundary(bin_path)
+    boundary = cursor_boundary(bin_path, run_root=run_root)
     if not boundary.ready:
         raise CursorBoundaryError(boundary.reason)
-    rt = cursor_make_runtime([boundary.exe])
+    rt = cursor_make_runtime([boundary.exe], run_root=run_root)
     try:
-        argv = cursor_command(kind, _CURSOR_METADATA[kind], exe=boundary.exe, runtime=rt)
+        argv = cursor_command(kind, _CURSOR_METADATA[kind], exe=boundary.exe, runtime=rt,
+                              run_root=run_root)
         ran = _run_bounded(argv, env=cursor_child_env(rt), cwd=rt.tmp, timeout=timeout, cap=65536)
         if ran["overflow"] or not ran["group_dead"]:
             raise CursorBoundaryError("Cursor metadata output was not bounded")
@@ -2063,10 +2807,10 @@ class CursorAgentAdapter(Adapter):
         return bool(path and os.path.exists(path))
 
     # -- boundary ------------------------------------------------------------- #
-    def _boundary(self) -> CursorBoundary:
+    def _boundary(self, run_root: "str | None" = None) -> CursorBoundary:
         if not self.detect():
             return CursorBoundary(False, "the Cursor CLI was not found", "", None)
-        return cursor_boundary(self.resolved_bin())
+        return cursor_boundary(self.resolved_bin(), run_root=run_root)
 
     @property
     def cursor_boundary_ready(self) -> bool:
@@ -2133,59 +2877,54 @@ class CursorAgentAdapter(Adapter):
         """The single `--model` string: the pin/default with an optional effort
         override. Lane 2 owns the routed/profile rewrite; here `auto`, unknown
         families, `ultra` and any fast variant (no profile can opt in) are refused."""
-        model = self.model()
-        cursor_validate_model(model)
-        base, fields = cursor_split_model(model)
-        if base.endswith("-fast") or fields.get("fast", "").lower() == "true":
-            raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
-        effort = self.effort()
-        if effort:
-            if effort not in CURSOR_EFFORTS:
-                raise CursorBoundaryError("unsupported Cursor effort")
-            fields["effort"] = effort
-            model = base + "[" + ",".join("%s=%s" % kv for kv in fields.items()) + "]"
-        return model
+        return cursor_effective_model(self.model(), self.effort())
 
     # -- invocation ------------------------------------------------------------- #
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
         ctx = ctx if ctx is not None else {}
-        pdir = ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path))
+        pdir = os.path.realpath(
+            ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path)))
         workspace = ctx.get("repo") or ctx.get("cwd")
         if not workspace:
             raise CursorBoundaryError("no workspace for the Cursor call")
         workspace = os.path.realpath(workspace)
         # The complete prompt is a staged, owner-only file; only a short pointer
         # reaches argv, so task text can never appear in `ps`, status or ARG_MAX.
-        pin = os.path.join(pdir, "prompt_in")
-        staged = os.path.join(pin, "prompt.md")
-        try:
-            os.makedirs(pin, exist_ok=True)
-            _chmod(pin, 0o700)
-            shutil.copyfile(prompt_path, staged)
-            _chmod(staged, 0o600)
-            if os.path.getsize(staged) != os.path.getsize(prompt_path):
-                raise OSError("short copy")
-        except OSError:
-            raise CursorBoundaryError("the prompt could not be staged")
+        staged = _cursor_stage_prompt(prompt_path, pdir)
         ctx["cursor_staged"] = staged
         maker = not self.read_only
         instruction = cursor_instruction("maker" if maker else "panel", staged, workspace)
         if len(instruction) > CURSOR_INSTRUCTION_MAX:
             raise CursorBoundaryError("the instruction is too long")
+        effective_model = self.effective_model()
+        ctx["cursor_expected_model"] = effective_model
         return (["-p"] + ([] if maker else ["--mode", "ask"]) +
-                ["--output-format", "json", "--workspace", workspace, "--model", self.effective_model(),
+                ["--output-format", "json", "--workspace", workspace, "--model", effective_model,
                  "--trust", "--sandbox", "enabled", "--skip-worktree-setup", instruction])
 
-    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool):
+    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool,
+                   run_root: "str | None" = None):
         """Owner-private runtime + canaries for one dispatch (removed by close())."""
-        forbidden = [pdir, os.path.dirname(pdir), os.path.dirname(os.path.dirname(pdir)), skill_root()]
+        if not self.read_only and not managed_worktree:
+            raise CursorBoundaryError("a Maker runs only in a managed, Alloy-owned worktree")
+        git = None
         if repo:
-            forbidden.append(repo)
+            # The content tripwire hashes ignored files too, and Alloy writes its own
+            # status/stdout/result files during the run: a run directory (or root)
+            # inside the workspace would make every call look like tampering by
+            # Cursor, which wrote nothing. Refuse it up front with the real reason.
+            ws = os.path.realpath(repo).rstrip("/") + "/"
+            for path in (pdir, run_root):
+                if path and (os.path.realpath(os.path.abspath(os.path.expanduser(path))) + "/").startswith(ws):
+                    raise CursorBoundaryError(
+                        "the run directory is inside the workspace; pass --run-dir or set "
+                        "ALLOY_RUN_ROOT to a location outside the repository")
             git = cursor_git_locations(repo)
-            if git:
-                forbidden += [git["top"], git["gitdir"], git["common"]]
-        return cursor_make_runtime(forbidden)
+        return cursor_make_runtime(
+            forbidden=[skill_root()], run_root=run_root, pdir=pdir,
+            source=None if managed_worktree else repo,
+            worktree=repo if managed_worktree else None, git=git)
 
     def prepare_env(self, ctx: "dict | None" = None) -> dict:
         rt = (ctx or {}).get("scope")
@@ -2195,7 +2934,12 @@ class CursorAgentAdapter(Adapter):
         """The spawn gateway hook: called with the final, fully rewritten argv."""
         role = "maker" if not self.read_only else "panel"
         return cursor_command(role, argv[1:], exe=argv[0], runtime=ctx["scope"],
-                              workspace=ctx.get("repo") or ctx.get("cwd"), staged=ctx.get("cursor_staged"))
+                              workspace=ctx.get("repo") or ctx.get("cwd"),
+                              staged=ctx.get("cursor_staged"),
+                              expected_model=ctx.get("cursor_expected_model"),
+                              run_root=ctx.get("run_root"),
+                              managed_worktree=bool(ctx.get("managed_worktree")),
+                              cwd=ctx.get("cwd"))
 
     def before_spawn(self, ctx: dict) -> None:
         ctx["cursor_fp_before"] = cursor_fingerprint(ctx.get("repo") or ctx["cwd"])
@@ -2209,9 +2953,20 @@ class CursorAgentAdapter(Adapter):
             canary = ctx["scope"].canary_changed()
         except CursorBoundaryError as exc:
             return "tripwire uncertain: " + str(exc)
-        if changed or canary:
+        ctx["cursor_workspace_changes"] = changed
+        ctx["cursor_canary_changes"] = canary
+        # Managed Makers are expected to edit ordinary worktree content. Expose
+        # exact relative paths so Lane 3 can classify them against allow_paths;
+        # Git internals and outside canaries remain immediate boundary failures.
+        protected = changed
+        if not self.read_only:
+            ctx["cursor_changed_paths"] = [
+                key[len("tree:"):] for key in changed if key.startswith("tree:")
+            ]
+            protected = [key for key in changed if key.startswith("git:")]
+        if protected or canary:
             return "sandbox tripwire: %d workspace/Git and %d canary entries changed during the run" % (
-                len(changed), len(canary))
+                len(protected), len(canary))
         return None
 
     def permission_overrides(self, write: bool) -> dict:
@@ -2243,13 +2998,16 @@ class CursorAgentAdapter(Adapter):
         result = obj.get("result") if obj else None
         return strip_ansi(result).strip() if isinstance(result, str) else ""
 
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        return redact_json_text(stdout)
+
     def output_error(self, stdout: str, stderr: str) -> "str | None":
         if not stdout.strip():
             return None      # nothing produced: the shared empty/auth classification decides
         obj = self._json(stdout)
         if obj is None:
             return "Cursor output is not one JSON object"
-        if obj.get("is_error") is True:
+        if "is_error" in obj and obj["is_error"] is not False:
             return "Cursor reported is_error"
         if not isinstance(obj.get("result"), str):
             return "Cursor JSON has no string result"
@@ -2468,18 +3226,20 @@ ADAPTERS: "dict[str, Adapter]" = {
 }
 
 
-def default_panel_names() -> "list[str]":
+def default_panel_names(run_root: "str | None" = None) -> "list[str]":
     # All verified read-only adapters; cmd_panel further skips any not ready.
-    return [n for n, ad in ADAPTERS.items() if ad.read_only and not ad.experimental]
+    return [n for n, ad in ADAPTERS.items()
+            if ad.read_only and not (
+                not ad._boundary(run_root).ready if ad.requires_os_boundary else ad.experimental)]
 
 
-def selected_panelists() -> "list[str]":
+def selected_panelists(run_root: "str | None" = None) -> "list[str]":
     # Return names verbatim (including typos) so cmd_panel can report an unknown
     # adapter as skipped rather than silently dropping it.
     raw = setting("ALLOY_PANELISTS")
     if raw:
         return list(dict.fromkeys(normalize_adapter_name(n) for n in raw.split(",") if n.strip()))
-    return default_panel_names()
+    return default_panel_names(run_root)
 
 
 def default_run_root() -> str:
@@ -2586,12 +3346,15 @@ def _panelist_cwd(adapter: "Adapter", repo: "str | None", pdir: str) -> "tuple[s
 
 def _repo_fingerprint(repo: str) -> "str | None":
     # A cheap tripwire over the real working tree so a "read-only" run that
-    # somehow WRITES is caught. None when not a git repo (tripwire simply off).
-    cp = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    if cp is None or cp.returncode != 0:
+    # somehow WRITES is caught. The status listing is hashed as it streams: a large
+    # tree can never push it past an output cap and silently turn the check off.
+    # None when it could not be computed (not a git repo, or Git did not complete);
+    # cmd_panel reports that in the manifest instead of skipping it quietly.
+    status = _git_digest(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    if status is None or status[0] != 0:
         return None
     head = _git(repo, "rev-parse", "HEAD")
-    return ((head.stdout if head else "") or "") + "\0" + (cp.stdout or "")
+    return ((head.stdout if head else "") or "") + "\0" + status[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -2645,28 +3408,41 @@ def _write_status(path: str, status: dict) -> dict:
 
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                  timeout_s: int, max_chars: int, mode: str,
-                 repo: "str | None" = None, managed_worktree: bool = False) -> dict:
+                 repo: "str | None" = None, managed_worktree: bool = False,
+                 run_root: "str | None" = None) -> dict:
     os.makedirs(pdir, exist_ok=True)
     _chmod(pdir, 0o700)
     # Per-dispatch resources (Cursor: the owner-private runtime and canaries) are
     # released only after the whole process group is dead, whatever happens.
     scope, refusal = None, None
     try:
-        scope = adapter.open_scope(pdir, repo, managed_worktree)
+        scope = adapter.open_scope(pdir, repo, managed_worktree, run_root)
     except CursorBoundaryError as exc:
         refusal = str(exc)
     try:
-        return _run_panelist(adapter, prompt_path, pdir, timeout_s, max_chars, mode,
-                             repo, managed_worktree, scope, refusal)
-    finally:
+        result = _run_panelist(adapter, prompt_path, pdir, timeout_s, max_chars, mode,
+                               repo, managed_worktree, run_root, scope, refusal)
+    except BaseException:
         if scope is not None:
             scope.close()
+        raise
+    if scope is not None:
+        try:
+            scope.close()
+        except CursorBoundaryError as exc:
+            # The process group is already dead when _run_panelist returns.
+            # Cleanup uncertainty is itself a failed dispatch, and the retained
+            # live-runtime entry gives atexit one final best-effort attempt.
+            result["status"] = "error"
+            result["error"] = str(exc)
+            result = _write_status(os.path.join(pdir, "status.json"), result)
+    return result
 
 
 def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                   timeout_s: int, max_chars: int, mode: str,
                   repo: "str | None", managed_worktree: bool,
-                  scope, refusal: "str | None") -> dict:
+                  run_root: "str | None", scope, refusal: "str | None") -> dict:
     # cwd: empty throwaway (no repo) / the real repo (read-only adapter, live) /
     # a disposable copy (write-capable adapter). See _panelist_cwd.
     if managed_worktree:
@@ -2691,7 +3467,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
            # A caller-chosen session id, so the CLI's saved session is known
            # BEFORE dispatch and can be resumed if alloy has to kill it.
            "session_id": getattr(adapter, "managed_session_id", None) or str(uuid.uuid4()), "managed_worktree": managed_worktree,
-           "scope": scope}
+           "scope": scope, "run_root": run_root}
     capture = capture_usage()
     argv = [binp]
     if not refusal:
@@ -2705,15 +3481,22 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             refusal, argv = str(exc), [binp]
 
     # quiet down ANSI / interactive behaviour in the child
-    env = dict(os.environ)
-    for _k, _v in _CONFIG.items():   # config-file values (e.g. provider keys) reach the child
-        env.setdefault(_k, _v)
+    if adapter.requires_os_boundary:
+        env = cursor_base_env()          # explicit allowlist: no ambient credential or IPC hook
+    else:
+        env = dict(os.environ)
+        for _k, _v in _CONFIG.items():   # legacy adapters retain their config-file environment
+            env.setdefault(_k, _v)
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("CI", "1")
     # Adapter-supplied overrides win over the inherited environment (they exist
     # precisely to redirect a CLI away from the user's real state -- see agy).
-    env.update(adapter.prepare_env(ctx))
+    if not refusal:
+        try:
+            env.update(adapter.prepare_env(ctx))
+        except CursorBoundaryError as exc:
+            refusal = str(exc)
     # Router credentials and both Cursor API overrides never reach any child,
     # whether they came from the environment or the config file.
     for _k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "CURSOR_API_KEY", "CURSOR_API_ENDPOINT"):
@@ -2751,6 +3534,9 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     }
     if cwd_note:
         status["cwd_note"] = cwd_note
+    if ctx.get("cursor_expected_model"):
+        # `model` stays the configured pin; this is the exact --model value sent.
+        status["effective_model"] = ctx["cursor_expected_model"]
     if not refusal:
         try:
             adapter.before_spawn(ctx)
@@ -2893,7 +3679,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     # Redact before anything is persisted (the raw sidecar files, for adapters that
     # write them, are redacted in place so nothing unredacted is left on disk).
-    red_out, c_out = redact_secrets(stdout_text)
+    red_out, c_out = adapter.redact_stdout(stdout_text)
     red_err, c_err = redact_secrets(stderr_text)
     red_last, c_last = redact_secrets(last_text)
     write_atomic(out_path, red_out)
@@ -2910,10 +3696,19 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     status["truncated"] = truncated
     # count redactions across everything persisted, not just result.md
     status["secrets_redacted"] = c_res + c_out + c_err + c_last
+    if status["secrets_redacted"]:
+        status["redaction_marker"] = "[REDACTED]"
 
     # Compared only now, with the whole process group dead. Detection, not
     # prevention: the OS profile is the boundary.
     tripwire = "the process group did not exit" if not group_dead else adapter.after_exit(ctx)
+    if "cursor_workspace_changes" in ctx:
+        status["workspace_changes"] = ctx["cursor_workspace_changes"]
+        status["canary_changes"] = ctx["cursor_canary_changes"]
+    if "cursor_changed_paths" in ctx:
+        # Lane 3 consumes this per-path handoff before gates/commit and compares
+        # it with the managed task's allow_paths.
+        status["changed_paths"] = ctx["cursor_changed_paths"]
     provider_error = None if status["timed_out"] or status["stalled"] or status["exit_code"] != 0 \
         else adapter.output_error(stdout_text, stderr_text)
 
@@ -3003,6 +3798,9 @@ def _print_matrix(manifest: dict) -> None:
         if summary.get("repo_tamper"):
             w("[alloy]   !! WARNING: working tree changed during the run -- "
               "review `git status` (a read-only panelist may have written)\n")
+        if summary.get("repo_tamper_check") == "unavailable":
+            w("[alloy]   !! WARNING: the working-tree tamper check was unavailable "
+              "for this run -- nothing was verified\n")
         sys.stderr.flush()
 
 
@@ -3070,12 +3868,15 @@ def cmd_panel(args: argparse.Namespace) -> int:
         log(f"invalid max-chars {max_chars}: must be a positive integer")
         return 2
 
+    run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
+    run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
+
     if args.panelists:
         names = [normalize_adapter_name(n) for n in args.panelists.split(",") if n.strip()]
     elif getattr(args, "route", False):
         names = []   # the router below picks the one CLI; never probe every adapter (or Cursor's OS boundary) for a list it discards
     else:
-        names = selected_panelists()
+        names = selected_panelists(run_root)
     names = list(dict.fromkeys(names))   # dedupe, preserve order (avoid same-dir races)
     route_decision = None
     subscription_usage = routing.usage.get(sys.modules[__name__])
@@ -3124,9 +3925,10 @@ def cmd_panel(args: argparse.Namespace) -> int:
         if ad.requires_os_boundary:
             # Never overridden by ALLOY_ALLOW_UNSANDBOXED: an OS boundary is either
             # validated or the adapter does not run.
-            if not ad.cursor_boundary_ready:
+            boundary = ad._boundary(run_root)
+            if not boundary.ready:
                 skipped.append({"name": n, "reason": "no supported OS write boundary (%s); "
-                                "roles are refused" % ad.boundary_reason})
+                                "roles are refused" % boundary.reason})
                 continue
         elif not ad.read_only and not allow_unsandboxed():
             skipped.append({"name": n, "reason": "no read-only mode (set ALLOY_ALLOW_UNSANDBOXED=1 to permit)"})
@@ -3135,8 +3937,6 @@ def cmd_panel(args: argparse.Namespace) -> int:
             ad = routing.routed_adapter(sys.modules[__name__], route_decision)
         chosen.append(ad)
 
-    run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
-    run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
     os.makedirs(run_root, exist_ok=True)
     _chmod(run_root, 0o700)
     # Belt-and-suspenders: even if a user points the run root inside a repo, keep
@@ -3206,7 +4006,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         pdir = os.path.join(run_dir, ad.name)
         try:
             st = run_panelist(ad, prompt_path, pdir, timeout_s,
-                              max_chars, args.mode, repo=repo)
+                              max_chars, args.mode, repo=repo, run_root=run_root)
             # Self-heal a transient first-attempt failure (default: an `auth`
             # token-refresh race) with exactly ONE re-dispatch -- not a loop. The
             # refresh has almost always landed by now, so the retry runs on a
@@ -3216,7 +4016,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
             if st.get("status") in retry_set:
                 log(f"{ad.name}: {st['status']} (likely transient) -- retrying once")
                 st2 = run_panelist(ad, prompt_path, os.path.join(pdir, "_retry"),
-                                   timeout_s, max_chars, args.mode, repo=repo)
+                                   timeout_s, max_chars, args.mode, repo=repo,
+                                   run_root=run_root)
                 st2["retried"] = True
                 st2["first_attempt_status"] = st.get("status")
                 st = st2
@@ -3235,9 +4036,24 @@ def cmd_panel(args: argparse.Namespace) -> int:
     # Tripwire: a read-only panelist ran in the real working tree. If its
     # fingerprint moved, a "read-only" CLI may have written to your repo (or you
     # edited files mid-run). Surface it loudly rather than trusting the sandbox.
-    repo_tamper = False
-    if repo is not None and repo_fp_before is not None:
-        if _repo_fingerprint(repo) != repo_fp_before:
+    # A canary written outside the workspace fails the call on its own, so it counts too:
+    # the run is unsafe to trust whichever tripwire caught it.
+    repo_tamper = any(
+        bool(st.get("workspace_changes")) or bool(st.get("canary_changes"))
+        for name, st in results.items()
+        if name == "cursor"
+    )
+    # The check itself can be unavailable (not a git repo, or Git did not finish).
+    # That is recorded, never silently treated as "nothing changed".
+    repo_check = "no_repo" if repo is None else "checked"
+    if repo is not None:
+        repo_fp_after = _repo_fingerprint(repo)
+        if repo_fp_before is None or repo_fp_after is None:
+            repo_check = "unavailable"
+            log(f"WARNING: the working-tree tamper check for {repo} could not be computed "
+                "(not a Git repository, or Git did not complete); "
+                "manifest summary.repo_tamper_check is 'unavailable'.")
+        elif repo_fp_after != repo_fp_before:
             repo_tamper = True
             log(f"WARNING: working tree at {repo} changed during the run -- a "
                 "read-only panelist may have written to it (or you edited files). "
@@ -3252,6 +4068,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         "skipped": skipped,
         "repo": repo,
         "repo_tamper": repo_tamper,
+        "repo_tamper_check": repo_check,     # checked | unavailable | no_repo
     }
     manifest_path = os.path.join(run_dir, "manifest.json")
     write_atomic(manifest_path, json.dumps(manifest, indent=2))
@@ -3352,7 +4169,13 @@ def cmd_estimate(args: argparse.Namespace) -> int:
         if r["os_boundary"] is not None:
             # An OS-bounded adapter counts only with its separate boundary field and
             # a known explicit model; ALLOY_ALLOW_UNSANDBOXED never helps it.
-            return bool(r["os_boundary"] and r["read_only"] and cursor_model_family(r["model"]))
+            ad = ADAPTERS.get(r["name"])
+            try:
+                effective = ad.effective_model()
+            except (AttributeError, CursorBoundaryError):
+                return False
+            return bool(r["os_boundary"] and r["read_only"] and ad.model() == r["model"]
+                        and cursor_model_family(effective))
         return r["read_only"] or allow_unsandboxed()
 
     ready = [r for r in _doctor_rows() if r["status"] == "ready"
