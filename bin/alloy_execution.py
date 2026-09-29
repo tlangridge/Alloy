@@ -11,6 +11,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -26,9 +27,89 @@ def home(core):
     return Path(core.setting('ALLOY_RUN_ROOT') or core.default_run_root()).expanduser().resolve().parent / 'execution'
 
 
+# Every Git command Alloy runs in the unsandboxed parent goes through git(): hooks and
+# command-valued fsmonitor are disabled, the system config is ignored, optional locks are
+# off, stdin is detached, output is bounded and there is a deadline. This mirrors the
+# contract of bin/alloy's `_git` (which this module cannot import); a test pins the two
+# together. Repository `alias.*` entries cannot shadow the built-in commands used here.
+GIT_HARDENING = ('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false')
+GIT_STRIPPED_ENV = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                    'GIT_EXTERNAL_DIFF', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS')
+GIT_TIMEOUT = 60
+GIT_STDOUT_CAP = 128 << 20      # a patch larger than this is a task to split, not to truncate
+GIT_STDERR_CAP = 1 << 20
+
+
+def git_env():
+    env = {k: v for k, v in os.environ.items() if k not in GIT_STRIPPED_ENV}
+    env['GIT_CONFIG_NOSYSTEM'] = '1'
+    env['GIT_OPTIONAL_LOCKS'] = '0'
+    return env
+
+
+def git_argv(repo, *args):
+    return ['git', '-C', str(repo), *GIT_HARDENING, *args]
+
+
+def _kill_git(proc):
+    if proc.returncode is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def run_git(argv, timeout=GIT_TIMEOUT):
+    """Run one Git command with detached stdin and bounded, drained output."""
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=git_env(), start_new_session=True)
+    bufs, over = (bytearray(), bytearray()), threading.Event()
+
+    def pump(stream, buf, cap):
+        try:
+            while True:
+                chunk = stream.read1(65536)
+                if not chunk:
+                    return
+                if len(buf) + len(chunk) > cap:
+                    over.set()
+                    _kill_git(proc)
+                    return
+                buf += chunk
+        except (OSError, ValueError):
+            return
+    threads = [threading.Thread(target=pump, args=(proc.stdout, bufs[0], GIT_STDOUT_CAP), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, bufs[1], GIT_STDERR_CAP), daemon=True)]
+    for t in threads:
+        t.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_git(proc)
+        proc.wait()
+    except BaseException:
+        _kill_git(proc)
+        proc.wait()
+        raise
+    finally:
+        for t in threads:
+            t.join(5)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    if timed_out:
+        raise ExecutionError('Git timed out after %d seconds' % timeout)
+    if over.is_set():
+        raise ExecutionError('Git output exceeded its size limit; split the task')
+    return subprocess.CompletedProcess(argv, proc.returncode, bytes(bufs[0]), bytes(bufs[1]))
+
+
 def git(repo, *args, check=True):
-    cp = subprocess.run(['git', '-C', str(repo), '-c', 'core.hooksPath=/dev/null', *args],
-                        stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    cp = run_git(git_argv(repo, *args))
     if check and cp.returncode:
         raise ExecutionError('Git failed: ' + cp.stderr.decode(errors='replace')[-1000:])
     if not check:
@@ -94,21 +175,49 @@ def validate_tree(task):
         raise ExecutionError('Worker rewrote task history; retained for inspection')
 
 
+def in_scope(path, allow_paths):
+    return any(a == '.' or path == a or path.startswith(a + '/') for a in allow_paths)
+
+
 def scope(task):
-    paths = git(task['worktree'], 'diff', '--name-only', '--no-renames', '-z', task['base']).split('\0')
+    paths = git(task['worktree'], 'diff', '--name-only', '--no-renames', '--no-ext-diff', '--no-textconv',
+                '-z', task['base']).split('\0')
     paths += git(task['worktree'], 'ls-files', '--others', '--exclude-standard', '-z').split('\0')
-    bad = [p for p in paths if p and not any(a == '.' or p == a or p.startswith(a + '/') for a in task['allow_paths'])]
+    bad = [p for p in paths if p and not in_scope(p, task['allow_paths'])]
     if bad:
         raise ExecutionError('Changes outside allowed scope: ' + ', '.join(bad[:10]))
 
 
+# What a Cursor role may write, reported (not merely implied) in every task record. The
+# macOS sandbox profile from bin/alloy enforces it; nothing here widens it.
+CURSOR_MAKER_WRITES = ('owned_worktree_non_git_content', 'private_runtime_state', 'private_runtime_cache',
+                       'private_runtime_tmp')
+CURSOR_CHECKER_WRITES = ('private_runtime_state', 'private_runtime_cache', 'private_runtime_tmp')
+
+
 def permissions(adapter, write=False):
-    return dict(repository_write=write, command_execution='allowed' if write else 'provider_read_only_policy',
-                repository_scope='managed_worktree' if write else 'review_worktree',
-                enforcement='codex_workspace_sandbox' if write and adapter.name == 'codex' else 'provider_cli_permissions',
-                os_isolation=bool(write and adapter.name == 'codex'),
-                scope_validation='post_run_path_check' if write else 'post_run_change_check',
-                network='provider_policy', git_metadata_isolated=False)
+    perms = dict(repository_write=write, command_execution='allowed' if write else 'provider_read_only_policy',
+                 repository_scope='managed_worktree' if write else 'review_worktree',
+                 enforcement='codex_workspace_sandbox' if write and adapter.name == 'codex' else 'provider_cli_permissions',
+                 os_isolation=bool(write and adapter.name == 'codex'),
+                 scope_validation='post_run_path_check' if write else 'post_run_change_check',
+                 network='provider_policy', git_metadata_isolated=False)
+    if adapter.name == 'cursor':
+        # The role's OS boundary is independent of its read_only flag: a Maker and a Checker
+        # are both wrapped, and neither may use a force, auto-approval or worktree control.
+        perms.update(enforcement='macos_sandbox_exec', os_isolation=True, git_metadata_isolated=True,
+                     command_execution='allowed_in_worktree' if write else 'denied',
+                     scope_validation='content_fingerprint_tripwire',
+                     write_allowlist=list(CURSOR_MAKER_WRITES if write else CURSOR_CHECKER_WRITES),
+                     cursor_mode='agent_default' if write else 'ask', approval_bypass=False,
+                     sensitive_reads_denied=True, setup_scripts_skipped=True)
+    return perms
+
+
+# Every provider with an explicit Maker branch in worker_adapter(). A provider outside this
+# tuple is refused, and a branch-less member reaches the final `else` and is refused too:
+# nothing inherits another provider's Maker permissions by falling through.
+MANAGED_WRITERS = ('codex', 'claude', 'grok', 'antigravity', 'cursor')
 
 
 def worker_adapter(core, decision, write=False):
@@ -116,7 +225,7 @@ def worker_adapter(core, decision, write=False):
     ad.execution_permissions = permissions(ad, write)
     if not write:
         return ad
-    if ad.name not in ('codex', 'claude', 'grok', 'antigravity'):
+    if ad.name not in MANAGED_WRITERS:
         raise ExecutionError('No managed write adapter for ' + ad.name)
     # A per-instance subclass also overrides Antigravity's dynamic property.
     ad.__class__ = type("Managed" + type(ad).__name__, (type(ad),), {"read_only": False})
@@ -138,13 +247,22 @@ def worker_adapter(core, decision, write=False):
                     del argv[i:i + 2]
                 argv += ['--allow', 'Edit', '--allow', 'Write']
             argv += ['--tools', 'Read,Glob,Grep,Edit,Write,Bash']
-        else:
+        elif ad.name == 'cursor':
+            # Nothing is added or relaxed here. The instance's read_only is False, so bin/alloy's
+            # build_args already emitted the closed Maker form (no --mode, --sandbox enabled,
+            # --skip-worktree-setup, staged-file instruction); a force/auto-approval, session,
+            # plugin or worktree control appended by ANY later rewrite is refused by the spawn
+            # gateway, which parses the final argv before sandbox-exec starts.
+            pass
+        elif ad.name == 'antigravity':
             argv[argv.index('--mode') + 1] = 'accept-edits'
             staged = Path(ctx['pdir']) / 'prompt_in' / 'prompt.md'
             task_prompt = str(staged) if staged.exists() else prompt
             argv[argv.index('-p') + 1] = ('Read ' + json.dumps(task_prompt) + ' for your task. Implement it ONLY in ' + json.dumps(ctx['repo']) +
                 '. Run the specified tests there. Do not edit any other checkout or Git metadata.')
             argv += ['--sandbox']
+        else:
+            raise ExecutionError('No managed write adapter for ' + ad.name)
         return argv
     ad.build_args = build
     if ad.name == 'antigravity':
@@ -156,8 +274,64 @@ def worker_adapter(core, decision, write=False):
     return ad
 
 
+# Help flags the Cursor role's argv depends on beyond the routing inventory probe
+# (`--print --output-format --mode --model --list-models`): the sandbox request, the verified
+# workspace and the setup-script skip. A Checker also needs `--mode` (it runs `--mode ask`).
+CURSOR_MAKER_FLAGS = ('--sandbox', '--workspace', '--model', '--skip-worktree-setup')
+CURSOR_CHECKER_FLAGS = CURSOR_MAKER_FLAGS + ('--mode',)
+
+
+def has_flag(text, flag):
+    """Whole-option match: `--mode` is not satisfied by `--model`."""
+    return re.search(r'(?<![\w-])' + re.escape(flag) + r'(?![\w-])', text) is not None
+
+
+def probe_cursor(core, ad, write):
+    """Boundary readiness is read explicitly: never inferred from `read_only` or from the auth
+    state, and ALLOY_ALLOW_UNSANDBOXED cannot help. The help text comes only through the
+    sandbox gateway (a direct spawn of the CLI is never made)."""
+    if not ad.cursor_boundary_ready:
+        raise ExecutionError('Cursor OS write sandbox unavailable (' + str(ad.boundary_reason) +
+                             '); Cursor roles are refused')
+    state = ad.auth_state()
+    if state != 'ready' or not ad.read_only:
+        raise ExecutionError('Adapter unavailable or lacks verified read-only review support' +
+                             (' (run `' + ad.auth_hint + '`)' if state == 'installed_not_authed' else ''))
+    try:
+        code, text = core.cursor_metadata('help', ad.resolved_bin())
+    except (core.CursorBoundaryError, OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionError('CLI %s-mode compatibility check failed: cursor (%s)' % (
+            'write' if write else 'review', str(exc) or type(exc).__name__))
+    if code != 0 or not all(has_flag(text, flag) for flag in (CURSOR_MAKER_FLAGS if write else CURSOR_CHECKER_FLAGS)):
+        raise ExecutionError('CLI %s-mode compatibility check failed: cursor' % ('write' if write else 'review'))
+
+
+def check_decision(core, decision):
+    """The worker's family, re-derived from its effective model where the adapter derives it.
+
+    Routing already derives the family; this repeats the derivation at the managed boundary
+    (selection, resume revalidation, dispatch) so a stored, edited or relabelled decision can
+    never launder a Cursor-served model into another family, spawn `auto` or an unknown ID,
+    or let a non-Cursor adapter claim family `cursor`. Returns the family to compare."""
+    family = decision.get('family')
+    if decision.get('cli') != 'cursor':
+        if family == 'cursor':
+            raise ExecutionError('Family cursor is reserved for Cursor Composer profiles')
+        return family
+    try:
+        effective = core.routing.cursor_dispatch_model(core, decision)
+        derived = core.cursor_validate_model(effective)
+    except (core.routing.RoutingError, core.CursorBoundaryError) as exc:
+        raise ExecutionError('Cursor worker is not dispatchable: ' + str(exc)) from None
+    if derived != family:
+        raise ExecutionError('Cursor worker family does not match the family of its model')
+    return derived
+
+
 def probe(core, decision, write):
     ad = core.ADAPTERS[decision['cli']]
+    if ad.name == 'cursor':
+        return probe_cursor(core, ad, write)
     if ad.auth_state() != 'ready' or not ad.read_only:
         raise ExecutionError('Adapter unavailable or lacks verified read-only review support')
     if not write:
@@ -204,6 +378,7 @@ def readiness(core, args, repo):
                     max_estimated_usd=args.max_estimated_usd)
                 try:
                     decision = r.resolve(core, config, answers, available, opts, snapshot)
+                    check_decision(core, decision)
                     capability = (decision['cli'], role)
                     if capability not in permission_checks:
                         try:
@@ -230,12 +405,18 @@ def readiness(core, args, repo):
                 model_availability='Configured profiles and local CLI checks; provider entitlement is confirmed only on dispatch')
 
 
+NATIVE_SESSION_ADAPTERS = ('claude', 'grok')
+
+
 def worker_session(core, task, role):
     sessions = task.setdefault('sessions', {})
+    name = task[role]['cli']
     if role not in sessions:
-        ad = core.ADAPTERS[task[role]['cli']]
+        ad = core.ADAPTERS[name]
         supported = False
-        if ad.name in ('claude', 'grok'):
+        # Native session reuse is restricted to Claude and Grok. Cursor ships as a fresh-context
+        # fallback: no `--resume`/`--continue` is ever built, and the CLI is not probed directly.
+        if ad.name in NATIVE_SESSION_ADAPTERS:
             try:
                 cp = subprocess.run([ad.resolved_bin(), '--help'], capture_output=True, text=True,
                                     timeout=15, env=core.routing.clean_env())
@@ -247,6 +428,9 @@ def worker_session(core, task, role):
     session = sessions[role]
     if not re.fullmatch(r'[0-9a-f-]{36}', session['id']):
         raise ExecutionError('Invalid saved worker session')
+    if name not in NATIVE_SESSION_ADAPTERS:
+        # An edited or stale record cannot switch a fresh-context provider (Cursor) to resume.
+        session.update(supported=False, mode='fresh_context_fallback')
     return session
 
 
@@ -257,10 +441,24 @@ def review_packet(core, task, record, tip, diff, spec):
         gates.append(dict(command=g['command'], exit_code=g['exit_code'],
                           output=text[-4000:], output_truncated=len(text) > 4000))
     packet = dict(goal=spec, base=task['base'], revision=tip,
-                  changed_files=git(task['worktree'], 'diff', '--name-only', '-z', task['base'], tip).split('\0')[:-1],
+                  changed_files=git(task['worktree'], 'diff', '--name-only', '--no-ext-diff', '--no-textconv',
+                                    '-z', task['base'], tip).split('\0')[:-1],
                   diff=diff, tests=gates, allowed_paths=task['allow_paths'],
                   dependencies='Read needed imports/configuration from this exact worktree; report missing context rather than assume a pass.')
+    # The packet is the ONLY thing a Checker prompt is built from, and it leaves this process for
+    # a provider: recognised secret shapes (JWT, assignment, header forms) are scrubbed from every
+    # source (goal, diff, gate command and output, paths) and again from the final encoded text,
+    # before it is saved or staged. changes.patch is the unredacted source artifact and is not a
+    # model input.
+    packet, _ = core.redact_tree(packet)
     encoded = json.dumps(packet, sort_keys=True)
+    scrubbed, changed = core.redact_secrets(encoded)
+    if changed:
+        try:
+            packet = json.loads(scrubbed)
+        except ValueError:
+            raise ExecutionError('Review packet could not be redacted safely; no packet was sent')
+        encoded = json.dumps(packet, sort_keys=True)
     if len(encoded.encode()) > 96000:
         raise ExecutionError('Review packet exceeds 96000 bytes; split the task by responsibility and preserve this worktree')
     packet_id = hashlib.sha256(encoded.encode()).hexdigest()
@@ -305,7 +503,11 @@ def select(core, args, prompt):
     review_args.exclude_family = ','.join((args.host_family, maker['family']))
     checker = r.resolve(core, config, answers, available, review_args, snapshot,
                         maker.get('review_model_fits', {}))
-    if len({args.host_family, maker['family'], checker['family']}) != 3:
+    # Independence is judged on the family re-derived from each worker's effective model, so a
+    # Cursor-served Claude/GPT/Gemini/Grok model counts as its own family and can never be the
+    # host's or the other role's family under the `cursor` adapter name.
+    families = (args.host_family, check_decision(core, maker), check_decision(core, checker))
+    if len(set(families)) != 3:
         raise ExecutionError('Host, Maker and Checker require independent model families')
     probe(core, maker, True)
     probe(core, checker, False)
@@ -326,7 +528,14 @@ def revalidate(core, task, role):
         exclude_family='' if role == 'maker' else ','.join((task['host_family'], task['maker']['family'])),
         prior_failures=0, failed_profile=[], max_estimated_usd=task.get('max_estimated_usd'))
     current = r.resolve(core, config, task['maker']['answers'], r.inventory(core), args, r.usage.get(core, config))
-    if any(current.get(k) != decision.get(k) for k in ('cli', 'model', 'family', 'effort', 'billing_mode')):
+    # The stored decision and the fresh one are both re-derived; a Cursor decision must also keep
+    # the exact effective model (which carries its effort and fast state) it was reviewed with.
+    check_decision(core, decision)
+    check_decision(core, current)
+    keys = ('cli', 'model', 'family', 'effort', 'billing_mode')
+    if decision.get('cli') == 'cursor':
+        keys += ('effective_model', 'cursor_fast')
+    if any(current.get(k) != decision.get(k) for k in keys):
         raise ExecutionError('Worker profile or billing changed; start a new reviewed task')
 
 
@@ -406,8 +615,21 @@ def dispatch(core, task, role, prompt, folder):
     revalidate(core, task, role)
     decision = task[role]
     ad = worker_adapter(core, decision, write=role == 'maker')
+    if ad.name == 'cursor':
+        # Dispatch boundary, before anything is staged or persisted: the OS boundary is read
+        # explicitly (never inferred from the role's read_only, which a Maker clears) and the
+        # model/family is re-derived once more. The spawn gateway repeats both and parses the
+        # final argv, so this only refuses earlier and with a clearer reason.
+        if not ad.cursor_boundary_ready:
+            raise ExecutionError('Cursor OS write sandbox unavailable (' + str(ad.boundary_reason) +
+                                 '); Cursor roles are refused')
+        check_decision(core, decision)
     folder.mkdir(parents=True, exist_ok=True)
     prompt_path = folder / 'prompt.txt'
+    if ad.name == 'cursor' and role == 'checker':
+        # The Checker prompt is already built from a redacted packet; scrub the whole text once
+        # more so nothing recognisable is saved or staged for the Cursor process.
+        prompt, _ = core.redact_secrets(prompt)
     core.routing.save(prompt_path, prompt)
     session = worker_session(core, task, role)
     resume = session['supported'] and session['started']
@@ -493,12 +715,87 @@ def checker_prompt(packet, packet_id, tip, absolute_read_rule=''):
         'REVIEW PACKET:\n' + packet)
 
 
+def cursor_worker(task, role):
+    return task[role].get('cli') == 'cursor'
+
+
+def tripwire_manifest(core, task):
+    """The content fingerprint (path, type, mode, symlink target and bytes of every tracked,
+    untracked AND ignored worktree entry, plus the Git internals that change behaviour) with its
+    per-path manifest. Detection, not prevention: the sandbox profile is the boundary. An
+    unreadable path, an enumeration race or an unresolvable Git location fails closed."""
+    try:
+        return core.cursor_fingerprint(task['worktree'])
+    except core.CursorBoundaryError as exc:
+        raise ExecutionError('Cursor tamper check is uncertain; worktree retained, review skipped: ' + str(exc)) from None
+
+
+def manifest_allows(path, allow_paths, before, after):
+    """A changed manifest path is acceptable only under allow_paths. The one structural exception
+    is a directory that was created or removed and is an ancestor of an allowed path: writing
+    `dir/file` necessarily creates `dir`."""
+    if in_scope(path, allow_paths):
+        return True
+    entry = after if after is not None else before
+    return bool(entry and entry[0] == 'd' and (before is None) != (after is None)
+                and any(a.startswith(path + '/') for a in allow_paths))
+
+
+def verify_cursor_maker(core, task, result, before):
+    """Run immediately after the Cursor Maker process and before gates or commit. Ordinary
+    worktree content may differ only under allow_paths (ignored files included, unlike scope());
+    protected Git internals and the outside canaries may never differ."""
+    after = tripwire_manifest(core, task)
+    changes = core.cursor_fingerprint_changes(before, after)
+    reported = [str(k) for k in (result.get('workspace_changes') or [])]
+    protected = [k for k in changes + reported if not k.startswith('tree:')]
+    if protected or result.get('canary_changes'):
+        raise ExecutionError('Cursor Maker changed protected Git internals or a sandbox canary; '
+                             'worktree retained, review skipped')
+    paths = ({k[len('tree:'):] for k in changes} | {k[len('tree:'):] for k in reported}
+             | {str(p) for p in (result.get('changed_paths') or [])})
+    bad = sorted(p for p in paths if not manifest_allows(
+        p, task['allow_paths'], before.entries.get('tree:' + p), after.entries.get('tree:' + p)))
+    if bad:
+        raise ExecutionError('Changes outside allowed scope: ' + ', '.join(bad[:10]))
+
+
+def verify_cursor_checker(core, task, result, before):
+    """A Checker may change nothing: not a worktree byte (ignored files included), not a Git
+    internal, not an outside canary. Compared only after the process group is dead."""
+    after = tripwire_manifest(core, task)
+    if core.cursor_fingerprint_changes(before, after) or result.get('workspace_changes'):
+        raise ExecutionError('Checker changed worktree; no review accepted')
+    if result.get('canary_changes'):
+        raise ExecutionError('Checker changed a protected canary; no review accepted')
+
+
+def tamper_checked(core, task, verify, result, before):
+    """Run a Cursor tripwire verification. A failure is remembered on the task: the delta-based
+    check takes its baseline from the worktree as it is, so resuming in place would absorb
+    whatever the failed round planted. Such a task is retained for inspection only."""
+    try:
+        verify(core, task, result, before)
+    except ExecutionError as exc:
+        task['tripwire'] = str(exc)[:500]
+        raise
+
+
+def worker_failure(task, role, result, text):
+    """Failure text; a Cursor role's own (already redacted, value-free) refusal reason is included."""
+    detail = result.get('error') if cursor_worker(task, role) else None
+    return text + (' (' + str(detail)[:300] + ')' if detail else '')
+
+
 def run(core, task):
     directory = taskdir(core, task['id'])
     task.pop('error', None)
     task.update(state='running', pid=os.getpid(), blocking_step='readiness')
     save(core, task)
     try:
+        if task.get('tripwire'):
+            raise ExecutionError('A tamper check failed in this worktree earlier (' + task['tripwire'] +
+                                 '); it is retained for inspection only. Start a new task')
         validate_tree(task)
         probe(core, task['maker'], True)
         probe(core, task['checker'], False)
@@ -513,10 +810,14 @@ def run(core, task):
             record['usage'] = round_usage(core, task, folder, index)
             save(core, task)
             prompt = maker_prompt(task, spec, feedback)
+            maker_before = tripwire_manifest(core, task) if cursor_worker(task, 'maker') else None
             record['maker'] = dispatch(core, task, 'maker', prompt, folder / 'maker')
             save(core, task)
+            if maker_before is not None:
+                tamper_checked(core, task, verify_cursor_maker, record['maker'], maker_before)
             if record['maker']['status'] != 'ok':
-                raise ExecutionError('Maker failed; worktree retained for recovery')
+                raise ExecutionError(worker_failure(task, 'maker', record['maker'],
+                                                    'Maker failed; worktree retained for recovery'))
             validate_tree(task)
             scope(task)
             task['blocking_step'] = 'tests'
@@ -554,12 +855,16 @@ def run(core, task):
                     ', and never opens another absolute path; if gate output names a path outside them, '
                     'use the text of the gate output that is in this prompt. ')
             review = checker_prompt(packet, packet_id, tip, absolute_read_rule)
+            checker_before = tripwire_manifest(core, task) if cursor_worker(task, 'checker') else None
             record['checker'] = dispatch(core, task, 'checker', review, folder / 'checker')
             save(core, task)
+            if checker_before is not None:
+                tamper_checked(core, task, verify_cursor_checker, record['checker'], checker_before)
             if not clean(task['worktree']) or git(task['worktree'], 'rev-parse', 'HEAD') != tip:
                 raise ExecutionError('Checker changed worktree; no review accepted')
             if record['checker']['status'] != 'ok':
-                raise ExecutionError('Checker failed; no pass inferred')
+                raise ExecutionError(worker_failure(task, 'checker', record['checker'],
+                                                    'Checker failed; no pass inferred'))
             try:
                 verdict = review_json(Path(record['checker']['result_path']).read_text(), record['packet'])
             except ExecutionError as exc:
@@ -574,7 +879,8 @@ def run(core, task):
             task['feedback'] = feedback
             save(core, task)
         task.update(state='needs_attention', error='Correction limit reached; worktree retained')
-    except (ExecutionError, core.routing.RoutingError, OSError, subprocess.SubprocessError) as exc:
+    except (ExecutionError, core.routing.RoutingError, core.CursorBoundaryError, OSError,
+            subprocess.SubprocessError) as exc:
         task.update(state='needs_attention', error=str(exc))
     except BaseException:
         task.update(state='interrupted', error='Execution interrupted; resume through Alloy')
