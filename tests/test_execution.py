@@ -639,6 +639,39 @@ else:
         self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
 
+    def test_antigravity_checker_grants_only_the_private_gate_log_root(self):
+        prompt=self.base/'prompt.txt';prompt.write_text('Review')
+        ctx=dict(repo=str(self.repo),pdir=str(self.base/'agy-review'),timeout_s=10,
+                 managed_worktree=False)
+        ad=e.worker_adapter(core,dict(cli='antigravity',model='test',effort=None),False)
+        with patch.object(core.AntigravityAdapter,'_agy_version',return_value=(1,2,13)):
+            args=ad.build_args(str(prompt),str(self.base/'last'),'review',ctx)
+            with patch.object(core.AntigravityAdapter,'_AUTH_LINKS',()), patch.object(core.AntigravityAdapter,'_keychain_plist',return_value=None):
+                env=ad.prepare_env(ctx)
+        gate_logs=core.gate_log_dir()
+        self.assertEqual(gate_logs,str(Path.home()/'.local/state/alloy/gate-logs'))
+        add_dirs=[args[i+1] for i,value in enumerate(args[:-1]) if value=='--add-dir']
+        self.assertIn(gate_logs,add_dirs)
+        self.assertEqual(os.stat(gate_logs).st_mode & 0o777,0o700)
+        settings=json.loads((Path(env['HOME'])/'.gemini/antigravity-cli/settings.json').read_text())
+        allow=settings['permissions']['allow']
+        self.assertIn('read_file('+gate_logs+')',allow)
+        self.assertNotIn('read_file(/tmp)',allow)
+        self.assertNotIn('read_file(/private/tmp)',allow)
+        self.assertNotIn('/tmp',add_dirs)
+        self.assertNotIn('/private/tmp',add_dirs)
+
+    def test_antigravity_checker_prompt_confines_absolute_reads(self):
+        self.checker=dict(cli='antigravity',family='google',model='gemini-test',effort=None,profile='checker')
+        self.select.return_value=(self.maker,self.checker)
+        code,task=self.create()
+        self.assertEqual(code,0,task.get('error'))
+        checker_prompt=self.calls[1][1]
+        self.assertIn('The Checker reads files only inside the task worktree '+task['worktree'],checker_prompt)
+        self.assertIn('and the gate-log directory '+core.gate_log_dir(),checker_prompt)
+        self.assertIn('never opens another absolute path',checker_prompt)
+        self.assertIn('use the text of the gate output that is in this prompt',checker_prompt)
+
 
     def test_gate_status_write_failure_reaps_child(self):
         children=[]

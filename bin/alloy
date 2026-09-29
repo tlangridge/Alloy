@@ -601,9 +601,10 @@ class AntigravityAdapter(Adapter):
     #      caches land in the disposable run dir instead of ~/.gemini. agy ignores
     #      the process cwd entirely (it writes into its own scratch dir), which is
     #      why confining HOME -- not cwd -- is what actually contains it.
-    #   3. Repo access via explicit `--add-dir <repo>` plus
-    #      allowNonWorkspaceAccess:false, so reads are scoped to the repo (and the
-    #      prompt file) rather than to all of $HOME.
+    #   3. Access via explicit `--add-dir` roots plus
+    #      allowNonWorkspaceAccess:false, so reads are scoped to the repo, the
+    #      prompt file, and (for Checkers) the private gate-log directory rather
+    #      than to all of $HOME or either temporary-directory root.
     # The auth files are symlinked (never copied) into the isolated HOME, so no
     # token is duplicated onto disk. On macOS a keychain search-list plist is
     # GENERATED in the isolated HOME too (see _keychain_plist) -- agy stores
@@ -882,6 +883,14 @@ class AntigravityAdapter(Adapter):
         args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
         ctx["agy_add_dirs"] = [os.path.abspath(d) for d in
                                (os.path.dirname(staged), ctx.get("repo")) if d]
+        if mode == "review":
+            # Gate wrappers may print a path for fuller evidence than Alloy's
+            # bounded review packet carries. Keep that evidence in one private,
+            # non-temporary root rather than broadening access to /tmp.
+            logs = gate_log_dir()
+            os.makedirs(logs, exist_ok=True, mode=0o700)
+            _chmod(logs, 0o700)
+            ctx["agy_add_dirs"].append(logs)
         repo = ctx.get("repo")
         if repo:
             # Linked worktrees keep HEAD and shared metadata outside the checkout.
@@ -1230,6 +1239,11 @@ def default_run_root() -> str:
         os.path.expanduser("~"), ".local", "state"
     )
     return os.path.join(base, "alloy", "runs")
+
+
+def gate_log_dir() -> str:
+    """Private root that read-only Checkers may use for full gate evidence."""
+    return os.path.abspath(os.path.expanduser("~/.local/state/alloy/gate-logs"))
 
 
 def allow_unsandboxed() -> bool:
