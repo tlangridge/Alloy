@@ -13,6 +13,22 @@ MOCK_BEHAVIOR (default ok):
 Two env knobs sit outside the behavior switch: MOCK_VERSION overrides what
 `--version` prints, and MOCK_ENV_DUMP names a file to write the child's $HOME to.
 
+The same file also impersonates two Cursor-related executables:
+
+  sandbox-exec   argv[0] == "-f": `<profile> <cmd...>`. It validates and copies the
+                 profile ($MOCK_SANDBOX_DUMP/<n>.sb), logs the call ($MOCK_SANDBOX_LOG),
+                 answers Alloy's preflight probe by evaluating the generated profile
+                 with a last-match-wins SBPL evaluator (sbpl_decision), and otherwise
+                 execs <cmd>. MOCK_SANDBOX_PREFLIGHT injects failures: read_allowed,
+                 write_leak, link_leak, exec_leak, garbage, noout, fail, cli_fail.
+  cursor-agent   `status`, `--version` and the print-mode inference call (recognised by
+                 --skip-worktree-setup). MOCK_CURSOR_STATUS: ok|logged_out|garbage|error.
+                 MOCK_CURSOR_JSON: ok|is_error|malformed|no_result|nonstring|nonobject|
+                 jwt|jwt_empty|assignment|header|usage_unknown|usage_bad|usage_missing. MOCK_CURSOR_EXIT
+                 sets the exit code. MOCK_CURSOR_LOG records argv/env/stdin per call,
+                 MOCK_PROMPT_DUMP the staged prompt's size and hash, MOCK_TAMPER_WRITE
+                 (JSON [[path, text], ...]) and MOCK_TAMPER_CANARY simulate a sandbox escape.
+
   ok        read stdin, emit a canned answer
   empty     emit nothing
   fail      print to stderr and exit 3
@@ -23,14 +39,228 @@ Two env knobs sit outside the behavior switch: MOCK_VERSION overrides what
   secret    emit a fake API key (to test redaction)
   nonutf8   emit invalid UTF-8 bytes (to test decode safety)
 """
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 
+# -- a small last-match-wins SBPL evaluator for the profiles Alloy generates -------- #
+def _sbpl_tokens(line):
+    toks, i = [], 0
+    while i < len(line):
+        c = line[i]
+        if c in " \t":
+            i += 1
+        elif c in "()":
+            toks.append(c)
+            i += 1
+        elif c == '"' or line.startswith('#"', i):
+            regex = c == "#"
+            i += 2 if regex else 1
+            buf = []
+            while line[i] != '"':
+                if line[i] == "\\":
+                    nxt = line[i + 1]
+                    buf.append(nxt if (not regex or nxt == '"') else line[i:i + 2])
+                    i += 2
+                else:
+                    buf.append(line[i])
+                    i += 1
+            i += 1
+            toks.append(("re" if regex else "str", "".join(buf)))
+        else:
+            j = i
+            while j < len(line) and line[j] not in ' \t()"':
+                j += 1
+            toks.append(line[i:j])
+            i = j
+    return toks
+
+
+def sbpl_rules(profile):
+    """[(allow|deny, [ops], [(kind, value)])] from a one-rule-per-line profile."""
+    rules = []
+    for line in profile.splitlines():
+        line = line.strip()
+        if not (line.startswith("(allow") or line.startswith("(deny")):
+            continue
+        toks = _sbpl_tokens(line)
+        kind, ops, filters, i = toks[1], [], [], 2
+        while i < len(toks) and toks[i] not in ("(", ")"):
+            ops.append(toks[i])
+            i += 1
+        while i < len(toks):
+            if toks[i] == "(" and isinstance(toks[i + 2], tuple):
+                filters.append((toks[i + 1], toks[i + 2][1]))
+                i += 4
+            else:
+                i += 1
+        rules.append((kind, ops, filters))
+    return rules
+
+
+def sbpl_decision(profile, op, path):
+    """'allow' or 'deny' for one operation on one path. Later rules win."""
+    result = "deny"
+    for kind, ops, filters in sbpl_rules(profile):
+        if not any(o == "default" or (o.endswith("*") and op.startswith(o[:-1])) or o == op for o in ops):
+            continue
+        if filters and not any(
+                (name == "literal" and path == v)
+                or (name == "subpath" and (path == v or path.startswith(v.rstrip("/") + "/")))
+                or (name == "regex" and re.search(v, path))
+                for name, v in filters):
+            continue
+        result = kind
+    return result
+
+
+def _sandbox_probe(profile, cmd, mode):
+    """Answer Alloy's preflight probe the way a working sandbox would."""
+    t, w, o, d, l, g, c, p = cmd[4:12]
+    dec = lambda op, path: sbpl_decision(profile, op, path)
+    res = {"tmp_write": dec("file-write-create", t + "/probe"),
+           "workspace_write": dec("file-write-create", w + "/probe"),
+           "outside_write": dec("file-write-create", o + "/probe"),
+           "gitdir_write": dec("file-write-create", g + "/probe"),
+           "common_write": dec("file-write-create", c + "/probe"),
+           "dotgit_write": dec("file-write-create", p),
+           "denied_read": dec("file-read-data", d),
+           "link": dec("file-link", t + "/link") if dec("process-exec", "/bin/ln") == "allow" else "deny",
+           "exec": dec("process-exec", "/usr/bin/true")}
+    if dec("file-write-data", "/dev/null") != "allow":      # the probe's own 2>/dev/null
+        res = {k: "deny" for k in res}
+    res.update({"read_allowed": {"denied_read": "allow"}, "write_leak": {"workspace_write": "allow"},
+                "link_leak": {"link": "allow"}, "exec_leak": {"exec": "allow"}}.get(mode, {}))
+    if mode == "garbage":
+        sys.stdout.write("not a probe result\n")
+    elif mode != "noout":
+        sys.stdout.write("".join("%s=%s\n" % kv for kv in res.items()))
+    return 9 if mode == "fail" else 0
+
+
+def sandbox_exec(argv):
+    profile_path, cmd = argv[1], argv[2:]
+    try:
+        with open(profile_path, encoding="utf-8") as f:
+            profile = f.read()
+    except OSError:
+        sys.stderr.write("sandbox-exec: cannot read the profile\n")
+        return 71
+    if not profile.startswith("(version 1)"):
+        sys.stderr.write("sandbox-exec: invalid profile\n")
+        return 65
+    dump = os.environ.get("MOCK_SANDBOX_DUMP")
+    if dump:
+        os.makedirs(dump, exist_ok=True)
+        with open(os.path.join(dump, "%03d.sb" % len(os.listdir(dump))), "w", encoding="utf-8") as f:
+            f.write(profile)
+    log = os.environ.get("MOCK_SANDBOX_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"cmd": cmd[:2] if "ALLOY_PREFLIGHT_PROBE" in " ".join(cmd) else cmd}) + "\n")
+    mode = os.environ.get("MOCK_SANDBOX_PREFLIGHT", "pass")
+    if cmd[:2] == ["/bin/bash", "-c"] and len(cmd) > 11 and "ALLOY_PREFLIGHT_PROBE" in cmd[2]:
+        return _sandbox_probe(profile, cmd, mode)
+    if mode == "cli_fail" and cmd[-1:] == ["--version"]:
+        return 7
+    os.execv(cmd[0], cmd)
+
+
+# -- cursor-agent ------------------------------------------------------------------ #
+_FAKE_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJmYWtlIjoiZml4dHVyZSJ9.c2lnbmF0dXJlLWZpeHR1cmU"
+
+
+def _cursor_log(argv, stdin_len):
+    log = os.environ.get("MOCK_CURSOR_LOG")
+    if not log:
+        return
+    names = ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY",
+             "HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR")
+    with open(log, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "stdin_bytes": stdin_len,
+                            "env": {n: os.environ.get(n) for n in names}}) + "\n")
+
+
+def _cursor_status():
+    mode = os.environ.get("MOCK_CURSOR_STATUS", "ok")
+    if mode == "ok":
+        sys.stdout.write("\u2713 Logged in as tl***@gmail.com\n")
+    elif mode == "logged_out":
+        sys.stdout.write("\u2717 Not logged in\n")
+    elif mode == "garbage":
+        sys.stdout.write("something unexpected\n")
+    else:
+        sys.stderr.write("status: simulated failure\n")
+        return 1
+    return 0
+
+
+def _cursor_staged_bytes(argv):
+    m = re.match(r'Read ("(?:[^"\\]|\\.)*") in full', argv[-1])
+    if not m:
+        return None
+    with open(json.loads(m.group(1)), "rb") as f:
+        return f.read()
+
+
+def _cursor_tamper():
+    for path, text in json.loads(os.environ.get("MOCK_TAMPER_WRITE", "[]")):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    if os.environ.get("MOCK_TAMPER_CANARY"):
+        runtime = os.path.dirname(os.path.dirname(os.environ["TMPDIR"]))
+        with open(os.path.join(runtime, "canary", "canary.txt"), "w", encoding="utf-8") as f:
+            f.write("tampered\n")
+
+
+def _cursor_emit(argv, text):
+    """Print a Cursor print-mode JSON result (or one of its failure shapes)."""
+    mode = os.environ.get("MOCK_CURSOR_JSON", "ok")
+    result, is_error, usage = text, False, {"inputTokens": 800, "outputTokens": 40,
+                                            "cacheReadTokens": 300, "cacheWriteTokens": 20}
+    stderr = ""
+    if mode == "is_error":
+        result, is_error = "boom", True
+    elif mode == "jwt":
+        result, stderr = "token is " + _FAKE_JWT, "warning: leaked " + _FAKE_JWT + "\n"
+    elif mode == "jwt_empty":
+        result, stderr = "", "warning: leaked " + _FAKE_JWT + "\n"
+    elif mode == "assignment":
+        result = "config: API_KEY=hunter2hunter2hunter2"
+        stderr = "config: API_KEY=hunter2hunter2hunter2\n"
+    elif mode == "header":
+        result = "sent Authorization: Bearer abc123def456ghi789"
+        stderr = "sent Authorization: Bearer abc123def456ghi789\n"
+    elif mode == "usage_unknown":
+        usage = {"weird": "shape"}
+    elif mode == "usage_bad":
+        usage = {"inputTokens": -5, "outputTokens": "many", "cacheReadTokens": True}
+    obj = {"type": "result", "subtype": "error" if is_error else "success", "is_error": is_error,
+           "duration_ms": 12, "duration_api_ms": 10, "result": result,
+           "session_id": "mock-provider-session-1", "request_id": "req-1", "usage": usage}
+    if mode == "usage_missing":
+        del obj["usage"]
+    if mode == "no_result":
+        del obj["result"]
+    elif mode == "nonstring":
+        obj["result"] = 5
+    body = {"malformed": "this is not json {", "nonobject": "[1, 2]"}.get(mode) or json.dumps(obj)
+    if stderr:
+        sys.stderr.write(stderr)
+    sys.stdout.write(body + "\n")
+    return int(os.environ.get("MOCK_CURSOR_EXIT", "0"))
+
+
 def role_from_argv(argv):
+    if argv[:1] == ["-f"]:
+        return "sandbox"
+    if "--skip-worktree-setup" in argv or argv[:1] in (["status"], ["--list-models"]):
+        return "cursor"
     if "exec" in argv:
         return "codex"
     if "-p" in argv:
@@ -49,6 +279,12 @@ def output_target(argv):
 
 def main():
     argv = sys.argv[1:]
+
+    if argv[:1] == ["-f"]:
+        return sandbox_exec(argv)
+
+    if argv == ["--version"] and os.environ.get("MOCK_CURSOR_LOG"):
+        _cursor_log(argv, 0)          # the preflight's sandboxed CLI probe
 
     if "--version" in argv:
         # MOCK_VERSION lets a test impersonate a specific CLI release, for
@@ -77,6 +313,10 @@ def main():
     if stdin_dump:
         with open(stdin_dump, "w") as f:
             f.write(str(len(stdin_data)))
+    if role == "cursor":
+        _cursor_log(argv, len(stdin_data))
+        if argv[:1] == ["status"]:
+            return _cursor_status()
 
     if behavior == "hang":
         child = subprocess.Popen(["sleep", "300"])
@@ -135,6 +375,18 @@ def main():
         payload = (
             f"MOCK {role} answer (read {n} bytes of prompt): the sky is blue.\n"
         ).encode()
+
+    if role == "cursor":
+        staged = _cursor_staged_bytes(argv)
+        dump = os.environ.get("MOCK_PROMPT_DUMP")
+        if dump and staged is not None:
+            with open(dump, "w") as f:
+                json.dump({"bytes": len(staged), "sha256": hashlib.sha256(staged).hexdigest()}, f)
+        _cursor_tamper()
+        text = payload.decode("utf-8", errors="replace")
+        if behavior == "ok" and staged is not None:
+            text = "MOCK cursor answer (read %d staged bytes): the sky is blue.\n" % len(staged)
+        return _cursor_emit(argv, text)
 
     # Machine-readable output modes (ALLOY_CAPTURE_USAGE): wrap the answer the
     # way each real CLI does, with fixed token counts the tests can assert.
