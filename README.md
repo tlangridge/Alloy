@@ -217,9 +217,18 @@ which are authenticated, and exactly how to add the missing ones:
 
 `[no-sbx]` means Cursor is installed but its macOS sandbox is unavailable (for
 example on Linux), so Alloy refuses every Cursor role. On macOS, once Cursor is
-logged in (`cursor-agent login`) and its sandbox self-test passes, it shows
+logged in (`AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`) and its sandbox self-test passes, it shows
 `[ready]` and joins the default panel with the model `composer-2.5` unless you set
 `ALLOY_CURSOR_MODEL` or `ALLOY_PANELISTS`.
+
+Cursor requires a one-time `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`.
+The login lives in `~/.cursor/auth.json` (0600). Every Cursor child receives
+`AGENT_CLI_CREDENTIAL_STORE=file`; under Alloy the Cursor CLI is denied keychain
+access and cannot start `/usr/bin/security`. Alloy never reads the keychain.
+The pinned build writes `auth.json` directly and chmods it to 0600, with no temp
+or atomic-rename files. Only that literal file is write-granted, plus permission
+changes on the existing `~/.cursor` directory (the CLI chmods it to 0700).
+No other home files are writable, and symlinked credential paths are refused.
 
 Alloy never reads the macOS keychain, where a fresh `agy` login lives. On macOS,
 `doctor` therefore shows a signed-out `agy` as `[ready]` with the line `auth
@@ -311,13 +320,13 @@ corrections before the host receives the result.
   probe, Cursor's plan mode and its `--sandbox` flag both wrote outside the
   workspace; `--mode ask` refused but is not an OS guarantee. So Alloy runs every
   Cursor process under `/usr/bin/sandbox-exec` with a profile it generates and
-  self-tests. Panels and Checkers use ask mode with only a private runtime
-  directory writable. Makers can write only the non-Git contents of their owned
+  self-tests. Panels and Checkers use ask mode with a private runtime
+  directory and the CLI file login writable. Makers can write only the non-Git contents of their owned
   worktree. No Cursor role gets a force or auto-approval flag, and every role
   denies reads of a fixed list of credential paths (add more with
   `ALLOY_CURSOR_DENY_READ_PATHS`). Cursor is refused on Linux and whenever the
   sandbox is unavailable; `ALLOY_ALLOW_UNSANDBOXED` never overrides that. Alloy
-  accepts a residual risk: the Cursor process uses its own keychain login, can
+  accepts a residual risk: the Cursor process uses its own file login, can
   read the repository and uses the network, so a Cursor role is not an
   exfiltration boundary. Content fingerprints and canaries only detect changes.
   See [SECURITY.md](SECURITY.md).
@@ -411,7 +420,7 @@ variables (env wins over the file):
 | `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
-| `ALLOY_BIN_CURSOR` | `cursor-agent` on `PATH` | Cursor CLI path (legacy: `ALLOY_BIN_CURSOR_AGENT`; the canonical key wins) |
+| `ALLOY_BIN_CURSOR` | `cursor-agent` on `PATH` | Cursor CLI path (legacy: `ALLOY_BIN_CURSOR_AGENT`; the canonical key wins). A symlink or wrapper script is fine: Alloy never runs it, it resolves the supported build's directory behind it and starts that build's own Node runtime |
 | `ALLOY_CURSOR_MODEL` | `composer-2.5` | Cursor model; must have a known family (`auto` and unknown IDs are refused). Legacy `ALLOY_CURSOR_AGENT_MODEL` still works, with a doctor warning |
 | `ALLOY_CURSOR_EFFORT` | Cursor default | Cursor effort (`none` to `max`), sent inside `--model`. Legacy `ALLOY_CURSOR_AGENT_EFFORT` |
 | `ALLOY_CURSOR_DENY_READ_PATHS` | _(unset)_ | extra comma-separated absolute paths Cursor may not read; adds to the built-in credential list, never removes from it |
@@ -533,3 +542,14 @@ The Alloy skill guides the host to select explicit Maker/Checker profiles and
 supply its task assessment to `execute`, without `--route`. Normal CLI logins,
 billing, independent review and permission controls still apply. This uses host
 reasoning tokens instead of Jev and may take longer; no router API key is needed.
+
+Every Cursor spawn explicitly passes `--sandbox disabled`. Alloy's macOS
+`sandbox-exec` profile is the enforced boundary; Cursor's own sandbox and ask/plan
+modes are not relied on. A fresh 0700 runtime sets `CURSOR_DATA_DIR` and
+`CURSOR_CONFIG_DIR` to its private state subdirectory and is removed after the
+call through the system `rm` command (including any installed guard). `HOME` stays
+unchanged; the CLI reads the literal `~/.cursor/auth.json` without copying or
+symlinking it. Home projects/config, skills manifests, the build's `.running`
+markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
+inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
+writes outside the task's allowed paths; the model may be offered tools it cannot use.

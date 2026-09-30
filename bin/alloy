@@ -1167,14 +1167,22 @@ class OpenCodeAdapter(Adapter):
 # Cursor: canonical name, OS write boundary, spawn gateway, tripwires
 # --------------------------------------------------------------------------- #
 # `cursor-agent` has no OS-enforced read-only mode. Its `--mode ask` and
-# `--sandbox` flags are model/tool-mode controls, and the recorded probe
-# (docs/design/cursor/BOUNDARY-PROBE.txt) showed plan mode and its sandbox flag
-# writing outside the workspace. The write boundary is therefore a macOS
-# `sandbox-exec` profile generated here, and EVERY Cursor process -- auth status,
-# version/help, model discovery, panels, Makers, Checkers -- is spawned only
-# through cursor_command(): it validates the boundary, validates the final argv
-# against a closed per-role grammar, writes the profile and returns the wrapped
-# argv. See docs/design/cursor/CURSOR-PROVIDER-PLAN.md sections 2 and 3.
+# `--sandbox` flags are model/tool-mode controls, and the recorded boundary probe
+# showed plan mode and its sandbox flag writing outside the workspace. The write
+# boundary is therefore a macOS `sandbox-exec` profile generated here, and EVERY
+# Cursor process -- auth status, version/help, model discovery, panels, Makers,
+# Checkers -- is spawned only through cursor_command(): it validates the boundary,
+# validates the final argv against a closed per-role grammar, writes the profile
+# and returns the wrapped argv.
+#
+# The `cursor-agent` that a user runs is a shell launcher; Alloy never executes it.
+# A panel/Checker profile denies process execution, and a launcher needs a shell and
+# coreutils. Alloy instead resolves the pinned build's directory and starts that
+# build's own bundled Node runtime directly: `<dir>/node --use-system-ca <dir>/index.js`.
+# A panel or Checker allows exactly three literal executables: node, the build's rg,
+# and /usr/bin/sw_vers. Under Alloy, the OS sandbox denies shell execution and file
+# writes outside the task's allowed paths; the model may be offered tools it cannot use.
+# Every role uses file credentials and denies security execution and keychain access.
 ADAPTER_ALIASES = {"cursor-agent": "cursor"}
 
 
@@ -1199,11 +1207,28 @@ def _first_setting(*keys: str) -> "str | None":
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"     # never resolved through PATH
 SANDBOX_TRUSTED_UID = 0
 CURSOR_PLATFORM = "darwin"                 # the only supported Cursor execution platform
-CURSOR_SANDBOX_PROFILE_VERSION = 3      # 3: Mach lookups are default-deny with an allowlist + Mach probe
+CURSOR_SANDBOX_PROFILE_VERSION = 4      # 4: file login only; keychain access denied
 # Ask mode's no-shell behaviour is evidence-backed only for these exact builds.
 # A date floor would silently trust every later or same-day unmeasured build.
 CURSOR_SUPPORTED_VERSIONS = ("2026.09.28-64d2043",)
 CURSOR_VERSION_RE = re.compile(r"\b(\d{4}\.\d{1,2}\.\d{1,2}-[0-9A-Za-z]+)\b")
+CURSOR_BUILD_DIR_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}-[0-9A-Za-z]+$")
+# Where a Cursor install keeps its builds (`<versions root>/<build>/{node,index.js,...}`),
+# relative to the login home. Used when the `cursor-agent` on PATH is not itself inside a
+# build directory (a local wrapper or guard script): the wrapper is never executed or followed
+# (only its `#!` marker is read), and only a supported build under this root is used.
+CURSOR_VERSIONS_ROOT = os.path.join(".local", "share", "cursor-agent", "versions")
+# The CLI's own name. The shell launcher exports it as CURSOR_INVOKED_AS (basename of the
+# launcher path, so `agent` or `cursor-agent`); the CLI reads that variable before argv[0].
+# sandbox-exec cannot set argv[0] of what it starts, so the variable is the whole mechanism.
+CURSOR_NAME = "cursor-agent"
+# What the launcher puts between the runtime binary and the entry script (it probes
+# `node --use-system-ca --version` first and falls back without the flag). Fixed here: the
+# preflight proves the pinned build's runtime accepts it.
+CURSOR_NODE_ARGS = ("--use-system-ca",)
+# Besides bundled node and rg, panels/Checkers may execute only the verified, root-owned
+# OS-version tool. File credentials eliminate the CLI's need for /usr/bin/security.
+CURSOR_SYSTEM_EXEC = ("/usr/bin/sw_vers",)
 CURSOR_DEFAULT_MODEL = "composer-2.5"
 CURSOR_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 CURSOR_BOUNDARY_MESSAGE = ("Cursor installed/authenticated, but no supported OS write sandbox "
@@ -1216,8 +1241,8 @@ CURSOR_ALLOWED_UNIX_SOCKET = "/private/var/run/mDNSResponder"
 # that is not listed here cannot be asked to act for the caller outside its sandbox.
 # Seeded from Apple's own baseline for system processes
 # (/System/Library/Sandbox/Profiles/system.sb: the base `(allow mach-lookup ...)` block
-# and the `(system-network)` block) plus the Security API the CLI's keychain login item
-# needs (plan section 2). This is NOT a measurement of the installed CLI or of a Maker's
+# and the `(system-network)` block) with keychain services excluded (file credentials
+# only). This is NOT a measurement of the installed CLI or of a Maker's
 # toolchains: the preflight proves the CLI still starts under it and that the relays
 # below stay unreachable, and the Lane 6 release gate measures the rest on the real
 # sandbox. An incomplete list makes the boundary unavailable (Cursor refused); it can
@@ -1239,8 +1264,6 @@ CURSOR_MACH_ALLOW = (
     "com.apple.cfnetwork.cfnetworkagent", "com.apple.AppSSO.service-xpc",
     # SCDynamicStore reads (proxy and DNS configuration)
     "com.apple.SystemConfiguration.configd",
-    # Security API for the CLI's login item: securityd (file keychain), secd (data-protection)
-    "com.apple.SecurityServer", "com.apple.securityd.xpc",
 )
 # The allowed name the self-test must reach from inside the sandbox (proves the probe client
 # runs under the profile and that the allowlist is not simply "everything denied").
@@ -1266,6 +1289,12 @@ CURSOR_ENV_ALLOW = (
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    # The CLI's name. Always overwritten with CURSOR_NAME by the private runtime, so an
+    # inherited value is never what reaches the child; it is listed because it is a name the
+    # child is meant to see.
+    "CURSOR_INVOKED_AS",
+    "CURSOR_DATA_DIR", "CURSOR_CONFIG_DIR",  # always replaced with private state
+    "AGENT_CLI_CREDENTIAL_STORE",       # always overwritten with file, never inherited
 )
 CURSOR_ENV_ALLOW_PREFIXES = ("LC_",)
 _CURSOR_PROXY_ENV = frozenset(n for n in CURSOR_ENV_ALLOW if n.upper().endswith("_PROXY"))
@@ -1652,6 +1681,21 @@ def cursor_sbpl(role: str, *, exe: str, runtime, denials: CursorDenials,
         lines.append("(deny process-exec*)")
         lines.append("(allow process-exec " + " ".join(
             "(literal %s)" % _sb_path(p) for p in (exe,) + tuple(extra_exec)) + ")")
+    if role == "maker":
+        # Maker commands retain their execution grant, but never keychain access.
+        lines.append('(deny process-exec (literal "/usr/bin/security"))')
+    # The pinned file store writes auth.json directly with mode 0600, then chmods it;
+    # it also chmods the existing .cursor directory to 0700. No temp/rename files.
+    home = cursor_login_home()
+    auth_dir = _canon_grant(os.path.join(home, ".cursor"), "the Cursor credential directory")
+    auth = _canon_grant(os.path.join(auth_dir, "auth.json"), "the Cursor credential file")
+    if os.path.lexists(auth):
+        auth_st = _cursor_trusted_entry(auth, "credential file")
+        if auth_st.st_nlink != 1 or stat.S_IMODE(auth_st.st_mode) != 0o600:
+            raise CursorBoundaryError("the Cursor credential file must be 0600 with no hard links")
+    _check_overlap(denials, [auth])
+    lines.append("(allow file-write* (literal %s))" % _sb_path(auth))
+    lines.append("(allow file-write-mode (literal %s))" % _sb_path(auth_dir))
     lines.append('(allow file-write-data (literal "/dev/null"))')
     lines.append("(allow file-write* " + " ".join(
         "(subpath %s)" % _sb_path(p) for p in (runtime.state, runtime.cache, runtime.tmp)) + ")")
@@ -1819,7 +1863,7 @@ def _cursor_auth_control(tok: str) -> bool:
 def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None" = None,
                          staged: "str | None" = None,
                          expected_model: "str | None" = None) -> None:
-    """Parse a FULL Cursor argv (after the executable) against the role's closed
+    """Parse a FULL Cursor argv (after the runtime binary and entry script) against the role's closed
     grammar. There is no substring denylist: anything not recognised is refused,
     including unknown options, `--flag=value` and attached short forms, duplicate
     singleton options, a subcommand in an inference call and extra positionals."""
@@ -1863,8 +1907,8 @@ def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None
             raise CursorBoundaryError("missing required option " + required)
     if seen["--output-format"] != "json":
         raise CursorBoundaryError("--output-format must be json")
-    if seen["--sandbox"] != "enabled":
-        raise CursorBoundaryError("--sandbox must be enabled")
+    if seen["--sandbox"] != "disabled":
+        raise CursorBoundaryError("--sandbox must be disabled")
     if role == "panel" and seen.get("--mode") != "ask":
         raise CursorBoundaryError("a panel/Checker call requires exactly --mode ask")
     if role == "maker" and "--mode" in seen:
@@ -1971,9 +2015,17 @@ def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
         pfd = os.open(parent, flags)
         try:
             before = os.fstat(pfd)
+            child_before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
             entry = _fp_entry_at(pfd, name, path, budget, meta)
-            if _fp_stat_sig(os.fstat(pfd)) != _fp_stat_sig(before):
-                raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+            # The parent anchors a single entry, not a walk of its siblings. Temp
+            # neighbours may appear/disappear without changing this fingerprint.
+            # Still refuse a changed parent identity/mode or a replaced child.
+            identity = lambda st: (st.st_dev, st.st_ino, st.st_mode)
+            if (identity(os.fstat(pfd)) != identity(before)
+                    or identity(os.stat(parent, follow_symlinks=False)) != identity(before)
+                    or _fp_stat_sig(os.stat(name, dir_fd=pfd, follow_symlinks=False))
+                    != _fp_stat_sig(child_before)):
+                raise CursorBoundaryError("fingerprint refused: a directory or entry changed while reading")
             return entry
         finally:
             os.close(pfd)
@@ -2179,7 +2231,8 @@ def cursor_fingerprint_changes(before: CursorFingerprint, after: CursorFingerpri
 class CursorRuntime:
     """Per-dispatch owner-private writable runtime plus canaries, in the system
     temporary directory: never below the run dir/root, source checkout, worktree
-    or a Git common dir. Only state/, cache/ and tmp/ are ever writable."""
+    or a Git common dir. State/, cache/ and tmp/ are its writable children;
+    auth.json is the sole home file grant."""
 
     def __init__(self, root: str, canary_dir: str):
         self.root = root
@@ -2192,7 +2245,16 @@ class CursorRuntime:
         self.canary_before: "dict | None" = None
 
     def env(self, home: str) -> dict:
-        return {"HOME": home, "XDG_STATE_HOME": self.state, "XDG_CACHE_HOME": self.cache, "TMPDIR": self.tmp}
+        # HOME stays the real login location (only auth.json may be refreshed);
+        # writable runtime children are inside this runtime. CURSOR_INVOKED_AS is what the shell launcher would have exported.
+        # NODE_COMPILE_CACHE is the launcher's compile-cache choice replicated INSIDE the
+        # private runtime (the launcher's own choice, under the real home, is write-denied);
+        # it is removed with the runtime, so nothing persists and the real cache is untouched.
+        return {"HOME": home, "XDG_STATE_HOME": self.state, "XDG_CACHE_HOME": self.cache, "TMPDIR": self.tmp,
+                "CURSOR_INVOKED_AS": CURSOR_NAME,
+                "CURSOR_DATA_DIR": self.state, "CURSOR_CONFIG_DIR": self.state,
+                "AGENT_CLI_CREDENTIAL_STORE": "file",
+                "NODE_COMPILE_CACHE": os.path.join(self.cache, "cursor-compile-cache")}
 
     def snapshot(self) -> dict:
         budget = {"entries": 0, "bytes": 0}
@@ -2215,7 +2277,10 @@ class CursorRuntime:
         for path in (self.root, self.canary_outside):
             try:
                 if os.path.lexists(path):
-                    shutil.rmtree(path)
+                    removed = subprocess.run(["rm", "-r", "--", path], capture_output=True, text=True)
+                    if removed.returncode:
+                        _LIVE_RUNTIMES.discard(self)
+                        raise CursorBoundaryError("cleanup refused for %s: %s" % (path, redact_secrets(removed.stderr)[0].strip()))
             except OSError:
                 failed.append(path)
             if os.path.lexists(path) and path not in failed:
@@ -2283,7 +2348,16 @@ def cursor_make_runtime(forbidden: "tuple | list" = (), *,
                         git: "dict | None" = None) -> CursorRuntime:
     """Create and verify a runtime, refusing (and removing it) when it sits under,
     or over, any relevant path or inside any Git repository."""
-    root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-"))
+    roots = _cursor_runtime_forbidden(run_root=run_root, pdir=pdir, source=source,
+                                      worktree=worktree, git=git, extra=forbidden)
+    base = os.path.realpath(tempfile.gettempdir())
+    if any(_is_within(base, r) for r in roots) or _cursor_containing_repo(base):
+        raise CursorBoundaryError("the private runtime overlaps a repository or run path")
+    # The pinned CLI falls back to shared /tmp/.cursor if its data base exceeds 84 bytes.
+    # Keep state short even on macOS, whose default per-user temp directory is lengthy.
+    if len(os.fsencode(os.path.join(base, "alloy-cursor-XXXXXXXX", "runtime", "state"))) > 84:
+        base = "/private/tmp" if sys.platform == "darwin" else "/tmp"
+    root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-", dir=base))
     outside = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-canary-"))
     rt = CursorRuntime(root, outside)
     try:
@@ -2314,7 +2388,11 @@ def cursor_make_runtime(forbidden: "tuple | list" = (), *,
 
 
 # -- boundary readiness and preflight -------------------------------------------- #
-CursorBoundary = namedtuple("CursorBoundary", "ready reason version exe")
+# `exe` is the pinned build's own `node` and `script` its `index.js`; every Cursor argv is
+# `<exe> --use-system-ca <script> <tail>`. `execs` are the other literal executables a
+# panel/Checker profile allows next to `exe` (the build's bundled rg and the OS-version tool of
+# CURSOR_SYSTEM_EXEC), each verified before the boundary is ready.
+CursorBoundary = namedtuple("CursorBoundary", "ready reason version exe script execs", defaults=(None, ()))
 _CURSOR_PREFLIGHT: "dict[tuple, CursorBoundary]" = {}
 
 # Probe run under the production profile with /bin/bash (plus /bin/ln, the Unix-socket
@@ -2474,17 +2552,116 @@ def _cursor_probe_interpreters() -> "tuple[str, ...]":
     return tuple(dict.fromkeys((launcher, image)))
 
 
-def _cursor_exe(path: "str | None") -> "tuple[str, tuple]":
-    if not path:
-        raise CursorBoundaryError("the Cursor CLI was not found")
-    real = os.path.realpath(path)
+# -- the pinned Cursor build: resolution without executing anything ------------------ #
+# What Alloy starts is not the `cursor-agent` a user runs (a bash launcher that needs
+# `basename`, `dirname`, `realpath` and a shell, all of which a panel/Checker profile denies)
+# but the build's own bundled runtime: `<dir>/node --use-system-ca <dir>/index.js <args>`.
+CursorBuild = namedtuple("CursorBuild", "dir node script build sig rg", defaults=(None,))
+
+
+def _cursor_trusted_entry(path: str, what: str, *, directory: bool = False,
+                          executable: bool = False) -> os.stat_result:
+    """One part of a Cursor build, examined with lstat: it must be a regular file (or a
+    real directory for the build directory itself), never a symlink, owned by the current
+    user and not writable by group or other. Anything else is not something Alloy runs."""
     try:
-        st = os.stat(real)
+        st = os.lstat(path)
     except OSError:
+        raise CursorBoundaryError("the Cursor build has no %s" % what)
+    right_kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    if stat.S_ISLNK(st.st_mode) or not right_kind:
+        raise CursorBoundaryError("the Cursor build's %s is not a regular %s" % (
+            what, "directory" if directory else "file"))
+    if st.st_uid != os.getuid():
+        raise CursorBoundaryError("the Cursor build's %s is not owned by the current user" % what)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise CursorBoundaryError("the Cursor build's %s is writable by group or other" % what)
+    if executable and not os.access(path, os.X_OK):
+        raise CursorBoundaryError("the Cursor build's %s is not executable" % what)
+    return st
+
+
+def _cursor_is_script(path: str) -> bool:
+    """True for a regular file that starts with `#!`: a wrapper or guard script. Only those
+    two bytes are read; the file is never executed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, 2) == b"#!"
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def cursor_resolve_build(bin_path: "str | None") -> CursorBuild:
+    """The pinned build directory behind a `cursor-agent` path, verified. Nothing is executed.
+
+    `realpath` follows the whole symlink chain (PATH entry, `agent` / `cursor-agent`
+    symlinks). When the file it lands on sits in a build directory (`<versions>/<build>/`),
+    that directory is the build. When it does not -- a local wrapper or guard script is a
+    regular file with no further link to follow -- the wrapper is not run (nor read beyond
+    its `#!` marker), and the supported build under CURSOR_VERSIONS_ROOT in the login home
+    is used instead. Anything that is neither is refused. Either
+    way the directory name must be a build Alloy has measured, and the directory, `node`,
+    `index.js` and the bundled `rg` must be owned by the current user and not writable by
+    group or other, `node` and `rg` executable, and none of them a symlink."""
+    if not bin_path:
         raise CursorBoundaryError("the Cursor CLI was not found")
-    if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
-        raise CursorBoundaryError("the Cursor CLI is not an executable file")
-    return real, (real, st.st_ino, st.st_size, st.st_mtime_ns)
+    real = os.path.realpath(bin_path)
+    if not os.path.exists(real):        # an explicit path that is not there never falls back
+        raise CursorBoundaryError("the Cursor CLI was not found")
+    holder = real if os.path.isdir(real) else os.path.dirname(real)
+    if CURSOR_BUILD_DIR_RE.match(os.path.basename(holder)):
+        candidates = [holder]
+    else:
+        if not _cursor_is_script(real):
+            raise CursorBoundaryError("the Cursor CLI path is neither inside a Cursor build directory "
+                                      "nor a wrapper script")
+        root = os.path.realpath(os.path.join(cursor_login_home(), CURSOR_VERSIONS_ROOT))
+        candidates = [os.path.join(root, name) for name in CURSOR_SUPPORTED_VERSIONS]
+    present = [c for c in candidates if os.path.lexists(c)]
+    if not present:
+        raise CursorBoundaryError("no supported Cursor build directory was found (the build "
+                                  "directory must hold node and index.js)")
+    build_dir = present[0]
+    name = os.path.basename(build_dir)
+    if name not in CURSOR_SUPPORTED_VERSIONS:
+        raise CursorBoundaryError("unsupported Cursor CLI version/build: the build directory is "
+                                  "not a build Alloy has measured")
+    dir_st = _cursor_trusted_entry(build_dir, "directory", directory=True)
+    node, script = os.path.join(build_dir, "node"), os.path.join(build_dir, "index.js")
+    node_st = _cursor_trusted_entry(node, "node runtime", executable=True)
+    script_st = _cursor_trusted_entry(script, "index.js")
+    rg = os.path.join(build_dir, "rg")
+    rg_st = _cursor_trusted_entry(rg, "bundled rg", executable=True)      # verified like node
+    sig = (build_dir, dir_st.st_ino, _fp_stat_sig(node_st), _fp_stat_sig(script_st), _fp_stat_sig(rg_st))
+    return CursorBuild(build_dir, node, script, name, sig, rg)
+
+
+def _cursor_system_execs() -> "tuple[tuple[str, ...], tuple]":
+    """The verified system executables a panel/Checker profile may run: each must be a regular,
+    non-symlink file owned by the trusted (root) user, not writable by group or other, and
+    executable -- the checks sandbox-exec gets. Returns (paths, signature for the cache key)."""
+    paths, sigs = [], []
+    for path in CURSOR_SYSTEM_EXEC:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            raise CursorBoundaryError("%s is missing" % path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise CursorBoundaryError("%s is not a regular, non-symlink file" % path)
+        if st.st_uid != SANDBOX_TRUSTED_UID:
+            raise CursorBoundaryError("%s is not owned by the trusted user" % path)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise CursorBoundaryError("%s is writable by group or other" % path)
+        if not os.access(path, os.X_OK):
+            raise CursorBoundaryError("%s is not executable" % path)
+        paths.append(path)
+        sigs.append((path, st.st_ino, st.st_size, st.st_mtime_ns, st.st_uid))
+    return tuple(paths), tuple(sigs)
 
 
 def cursor_base_env(source: "dict | None" = None) -> dict:
@@ -2506,7 +2683,7 @@ def cursor_child_env(rt: CursorRuntime, home: "str | None" = None) -> dict:
     """Child environment for every Cursor process: an explicit allowlist (no router
     or Cursor API credential, no ambient cloud/VCS token, no IPC hook such as
     SSH_AUTH_SOCK or TMUX), plus only the exact private runtime children. HOME stays
-    the real login location (write-denied by the profile)."""
+    the real login location (only the CLI file login may be refreshed)."""
     env = cursor_base_env()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
@@ -2521,11 +2698,13 @@ def _write_profile(rt: CursorRuntime, text: str) -> None:
         f.write(text)
 
 
-def _run_preflight(exe: str, home: str, den: CursorDenials,
-                   run_root: "str | None" = None) -> CursorBoundary:
+def _run_preflight(build: CursorBuild, home: str, den: CursorDenials,
+                   run_root: "str | None" = None, execs: "tuple" = ()) -> CursorBoundary:
     """Prove, through the production profile generator, that reads/writes/links/
     process execution, Unix sockets and Mach lookups behave as the roles require AND
-    that the CLI still starts (which is what proves the Mach allowlist is sufficient)."""
+    that the CLI still starts (which is what proves the Mach allowlist is sufficient).
+    The CLI is started exactly as production starts it: the build's own node, directly."""
+    exe, script = build.node, build.script
     rt = cursor_make_runtime(forbidden=[exe], run_root=run_root)
     root = rt.root
     try:
@@ -2542,7 +2721,7 @@ def _run_preflight(exe: str, home: str, den: CursorDenials,
         probe_den = CursorDenials(den.paths + (denied,), den.regexes, den.anchors)
         git = {"top": wt, "dotgit": os.path.join(wt, ".git"), "dotgit_is_file": True,
                "gitdir": gitdir, "common": common}
-        required = [exe, root]
+        required = [exe, script, build.dir, root] + list(execs)
         _check_overlap(den, required)
         version = ""
         interpreters = _cursor_probe_interpreters()
@@ -2573,22 +2752,28 @@ def _run_preflight(exe: str, home: str, den: CursorDenials,
                     raise CursorBoundaryError("the OS sandbox self-test failed for the %s profile: %s" % (
                         role, ", ".join(bad) or "unparseable result"))
                 # Same generator, real CLI, no extra executables: it must still start.
-                argv = _cursor_validated_spawn(
-                    "version", ["--version"], exe=exe, runtime=rt, profile_role=role,
-                    denials=probe_den, worktree=wt if role == "maker" else None,
-                    git=git, required=[exe, root, wt, gitdir, common])
-                ran = _run_bounded(argv, env=cursor_child_env(rt, home), cwd=rt.tmp,
-                                   timeout=30, cap=65536)
+                version_rt = cursor_make_runtime(forbidden=[exe], run_root=run_root)
+                try:
+                    argv = _cursor_validated_spawn(
+                        "version", ["--version"], exe=exe, script=script, execs=execs, runtime=version_rt,
+                        profile_role=role, denials=probe_den, worktree=wt if role == "maker" else None,
+                        git=git, required=[exe, script, build.dir, root, wt, gitdir, common])
+                    ran = _run_bounded(argv, env=cursor_child_env(version_rt, home), cwd=version_rt.tmp,
+                                       timeout=30, cap=65536)
+                finally:
+                    version_rt.close()
                 text = strip_ansi((ran["out"] + ran["err"]).decode("utf-8", "replace")).strip()
                 m = CURSOR_VERSION_RE.search(text)
                 if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"] or not m:
                     raise CursorBoundaryError("the Cursor CLI does not start under the %s profile" % role)
                 if m.group(1) not in CURSOR_SUPPORTED_VERSIONS:
                     raise CursorBoundaryError("unsupported Cursor CLI version/build")
+                if m.group(1) != build.build:
+                    raise CursorBoundaryError("the Cursor CLI reports a different build than its directory")
                 version = text.splitlines()[0][:80]
         finally:
             fixture.close()
-        return CursorBoundary(True, "", version, exe)
+        return CursorBoundary(True, "", version, exe, script, tuple(execs))
     finally:
         rt.close()
 
@@ -2602,21 +2787,23 @@ def cursor_boundary(bin_path: "str | None",
         if sys.platform != CURSOR_PLATFORM:
             raise CursorBoundaryError("unsupported platform (Cursor roles require macOS sandbox-exec)")
         sandbox_sig = _verify_sandbox_exec()
-        exe, exe_sig = _cursor_exe(bin_path)
+        build = cursor_resolve_build(bin_path)
+        system_paths, system_sig = _cursor_system_execs()
+        execs = ((build.rg,) if build.rg else ()) + system_paths
         home = cursor_login_home()
         den = cursor_denials(home)
         effective_root = (os.path.realpath(os.path.abspath(os.path.expanduser(run_root)))
                           if run_root else None)
-        key = (sandbox_sig, exe_sig, CURSOR_SANDBOX_PROFILE_VERSION, ALLOY_VERSION,
-               home, den, effective_root)
+        key = (sandbox_sig, build.sig, system_sig, CURSOR_NODE_ARGS, CURSOR_SANDBOX_PROFILE_VERSION,
+               ALLOY_VERSION, home, den, effective_root)
         if key not in _CURSOR_PREFLIGHT:
             try:
-                _CURSOR_PREFLIGHT[key] = _run_preflight(exe, home, den, effective_root)
+                _CURSOR_PREFLIGHT[key] = _run_preflight(build, home, den, effective_root, execs)
             except CursorBoundaryError as exc:
-                _CURSOR_PREFLIGHT[key] = CursorBoundary(False, str(exc), "", exe)
+                _CURSOR_PREFLIGHT[key] = CursorBoundary(False, str(exc), "", build.node, build.script, execs)
             except (OSError, subprocess.SubprocessError) as exc:
                 _CURSOR_PREFLIGHT[key] = CursorBoundary(False, "the OS sandbox self-test could not run (%s)" % (
-                    type(exc).__name__), "", exe)
+                    type(exc).__name__), "", build.node, build.script, execs)
         return _CURSOR_PREFLIGHT[key]
     except CursorBoundaryError as exc:
         return CursorBoundary(False, str(exc), "", None)
@@ -2716,20 +2903,31 @@ def _cursor_stage_prompt(prompt_path: str, pdir: str) -> str:
 
 
 def _cursor_validated_spawn(validation_role: str, tail: "list[str]", *,
-                            exe: str, runtime: CursorRuntime, profile_role: str,
+                            exe: str, script: "str | None", runtime: CursorRuntime, profile_role: str,
+                            execs: "tuple | list" = (),
                             denials: CursorDenials, workspace: "str | None" = None,
                             staged: "str | None" = None,
                             expected_model: "str | None" = None,
                             worktree: "str | None" = None,
                             git: "dict | None" = None,
                             required: "tuple | list" = ()) -> "list[str]":
-    """Non-recursive final spawn builder shared by preflight and normal calls."""
+    """Non-recursive final spawn builder shared by preflight and normal calls.
+
+    The closed grammar validates `tail` only, exactly as before. `exe` is the build's own
+    `node`; with `execs` (the bundled rg and the OS-version tool of CURSOR_SYSTEM_EXEC) it is the
+    profile's complete list of allowed executables. The runtime binary's fixed arguments and
+    the entry script are prepended AFTER validation, so the grammar never has to admit them
+    and no caller can supply or replace them."""
+    if not exe or not script:
+        raise CursorBoundaryError("the Cursor runtime and entry script are unresolved")
     cursor_validate_argv(validation_role, tail, workspace=workspace, staged=staged,
                          expected_model=expected_model)
-    _check_overlap(denials, [exe, runtime.root] + list(required))
+    _check_overlap(denials, [exe, script, os.path.dirname(script), runtime.root] + list(execs) + list(required))
     _write_profile(runtime, cursor_sbpl(profile_role, exe=exe, runtime=runtime,
-                                        denials=denials, worktree=worktree, git=git))
-    return [SANDBOX_EXEC, "-f", runtime.profile, exe] + list(tail)
+                                        denials=denials, worktree=worktree, git=git,
+                                        extra_exec=tuple(execs)))
+    fixed = ["--sandbox", "disabled"] if validation_role in _CURSOR_METADATA else []
+    return [SANDBOX_EXEC, "-f", runtime.profile, exe, *CURSOR_NODE_ARGS, script] + list(tail) + fixed
 
 
 def _cursor_require_owned_worktree(ws: str, git: "dict | None", managed_worktree: bool,
@@ -2757,18 +2955,21 @@ def cursor_command(role: str, tail: "list[str]", *, exe: str, runtime: CursorRun
                    cwd: "str | None" = None) -> "list[str]":
     """The ONLY way to obtain a Cursor argv: validates the boundary, validates the
     final argv (after every rewrite) against the role's closed grammar, creates
-    the owner-private profile and returns `sandbox-exec -f <profile> <exe> ...`.
+    the owner-private profile and returns
+    `sandbox-exec -f <profile> <build>/node --use-system-ca <build>/index.js ...`.
+    `exe` is whatever `cursor-agent` path the caller has; it is only resolved to the
+    pinned build directory (never executed).
     Raises CursorBoundaryError when anything is not provably safe. A Maker
     additionally needs `managed_worktree` and a `cwd` equal to the workspace."""
     boundary = cursor_boundary(exe, run_root=run_root)
     if not boundary.ready:
         raise CursorBoundaryError(boundary.reason)
-    exe = boundary.exe
+    exe, script, execs = boundary.exe, boundary.script, boundary.execs    # the build's node and index.js, never the launcher
     home = cursor_login_home()
     den = cursor_denials(home)
     profile_role = "maker" if role == "maker" else "panel"
     worktree = git = None
-    required = [exe, runtime.root]
+    required = [exe, script, runtime.root]
     if role in ("panel", "maker"):
         ws = _canon_grant(workspace, "the workspace")
         staged = _cursor_staged_file(staged)
@@ -2782,7 +2983,7 @@ def cursor_command(role: str, tail: "list[str]", *, exe: str, runtime: CursorRun
     else:
         ws = None
     return _cursor_validated_spawn(
-        role, tail, exe=exe, runtime=runtime, profile_role=profile_role,
+        role, tail, exe=exe, script=script, execs=execs, runtime=runtime, profile_role=profile_role,
         denials=den, workspace=ws, staged=staged, expected_model=expected_model,
         worktree=worktree, git=git, required=required)
 
@@ -2798,7 +2999,7 @@ def cursor_metadata(kind: str, bin_path: "str | None", timeout: float = 20.0,
         raise CursorBoundaryError(boundary.reason)
     rt = cursor_make_runtime([boundary.exe], run_root=run_root)
     try:
-        argv = cursor_command(kind, _CURSOR_METADATA[kind], exe=boundary.exe, runtime=rt,
+        argv = cursor_command(kind, _CURSOR_METADATA[kind], exe=bin_path, runtime=rt,
                               run_root=run_root)
         ran = _run_bounded(argv, env=cursor_child_env(rt), cwd=rt.tmp, timeout=timeout, cap=65536)
         if ran["overflow"] or not ran["group_dead"]:
@@ -2840,7 +3041,7 @@ class CursorAgentAdapter(Adapter):
     capture_in_memory = True        # never point the child at the final sidecars
     kill_group_on_exit = True       # the whole group must be dead before any tripwire
     install_hint = "see https://cursor.com/cli"
-    auth_hint = "cursor-agent login"
+    auth_hint = "AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login"
     default_model = CURSOR_DEFAULT_MODEL
     bin_env_keys = ("ALLOY_BIN_CURSOR", "ALLOY_BIN_CURSOR_AGENT")
 
@@ -2943,7 +3144,7 @@ class CursorAgentAdapter(Adapter):
         ctx["cursor_expected_model"] = effective_model
         return (["-p"] + ([] if maker else ["--mode", "ask"]) +
                 ["--output-format", "json", "--workspace", workspace, "--model", effective_model,
-                 "--trust", "--sandbox", "enabled", "--skip-worktree-setup", instruction])
+                 "--trust", "--sandbox", "disabled", "--skip-worktree-setup", instruction])
 
     def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool,
                    run_root: "str | None" = None):
@@ -3890,6 +4091,9 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         status["status"] = "stalled"
     elif status["exit_code"] != 0:
         status["status"] = "error"
+        tail = "\n".join(strip_ansi(red_err).strip().splitlines()[-10:])[-2000:]
+        if adapter.name == "cursor":
+            status["error"] = "Cursor exited %s%s" % (status["exit_code"], ": " + tail if tail else " (no stderr)")
     elif provider_error:
         # The provider itself reported failure (or produced no parseable answer):
         # exit status zero and a non-empty `result` cannot turn that into success.

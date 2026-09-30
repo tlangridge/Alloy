@@ -590,8 +590,8 @@ after execution, not an OS confinement boundary. Codex uses `workspace-write`;
 Claude/Grok use `acceptEdits` and Bash permissions; Antigravity uses `accept-edits`
 and a private per-run settings directory with write/command tools. A Cursor Maker
 runs Cursor's normal agent mode inside the macOS sandbox and can write only the
-non-Git contents of its worktree and a private runtime; a Cursor Checker runs
-`--mode ask` with only that runtime writable. Cursor profiles ship disabled, so
+non-Git contents of its worktree, a private runtime and the CLI file login; a Cursor Checker runs
+`--mode ask` with that runtime and the CLI file login writable. Cursor profiles ship disabled, so
 enable them only when the user asks (`alloy setup --enable-cursor` or `alloy
 models enable --id ID`). If the sandbox is unavailable the role is refused. No
 sandbox bypass flags. Inspect `task.json` and each worker's `status.json` for machine-readable
@@ -766,3 +766,11 @@ loop (at most three loops), with local gates and a compact host handoff.
 
 See `docs/methodology.md` for the mapping to OpenRouter Fusion and the
 host-as-judge bias disclosure, and `docs/adding-a-panelist.md` to add a CLI.
+
+Cursor login setup: `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login` once.
+All Cursor children use the file store at `~/.cursor/auth.json` (0600); the
+sandbox permits its refresh and directory chmod only, denies keychain reads and
+`/usr/bin/security` execution, and keeps the compile cache in the private runtime.
+Panels and Checkers allow only the bundled Node runtime, bundled `rg` and
+`/usr/bin/sw_vers` as literal executables. Maker commands keep their worktree
+execution grant, with `/usr/bin/security` denied. Alloy never reads the keychain.

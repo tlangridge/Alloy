@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 ALLOY = os.path.join(REPO, "bin", "alloy")
 MOCK = os.path.join(HERE, "mocks", "mock_panelist.py")
+# The fixture Cursor install (versions/<build>/{cursor-agent, node, index.js}) is built by test_execution.
+import test_execution as texec  # noqa: E402  (module import only: its test classes are not collected here)
 
 
 def run_alloy(args, env_extra=None, timeout=60, cwd=None):
@@ -369,7 +372,13 @@ class AlloyTests(unittest.TestCase):
         self.assertIn("panel matrix", proc.stderr)
 
     def test_update_check_can_be_disabled(self):
-        proc = run_alloy(["update-check"], env_extra={"ALLOY_NO_UPDATE_CHECK": "1"})
+        # A copied installation needs no lock in the checkout's protected .git.
+        import shutil
+        from unittest import mock
+        copied_bin = os.path.join(self.tmp, "copied-install", "bin")
+        shutil.copytree(os.path.dirname(ALLOY), copied_bin, ignore=shutil.ignore_patterns("__pycache__"))
+        with mock.patch(__name__ + ".ALLOY", os.path.join(copied_bin, "alloy")):
+            proc = run_alloy(["update-check"], env_extra={"ALLOY_NO_UPDATE_CHECK": "1"})
         self.assertEqual(proc.returncode, 0)
         self.assertIn("UPDATE_CHECK_DISABLED", proc.stdout)
 
@@ -1057,13 +1066,10 @@ class AntigravityKeychainFreeAuthTests(unittest.TestCase):
 
 
 class AlloyNeverTouchesKeychainTests(unittest.TestCase):
-    """Operator rule (2026-09-29): Alloy never touches the macOS keychain. bin/alloy must not
-    contain or run `/usr/bin/security` (or any `security` subcommand) or a keychain API.
-    Static (source and AST) and dynamic (nothing that runs may spawn it). What stays, on
-    purpose, is CONFIGURATION for a child CLI that uses the keychain itself: the generated
-    com.apple.security.plist that points agy at the login keychain, the Cursor sandbox's
-    Security mach-service allowance, and the Library/Keychains deny-read entry. None of
-    those reads the keychain, and none runs `security`."""
+    """Alloy never runs security or reads the keychain. The only executable spelling
+    permitted in code is the exact sandbox DENY rule, never an argv token or API.
+    Static checks ignore comments and that denial; dynamic checks watch subprocesses.
+    Antigravity's generated keychain preference file remains configuration only."""
 
     BANNED_SUBSTRINGS = (
         "/usr/bin/security", "find-generic-password", "find-internet-password",
@@ -1072,10 +1078,50 @@ class AlloyNeverTouchesKeychainTests(unittest.TestCase):
         "SecItemCopyMatching", "SecItemAdd", "SecKeychain", "import keyring", "from keyring",
     )
 
+    ALLOWANCE = "CURSOR_SYSTEM_EXEC"
+
+    @classmethod
+    def allowance_nodes(cls, tree):
+        return [n for n in tree.body if isinstance(n, __import__("ast").Assign)
+                and any(getattr(t, "id", None) == cls.ALLOWANCE for t in n.targets)]
+
     @classmethod
     def setUpClass(cls):
+        import ast
         with open(ALLOY, encoding="utf-8") as f:
-            cls.src = f.read()
+            cls.raw = f.read()
+        cls.tree = ast.parse(cls.raw)
+        lines = cls.raw.splitlines(True)
+        for node in cls.allowance_nodes(cls.tree):          # blank the one allowed constant, keep line numbers
+            for i in range(node.lineno - 1, node.end_lineno):
+                lines[i] = "\n"
+        # Comments explain the denial; they are not executable code. Strip them
+        # before scanning, and exempt only the complete literal SBPL deny string.
+        import io, tokenize
+        tokens = tokenize.generate_tokens(io.StringIO("".join(lines)).readline)
+        cls.src = tokenize.untokenize(t for t in tokens if t.type != tokenize.COMMENT)
+        cls.src = cls.src.replace("'(deny process-exec (literal \"/usr/bin/security\"))'", "'security exec denied'")
+
+    def test_the_os_version_allowance_never_includes_security_or_a_command(self):
+        import ast
+        nodes = self.allowance_nodes(self.tree)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(ast.literal_eval(nodes[0].value), ("/usr/bin/sw_vers",))
+        # It is read only by the verifier (lstat/access), which never starts anything.
+        readers = set()
+        for func in [n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef)]:
+            for node in ast.walk(func):
+                if isinstance(node, ast.Name) and node.id == self.ALLOWANCE:
+                    readers.add(func.name)
+        self.assertEqual(readers, {"_cursor_system_execs"})
+        verifier = next(n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef) and n.name == "_cursor_system_execs")
+        called = {ast.unparse(n.func) if hasattr(ast, "unparse") else getattr(n.func, "attr", getattr(n.func, "id", "?"))
+                  for n in ast.walk(verifier) if isinstance(n, ast.Call)}
+        for call in called:
+            for spawner in ("Popen", "run", "call", "check_output", "check_call", "system", "exec", "spawn", "popen"):
+                self.assertNotIn(spawner, call, call)
+        # The only security path in code is the exact SBPL denial exempted above.
+        self.assertNotIn("/usr/bin/security", self.src)
 
     def test_source_never_names_the_security_tool_or_a_keychain_api(self):
         for banned in self.BANNED_SUBSTRINGS:
@@ -1152,7 +1198,7 @@ class AntigravityKeychainHomeUnitTests(unittest.TestCase):
     gets a synthesized com.apple.security.plist with ABSOLUTE paths to the
     real login keychain. It must be a generated file, never a symlink into
     ~/Library -- the state/run dirs get zipped and shared for debugging, and
-    archivers dereference symlinks. Hermetic: HOME is a fixture dir."""
+    archivers dereference symlinks. Hermetic: home path lookup uses a fixture; HOME stays unchanged."""
 
     @classmethod
     def setUpClass(cls):
@@ -1168,10 +1214,11 @@ class AntigravityKeychainHomeUnitTests(unittest.TestCase):
                               "login.keychain-db"), "w").close()
         rundir = os.path.join(tmp, "run")
         os.makedirs(rundir, exist_ok=True)
-        env = {"HOME": fixture, "ALLOY_ANTIGRAVITY_HOME": "run",
+        env = {"ALLOY_ANTIGRAVITY_HOME": "run",
                "ANTIGRAVITY_API_KEY": api_key, "GEMINI_API_KEY": "",
                "GOOGLE_API_KEY": ""}
         with mock.patch.dict(os.environ, env), \
+             mock.patch.object(self.f.os.path, "expanduser", lambda p: fixture + p[1:] if p.startswith("~") else p), \
              mock.patch.object(self.f, "_CONFIG", {}):
             home = self.f.AntigravityAdapter()._home({"pdir": rundir})
         return fixture, home
@@ -1755,9 +1802,14 @@ class CursorCase(unittest.TestCase):
         self.dump = os.path.join(self.tmp, "sb-dump")
         self.sblog = os.path.join(self.tmp, "sandbox.log")
         self.clog = os.path.join(self.tmp, "cursor.log")
+        self.nodelog = os.path.join(self.tmp, "node.log")
+        # ALLOY_BIN_CURSOR is the build's `cursor-agent` launcher, as for a real install. The launcher
+        # is a stub that must never run; the build's `node` shim runs the mock CLI in-process.
+        self.build = texec.make_cursor_build(os.path.join(self.tmp, "install"), cli=MOCK, name=self.VERSION)
+        self.launcher = self.build.launcher
         self.env = {
             "ALLOY_CONFIG": "/dev/null", "ALLOY_USAGE": "off", "ALLOY_REPO": "none",
-            "ALLOY_BIN_CURSOR": MOCK, "MOCK_VERSION": self.VERSION,
+            "ALLOY_BIN_CURSOR": self.launcher, "MOCK_VERSION": self.VERSION, "MOCK_NODE_LOG": self.nodelog,
             # in-process doctor/estimate visit every adapter: none may reach a real CLI or the keychain
             "ALLOY_BIN_CODEX": "/no/such/x", "ALLOY_BIN_CLAUDE": "/no/such/x", "ALLOY_BIN_GROK": "/no/such/x",
             "ALLOY_BIN_LLM": "/no/such/x", "ALLOY_BIN_OPENCODE": "/no/such/x", "ALLOY_BIN_ANTIGRAVITY": "/no/such/x",
@@ -1784,6 +1836,8 @@ class CursorCase(unittest.TestCase):
         # nothing but the allowlist, so only the tests widen it (like SANDBOX_EXEC).
         for target, value in (("_CONFIG", {}), ("SANDBOX_EXEC", MOCK), ("SANDBOX_TRUSTED_UID", os.getuid()),
                               ("CURSOR_PLATFORM", sys.platform), ("log", lambda msg: None),
+                              ("CURSOR_VERSIONS_ROOT", self.build.versions),
+                              ("CURSOR_SYSTEM_EXEC", self.build.system),
                               ("CURSOR_ENV_ALLOW_PREFIXES", ("LC_", "MOCK_")),
                               ("_install_signal_handlers", lambda: None)):
             p = mock.patch.object(mod, target, value)
@@ -1852,7 +1906,7 @@ class CursorCase(unittest.TestCase):
 
     def cursor_calls(self):
         """status + inference calls (the preflight's --version probe is separate)."""
-        return [c for c in self.all_cursor_calls() if c["argv"] != ["--version"]]
+        return [c for c in self.all_cursor_calls() if c["argv"] != ["--version", "--sandbox", "disabled"]]
 
     def inference_calls(self):
         return [c for c in self.all_cursor_calls() if "--skip-worktree-setup" in c["argv"]]
@@ -1886,7 +1940,7 @@ class CursorCase(unittest.TestCase):
         tail = ad.build_args(self.prompt(), "", "consult", ctx)
         if role == "maker":     # a well-formed Maker call is a managed dispatch with cwd == workspace
             kw = dict({"managed_worktree": True, "cwd": repo}, **kw)
-        argv = self.mod.cursor_command(role, tail, exe=MOCK, runtime=rt, workspace=repo,
+        argv = self.mod.cursor_command(role, tail, exe=self.launcher, runtime=rt, workspace=repo,
                                        staged=ctx["cursor_staged"],
                                        expected_model=ctx["cursor_expected_model"], **kw)
         with open(rt.profile) as f:
@@ -2071,7 +2125,7 @@ class CursorBoundaryTests(CursorCase):
             with self.subTest(deny_paths=entry):
                 self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=entry or " ")
                 self._not_ready(entry)
-        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=os.path.dirname(MOCK))     # covers the CLI itself
+        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=self.build.dir)            # covers the CLI itself
         _mod, ad = self._not_ready("overlap")
         self.assertIn("requires", ad.boundary_reason)
         self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=None)
@@ -2099,7 +2153,7 @@ class CursorBoundaryTests(CursorCase):
                 with self.mock.patch.object(m, "SANDBOX_EXEC", path), self.mock.patch.object(m, "SANDBOX_TRUSTED_UID", uid):
                     with self.assertRaises(m.CursorBoundaryError):
                         m._verify_sandbox_exec()
-                    self.assertFalse(m.cursor_boundary(MOCK).ready)
+                    self.assertFalse(m.cursor_boundary(self.launcher).ready)
         with self.mock.patch.object(m, "SANDBOX_EXEC", MOCK):
             self.assertEqual(m._verify_sandbox_exec()[0], MOCK)
 
@@ -2501,7 +2555,7 @@ class CursorBoundaryTests(CursorCase):
             seen.append(kw.get("run_root"))
             return real(*a, **kw)
         with self.mock.patch.object(m, "cursor_command", spy):
-            rc, text = m.cursor_metadata("status", MOCK, run_root=run_root)
+            rc, text = m.cursor_metadata("status", self.launcher, run_root=run_root)
         self.assertEqual(rc, 0)
         self.assertEqual(seen, [run_root])
         self.assertEqual(len(m._CURSOR_PREFLIGHT), 1)             # one verdict, not one per spelling
@@ -2509,17 +2563,461 @@ class CursorBoundaryTests(CursorCase):
     def test_status_and_version_go_through_the_sandbox_wrapper(self):
         ad = self.mod.CursorAgentAdapter()
         self.assertEqual(ad.auth_state(), "ready")
-        rc, text = self.mod.cursor_metadata("version", MOCK)
+        rc, text = self.mod.cursor_metadata("version", self.launcher)
         self.assertEqual((rc, text.strip()), (0, self.VERSION))
         with open(self.sblog) as f:
             launched = [json.loads(line)["cmd"][0] for line in f]
-        self.assertEqual(set(launched), {"/bin/bash", os.path.realpath(MOCK)})       # nothing else was ever exec'd
-        self.assertEqual([c["argv"] for c in self.cursor_calls()], [["status"]])
+        # nothing else was ever exec'd: the probe's bash and the build's own node, never the launcher
+        self.assertEqual(set(launched), {"/bin/bash", os.path.realpath(self.build.node)})
+        self.assertFalse(os.path.exists(self.build.marker))
+        self.assertEqual([c["argv"] for c in self.cursor_calls()], [["status", "--sandbox", "disabled"]])
         with self.assertRaises(self.mod.CursorBoundaryError):
-            self.mod.cursor_command("bogus", ["status"], exe=MOCK, runtime=self.runtime())
+            self.mod.cursor_command("bogus", ["status"], exe=self.launcher, runtime=self.runtime())
+
+
+class CursorBuildResolutionTests(CursorCase):
+    """Alloy never executes the bash launcher: it resolves the pinned build directory (reading
+    symlinks and never a wrapper) and starts that build's own bundled node directly. Fixtures
+    only; the launcher stub records an execution in `self.build.marker`."""
+
+    def resolve(self, *path):
+        return self.mod.cursor_resolve_build(path[0] if path else self.launcher)
+
+    def refused(self, *path, needle=""):
+        with self.assertRaises(self.mod.CursorBoundaryError) as ctx:
+            self.resolve(*path)
+        self.assertIn(needle, str(ctx.exception))
+        return str(ctx.exception)
+
+    def not_ready_reason(self, mod, path=None):
+        b = mod.cursor_boundary(path or self.launcher)
+        self.assertFalse(b.ready)
+        return b.reason
+
+    def links(self, *names):
+        """<tmp>/bin/<name> symlinks in a chain that ends at the build's launcher."""
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        target = self.launcher
+        for name in reversed(names):
+            link = os.path.join(bindir, name)
+            os.symlink(target, link)
+            target = link
+        return os.path.join(bindir, names[0])
+
+    def wrapper(self, name="cursor-agent-guard", text=None):
+        """A wrapper/guard script: it names no path at all, and running it leaves a marker."""
+        path = os.path.join(self.tmp, "wrappers", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        marker = os.path.join(self.tmp, "wrapper-ran")
+        with open(path, "w") as f:
+            f.write(text if text is not None else '#!/bin/bash\necho executed >> "%s"\nexec somewhere-else "$@"\n' % marker)
+        os.chmod(path, 0o755)
+        return path, marker
+
+    def test_the_launcher_path_resolves_to_its_own_build_directory(self):
+        build = self.resolve()
+        self.assertEqual((build.dir, build.node, build.script, build.build),
+                         (os.path.realpath(self.build.dir), os.path.realpath(self.build.node),
+                          os.path.realpath(self.build.index), self.VERSION))
+        # a node, an index.js or the directory itself resolves to the same build
+        for path in (self.build.node, self.build.index, self.build.dir):
+            self.assertEqual(self.resolve(path).dir, build.dir, path)
+
+    def test_a_symlink_chain_is_followed_to_the_build_directory(self):
+        for names in (("cursor-agent",), ("agent", "cursor-agent"), ("agent", "cursor-agent", "alias")):
+            with self.subTest(chain=names):
+                for leftover in os.listdir(os.path.join(self.tmp, "bin")) if os.path.isdir(os.path.join(self.tmp, "bin")) else []:
+                    os.remove(os.path.join(self.tmp, "bin", leftover))
+                entry = self.links(*names)
+                self.assertTrue(os.path.islink(entry))
+                self.assertEqual(self.resolve(entry).node, os.path.realpath(self.build.node))
+        self.assertFalse(os.path.exists(self.build.marker))                 # resolving executes nothing
+
+    def test_the_path_entry_is_used_and_the_launcher_is_never_executed(self):
+        entry = self.links("agent", "cursor-agent")
+        self.setenv(ALLOY_BIN_CURSOR=None, PATH=os.path.dirname(entry) + os.pathsep + os.environ["PATH"])
+        mod = self.fresh()
+        ad = mod.CursorAgentAdapter()
+        self.assertEqual(ad.resolved_bin(), os.path.join(os.path.dirname(entry), "cursor-agent"))
+        self.assertEqual(ad.auth_state(), "ready")
+        self.assertEqual(mod.cursor_metadata("version", ad.resolved_bin())[1].strip(), self.VERSION)
+        st = self.dispatch(repo=self.repo(), adapter=ad)
+        self.assertEqual(st["status"], "ok", st)
+        self.assertFalse(os.path.exists(self.build.marker), "the bash launcher was executed")
+        self.assertEqual(st["command"][3:6], [os.path.realpath(self.build.node), "--use-system-ca",
+                                              os.path.realpath(self.build.index)])
+
+    def test_a_wrapper_script_is_never_executed_and_never_followed(self):
+        guard, marker = self.wrapper()
+        entry = os.path.join(self.tmp, "wrappers", "cursor-agent")
+        os.symlink(guard, entry)                        # PATH -> cursor-agent -> a regular guard script
+        for path in (guard, entry):
+            with self.subTest(path=path):
+                self.assertEqual(self.resolve(path).node, os.path.realpath(self.build.node))
+        self.setenv(ALLOY_BIN_CURSOR=entry)
+        mod = self.fresh()
+        ad = mod.CursorAgentAdapter()
+        self.assertEqual(ad.auth_state(), "ready")
+        st = self.dispatch(repo=self.repo(), adapter=ad)
+        self.assertEqual(st["status"], "ok", st)
+        self.assertFalse(os.path.exists(marker), "the wrapper script was executed")
+        self.assertFalse(os.path.exists(self.build.marker), "the bash launcher was executed")
+
+    def test_only_a_supported_build_under_the_versions_root_is_used_behind_a_wrapper(self):
+        guard, _marker = self.wrapper()
+        other = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(other)
+        with self.mock.patch.object(self.mod, "CURSOR_VERSIONS_ROOT", other):
+            self.refused(guard, needle="no supported Cursor build directory")
+        unsupported = texec.make_cursor_build(os.path.join(self.tmp, "unsupported-root"), cli=MOCK, name="2026.01.01-abcdef0")
+        with self.mock.patch.object(self.mod, "CURSOR_VERSIONS_ROOT", unsupported.versions):
+            self.refused(guard, needle="no supported Cursor build directory")     # an unsupported name is never searched for
+        for text in ("not a script\n", "\x7fELF" + "\0" * 8):
+            plain = os.path.join(self.tmp, "wrappers", "plain")
+            with open(plain, "w") as f:
+                f.write(text)
+            self.refused(plain, needle="neither inside a Cursor build directory nor a wrapper script")
+
+    def test_a_path_that_does_not_exist_never_falls_back_to_the_installed_build(self):
+        for path in ("/no/such/cursor-agent", os.path.join(self.tmp, "missing", "cursor-agent"), "", None):
+            with self.subTest(path=path):
+                self.refused(path, needle="not found")
+        self.assertEqual(self.resolve().dir, os.path.realpath(self.build.dir))      # the build itself is there
+
+    def test_a_missing_node_or_entry_script_refuses_the_build(self):
+        for name, needle in (("node", "no node runtime"), ("index.js", "no index.js")):
+            with self.subTest(missing=name):
+                path = os.path.join(self.build.dir, name)
+                kept = path + ".kept"
+                os.rename(path, kept)
+                try:
+                    self.refused(needle=needle)
+                    mod = self.fresh()
+                    ad = mod.CursorAgentAdapter()
+                    self.assertFalse(ad.cursor_boundary_ready)
+                    self.assertIn(needle, ad.boundary_reason)
+                    self.assertEqual(ad.auth_state(), "sandbox_unavailable")
+                    self.assertEqual(self.cursor_calls(), [])
+                    self.assertEqual(self.sandbox_calls(), 0)              # nothing started under any profile
+                finally:
+                    os.rename(kept, path)
+        self.assertEqual(self.resolve().node, os.path.realpath(self.build.node))
+
+    def test_a_writable_or_foreign_or_linked_node_is_refused(self):
+        node, index, build_dir = self.build.node, self.build.index, self.build.dir
+        for label, path, mode, needle in (
+                ("group-writable node", node, 0o775, "writable by group or other"),
+                ("world-writable node", node, 0o757, "writable by group or other"),
+                ("group-writable index.js", index, 0o664, "writable by group or other"),
+                ("world-writable index.js", index, 0o666, "writable by group or other"),
+                ("group-writable directory", build_dir, 0o770, "writable by group or other"),
+                ("world-writable directory", build_dir, 0o707, "writable by group or other"),
+                ("node that cannot run", node, 0o644, "not executable")):
+            with self.subTest(label):
+                original = stat.S_IMODE(os.stat(path).st_mode)
+                os.chmod(path, mode)
+                try:
+                    self.refused(needle=needle)
+                    mod = self.fresh()
+                    ad = mod.CursorAgentAdapter()
+                    self.assertFalse(ad.cursor_boundary_ready)
+                    self.assertEqual(self.sandbox_calls(), 0)
+                finally:
+                    os.chmod(path, original)
+        # a symlinked node or index.js: even one that points at a perfectly good file
+        for name, needle in (("node", "not a regular file"), ("index.js", "not a regular file")):
+            with self.subTest(symlinked=name):
+                path = os.path.join(build_dir, name)
+                kept = path + ".kept"
+                os.rename(path, kept)
+                os.symlink(kept, path)
+                try:
+                    self.refused(needle=needle)
+                finally:
+                    os.remove(path)
+                    os.rename(kept, path)
+        # a file owned by someone else (the resolver compares with the current uid)
+        real_uid = os.getuid()
+        with self.mock.patch.object(self.mod.os, "getuid", return_value=real_uid + 1):
+            self.refused(needle="not owned by the current user")
+        self.assertEqual(self.resolve().node, os.path.realpath(self.build.node))
+
+    def test_a_directory_that_is_a_symlink_is_refused(self):
+        link_root = os.path.join(self.tmp, "linked-root")
+        os.makedirs(link_root)
+        os.symlink(self.build.dir, os.path.join(link_root, self.VERSION))
+        guard, _marker = self.wrapper()
+        with self.mock.patch.object(self.mod, "CURSOR_VERSIONS_ROOT", link_root):
+            self.refused(guard, needle="not a regular directory")
+
+    def test_an_unsupported_build_is_refused_before_anything_starts(self):
+        for name in ("2026.01.01-abcdef0", "2026.09.29-64d2043", "2026.09.28-fffffff", "2099.12.31-deadbee"):
+            with self.subTest(build=name):
+                other = texec.make_cursor_build(os.path.join(self.tmp, "b-" + name), cli=MOCK, name=name)
+                self.refused(other.launcher, needle="unsupported Cursor CLI version/build")
+                mod = self.fresh()
+                self.assertIn("unsupported Cursor CLI version/build", self.not_ready_reason(mod, other.launcher))
+                ad = mod.CursorAgentAdapter()
+                self.setenv(ALLOY_BIN_CURSOR=other.launcher)
+                self.assertFalse(ad.cursor_boundary_ready)
+                self.assertEqual(ad.auth_state(), "sandbox_unavailable")
+                self.assertEqual(self.sandbox_calls(), 0)
+                self.assertEqual(self.all_cursor_calls(), [])
+        # a directory name that is not a build name at all is not a build directory
+        odd = os.path.join(self.tmp, "not-a-build")
+        os.makedirs(odd)
+        for name in ("cursor-agent", "node", "index.js"):
+            with open(os.path.join(odd, name), "w") as f:
+                f.write("\x7fELF\n")
+        self.refused(os.path.join(odd, "cursor-agent"), needle="neither inside a Cursor build directory")
+
+    def test_a_build_that_reports_another_version_than_its_directory_is_refused(self):
+        other = "2026.09.30-abc1234"
+        mod = self.fresh()
+        with self.mock.patch.object(mod, "CURSOR_SUPPORTED_VERSIONS", (self.VERSION, other)):
+            self.setenv(MOCK_VERSION=other)
+            self.assertIn("different build than its directory", self.not_ready_reason(mod))
+        self.setenv(MOCK_VERSION=self.VERSION)
+        again = self.fresh()                            # the first verdict is cached on the build's files
+        with self.mock.patch.object(again, "CURSOR_SUPPORTED_VERSIONS", (self.VERSION, other)):
+            self.assertTrue(again.cursor_boundary(self.launcher).ready)
+
+    def test_the_gateway_argv_is_the_builds_node_its_fixed_flag_and_its_entry_script(self):
+        repo = self.repo()
+        argv, prof, tail = self.gateway("panel", repo)
+        node, index = os.path.realpath(self.build.node), os.path.realpath(self.build.index)
+        self.assertEqual(argv[3:6], [node, "--use-system-ca", index])
+        self.assertEqual(argv[6:], tail)
+        self.assertNotIn(self.launcher, argv)
+        self.assertEqual(self.mod.CURSOR_NODE_ARGS, ("--use-system-ca",))
+        # the fixed prefix is not something a caller can supply or replace: the grammar refuses it
+        rt = self.runtime()
+        ws, staged = os.path.realpath(repo), self.mod._cursor_staged_file(argv[-1].split('"')[1])
+        for injected in (["--use-system-ca"], [index], ["--experimental-permission"], ["--require", "x.js"], [node]):
+            with self.subTest(injected=injected), self.assertRaises(self.mod.CursorBoundaryError):
+                self.mod.cursor_command("panel", injected + tail, exe=self.launcher, runtime=rt, workspace=ws,
+                                        staged=staged, expected_model="composer-2.5[fast=false]")
+
+    def test_every_cursor_process_sees_the_clis_name_and_a_compile_cache_inside_its_runtime(self):
+        self.setenv(CURSOR_INVOKED_AS="agent", NODE_COMPILE_CACHE="/private/var/poison-compile-cache")
+        mod = self.fresh()
+        ad = mod.CursorAgentAdapter()
+        self.assertEqual(ad.auth_state(), "ready")
+        st = self.dispatch(repo=self.repo(), adapter=ad)
+        self.assertEqual(st["status"], "ok", st)
+        with open(self.nodelog) as f:
+            starts = [json.loads(line) for line in f]
+        self.assertGreaterEqual(len(starts), 4)         # both preflight probes, status and the panel call
+        node, index = os.path.realpath(self.build.node), os.path.realpath(self.build.index)
+        for start in starts:
+            self.assertEqual(start["argv"][:3], [node, "--use-system-ca", index])
+            self.assertEqual(start["invoked_as"], "cursor-agent")                    # not the ambient value
+            self.assertTrue(start["compile_cache"].endswith(os.path.join("runtime", "cache", "cursor-compile-cache")))
+            self.assertNotIn("poison", start["compile_cache"])
+        self.assertFalse(os.path.exists(self.build.marker))
+        self.assertIn("CURSOR_INVOKED_AS", self.mod.CURSOR_ENV_ALLOW)
+        self.assertNotIn("NODE_COMPILE_CACHE", self.mod.CURSOR_ENV_ALLOW)    # provided by the runtime, never inherited
+
+    def test_the_verdict_is_reproved_when_the_runtime_or_entry_script_changes(self):
+        mod = self.fresh()
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        first = self.sandbox_calls()
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        self.assertEqual(self.sandbox_calls(), first)                       # cached on the build's files
+        with open(self.build.index, "a") as f:
+            f.write("// changed\n")
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        self.assertGreater(self.sandbox_calls(), first)                     # a changed entry script re-proves
+
+
+class CursorExecAllowListTests(CursorCase):
+    """A panel/Checker profile allows exactly three literal executables: the build's node, its
+    bundled rg and /usr/bin/sw_vers. The OS-version tool stand in as fixtures
+    here (a unit test never starts the real ones); the real gate asserts the real paths."""
+
+    def fixture_tool(self, name, mode=0o755):
+        path = os.path.join(self.tmp, "tools", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(path, mode)
+        return path
+
+    def not_ready(self, mod):
+        b = mod.cursor_boundary(self.launcher)
+        self.assertFalse(b.ready)
+        return b.reason
+
+    def test_the_boundary_reports_exactly_the_three_executables_and_the_profile_allows_them(self):
+        b = self.mod.cursor_boundary(self.launcher)
+        self.assertTrue(b.ready, b.reason)
+        want = (os.path.realpath(self.build.node), os.path.realpath(self.build.rg)) + tuple(self.build.system)
+        self.assertEqual((b.exe,) + tuple(b.execs), want)
+        self.assertEqual(len(self.build.system), 1)
+        self.assertEqual(self.mod.CURSOR_SYSTEM_EXEC, self.build.system)              # the patched constant
+        pristine = _import_alloy_module()
+        self.assertEqual(pristine.CURSOR_SYSTEM_EXEC, ("/usr/bin/sw_vers",))
+        # the profile the CLI is started under (the preflight's panel start, then the gateway's)
+        panel_cli = self.profiles()[1]
+        self.assertIn("role=panel", panel_cli)
+        self.assertEqual([l for l in panel_cli.splitlines() if "process-exec" in l],
+                         ["(deny process-exec*)",
+                          "(allow process-exec " + " ".join('(literal "%s")' % p for p in want) + ")"])
+        for path in want:
+            self.assertEqual(self.decision(panel_cli, "process-exec", path), "allow", path)
+        for path in ("/bin/sh", "/bin/bash", "/usr/bin/open", "/usr/bin/log", "/usr/bin/env", "/usr/bin/true",
+                     "/usr/bin/security", "/usr/bin/sw_vers", os.path.realpath(self.launcher)):
+            self.assertEqual(self.decision(panel_cli, "process-exec", path), "deny", path)   # the real system paths are not the fixtures
+
+    def test_a_bundled_rg_that_is_missing_writable_linked_or_not_executable_refuses_the_build(self):
+        rg = self.build.rg
+        kept = rg + ".kept"
+        os.rename(rg, kept)
+        try:
+            with self.assertRaises(self.mod.CursorBoundaryError) as ctx:
+                self.mod.cursor_resolve_build(self.launcher)
+            self.assertIn("no bundled rg", str(ctx.exception))
+            os.symlink(kept, rg)
+            with self.assertRaises(self.mod.CursorBoundaryError) as ctx:
+                self.mod.cursor_resolve_build(self.launcher)
+            self.assertIn("not a regular file", str(ctx.exception))
+        finally:
+            if os.path.lexists(rg):
+                os.remove(rg)
+            os.rename(kept, rg)
+        for mode, needle in ((0o775, "writable by group or other"), (0o757, "writable by group or other"),
+                             (0o644, "not executable")):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(rg, mode)
+                try:
+                    with self.assertRaises(self.mod.CursorBoundaryError) as ctx:
+                        self.mod.cursor_resolve_build(self.launcher)
+                    self.assertIn(needle, str(ctx.exception))
+                    mod = self.fresh()
+                    self.assertIn(needle, self.not_ready(mod))
+                    self.assertEqual(self.sandbox_calls(), 0)
+                finally:
+                    os.chmod(rg, 0o755)
+        with self.mock.patch.object(self.mod.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(self.mod.CursorBoundaryError) as ctx:
+                self.mod.cursor_resolve_build(self.launcher)
+            self.assertIn("not owned by the current user", str(ctx.exception))
+        self.assertEqual(self.mod.cursor_resolve_build(self.launcher).rg, os.path.realpath(self.build.rg))
+
+    def test_the_system_tools_are_verified_like_sandbox_exec_before_anything_starts(self):
+        good_sw_vers, = self.build.system
+        link = os.path.join(self.tmp, "tools", "linked-sw-vers")
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(good_sw_vers, link)
+        directory = os.path.join(self.tmp, "tools", "a-directory")
+        os.makedirs(directory)
+        cases = (("missing", os.path.join(self.tmp, "tools", "no-such-tool"), "is missing"),
+                 ("symlink", link, "not a regular, non-symlink file"),
+                 ("directory", directory, "not a regular, non-symlink file"),
+                 ("group-writable", self.fixture_tool("gw", 0o775), "writable by group or other"),
+                 ("world-writable", self.fixture_tool("ww", 0o757), "writable by group or other"),
+                 ("not executable", self.fixture_tool("nx", 0o644), "not executable"))
+        for label, bad, needle in cases:
+            for position in (0,):                       # the OS-version tool is verified
+                with self.subTest(case=label, position=position):
+                    tools = [good_sw_vers]
+                    tools[position] = bad
+                    mod = self.mod = self.fresh()
+                    with self.mock.patch.object(mod, "CURSOR_SYSTEM_EXEC", tuple(tools)):
+                        reason = self.not_ready(mod)
+                        self.assertIn(needle, reason)
+                        ad = mod.CursorAgentAdapter()
+                        self.assertFalse(ad.cursor_boundary_ready)
+                        self.assertEqual(ad.auth_state(), "sandbox_unavailable")
+                        self.assertEqual(self.dispatch(repo=self.repo("r-%s-%d" % (label, position)), adapter=ad,
+                                                 name="d-%s-%d" % (label, position))["status"], "error")
+                    self.assertEqual(self.sandbox_calls(), 0)             # no profile was ever run
+                    self.assertEqual(self.all_cursor_calls(), [])
+        # owned by someone other than the trusted user (root in production)
+        mod = self.fresh()
+        with self.mock.patch.object(mod, "SANDBOX_TRUSTED_UID", os.getuid() + 1):
+            self.assertIn("not owned by the trusted user", self.not_ready(mod))
+        self.assertEqual(self.sandbox_calls(), 0)
+        # and a good pair is accepted
+        self.assertTrue(self.fresh().cursor_boundary(self.launcher).ready)
+
+    def test_a_denial_that_covers_a_system_tool_makes_cursor_refuse_instead_of_dropping_it(self):
+        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=self.build.system[0])
+        self.assertIn("requires", self.not_ready(self.fresh()))
+
+    def test_the_verdict_is_reproved_when_a_system_tool_changes(self):
+        mod = self.fresh()
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        first = self.sandbox_calls()
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        self.assertEqual(self.sandbox_calls(), first)
+        with open(self.build.system[0], "a") as f:
+            f.write("# changed\n")
+        self.assertTrue(mod.cursor_boundary(self.launcher).ready)
+        self.assertGreater(self.sandbox_calls(), first)
+
+    def test_alloy_itself_never_runs_security_or_any_system_tool(self):
+        spawned = []
+        real = subprocess.Popen
+
+        def spy(argv, *a, **k):
+            spawned.append(list(argv))
+            return real(argv, *a, **k)
+        with self.mock.patch.object(self.mod.subprocess, "Popen", spy):
+            ad = self.mod.CursorAgentAdapter()
+            self.assertEqual(ad.auth_state(), "ready")
+            self.dispatch(repo=self.repo(), adapter=ad)
+        names = {os.path.basename(a) for argv in spawned for a in argv if isinstance(a, str)}
+        for tool in ("security", "sw_vers", "rg", "sh", "open", "log"):
+            self.assertNotIn(tool, names, tool)
+        self.assertFalse(any(a in self.build.system for argv in spawned for a in argv))
 
 
 class CursorProfileTests(CursorCase):
+    def test_every_profile_allows_only_the_file_login_refresh_and_denies_keychains(self):
+        home = os.path.join(self.tmp, "login-home")
+        os.makedirs(os.path.join(home, ".cursor"))
+        rt = self.runtime()
+        den = self.mod.cursor_denials(home=home)
+        auth_dir = os.path.join(home, ".cursor")
+        auth = os.path.join(auth_dir, "auth.json")
+        for role in ("panel", "maker"):
+            with self.subTest(role=role), self.mock.patch.object(self.mod, "cursor_login_home", return_value=home):
+                prof = self.mod.cursor_sbpl(role, exe=self.build.node, runtime=rt, denials=den,
+                                            worktree=os.path.join(self.tmp, "owned-wt") if role == "maker" else None)
+                for op in ("file-read-data", "file-write-data", "file-write-create", "file-write-mode"):
+                    self.assertEqual(self.decision(prof, op, auth), "allow", op)
+                self.assertEqual(self.decision(prof, "file-write-mode", auth_dir), "allow")
+                for path in (auth_dir, auth + ".tmp", auth_dir + "/settings.json", auth + "/child"):
+                    self.assertEqual(self.decision(prof, "file-write-data", path), "deny", path)
+                keychain = os.path.join(home, "Library", "Keychains", "login.keychain-db")
+                for op in ("file-read-data", "file-read-metadata"):
+                    self.assertEqual(self.decision(prof, op, keychain), "deny", op)
+                self.assertEqual(self.decision(prof, "process-exec", "/usr/bin/security"), "deny")
+                for service in ("com.apple.SecurityServer", "com.apple.securityd.xpc"):
+                    self.assertEqual(self.decision(prof, "mach-lookup", service), "deny")
+        # A link must never turn a credential write grant into access to another path.
+        target = os.path.join(self.tmp, "elsewhere")
+        with open(target, "w") as handle:
+            handle.write("untouched")
+        os.symlink(target, auth)
+        with self.mock.patch.object(self.mod, "cursor_login_home", return_value=home):
+            with self.assertRaisesRegex(self.mod.CursorBoundaryError, "credential file is a symlink"):
+                self.mod.cursor_sbpl("panel", exe=self.build.node, runtime=rt, denials=den)
+        os.unlink(auth)
+        os.link(target, auth)
+        os.chmod(target, 0o600)
+        with self.mock.patch.object(self.mod, "cursor_login_home", return_value=home):
+            with self.assertRaisesRegex(self.mod.CursorBoundaryError, "no hard links"):
+                self.mod.cursor_sbpl("panel", exe=self.build.node, runtime=rt, denials=den)
+        os.unlink(auth)
+        os.rmdir(auth_dir)
+        os.symlink(self.tmp, auth_dir)
+        with self.mock.patch.object(self.mod, "cursor_login_home", return_value=home):
+            with self.assertRaisesRegex(self.mod.CursorBoundaryError, "credential directory is a symlink"):
+                self.mod.cursor_sbpl("panel", exe=self.build.node, runtime=rt, denials=den)
+
     def test_panel_profile_allows_only_the_private_runtime(self):
         repo = self.repo()
         wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
@@ -2528,6 +3026,9 @@ class CursorProfileTests(CursorCase):
         home = self.mod.cursor_login_home()
         d = lambda op, path: self.decision(prof, op, path)
         self.assertEqual(argv[:3], [MOCK, "-f", rt.profile])
+        # the build's own node, started directly with the CLI's fixed prefix: never the bash launcher
+        self.assertEqual(argv[3:6], [os.path.realpath(self.build.node), "--use-system-ca",
+                                     os.path.realpath(self.build.index)])
         for base in (rt.state, rt.cache, rt.tmp):
             self.assertEqual(d("file-write-create", base + "/x"), "allow", base)
             self.assertEqual(d("file-write-data", base + "/a/b"), "allow", base)
@@ -2535,6 +3036,7 @@ class CursorProfileTests(CursorCase):
         denied = [wt + "/tracked.txt", wt + "/new.txt", wt + "/.git", repo + "/x", repo + "/.git/config",
                   home + "/x", home + "/.cursor/x", home + "/.local/share/cursor-agent/versions/x",
                   home + "/Library/Caches/x", home + "/.config/x", os.path.dirname(MOCK) + "/x",
+                  self.build.dir + "/x", self.build.dir + "/.running/x", self.build.dir + "/index.js",
                   os.path.join(self.tmp, "runs", "x"), rt.root + "/x", rt.root + "/runtime/x", rt.root + "/profile.sb",
                   rt.canary + "/canary.txt", rt.canary_outside + "/canary.txt", tempfile.gettempdir() + "/x",
                   "/tmp/x", "/private/tmp/x", "/etc/x", "/usr/local/x"]
@@ -2547,11 +3049,25 @@ class CursorProfileTests(CursorCase):
             self.assertEqual(d("file-write-create", path), "deny", path)
         self.assertEqual(d("file-link", rt.tmp + "/link"), "deny")          # even into a writable root
         self.assertEqual(d("file-link", wt + "/link"), "deny")
-        self.assertEqual(d("process-exec", MOCK), "allow")                  # the resolved CLI only
-        for tool in ("/usr/bin/true", "/bin/bash", "/bin/sh", "/usr/bin/env", "/usr/bin/git", "/usr/bin/security"):
-            self.assertEqual(d("process-exec", tool), "deny", tool)
+        # Process execution is denied except exactly three literal paths: the build's own node, its
+        # bundled rg and sw_vers (a fixture stands in for the OS-version tool here; the real
+        # gate asserts /usr/bin/sw_vers). One allow rule, in this order. Not the
+        # launcher, not the entry script, no shell, no open, no log, no coreutils.
+        allowed = [os.path.realpath(self.build.node), os.path.realpath(self.build.rg)] + list(self.build.system)
+        for path in allowed:
+            self.assertEqual(d("process-exec", path), "allow", path)
+        exec_rules = [line for line in prof.splitlines() if line.startswith("(allow process-exec")]
+        self.assertEqual(exec_rules, ["(allow process-exec " + " ".join('(literal "%s")' % p for p in allowed) + ")"])
+        self.assertEqual([line for line in prof.splitlines() if "process-exec" in line],
+                         ["(deny process-exec*)"] + exec_rules)
+        for tool in (self.launcher, self.build.index, "/usr/bin/true", "/bin/bash", "/bin/sh", "/usr/bin/env",
+                     "/usr/bin/git", "/usr/bin/open", "/usr/bin/log", "/usr/bin/security", "/usr/bin/sw_vers",
+                     "/usr/bin/basename", "/usr/bin/dirname", "/bin/realpath", "/usr/bin/realpath",
+                     "/usr/bin/rg", self.build.dir + "/spawn-helper", self.build.dir + "/cursorsandbox"):
+            self.assertEqual(d("process-exec", tool), "deny", tool)     # the fixture tools are not the real ones
         self.assertEqual(d("file-read-data", wt + "/tracked.txt"), "allow")      # reads of the repo stay possible
-        self.assertEqual(d("file-read-data", MOCK), "allow")
+        self.assertEqual(d("file-read-data", self.build.node), "allow")
+        self.assertEqual(d("file-read-data", self.build.index), "allow")
         self.assertEqual(d("network-outbound", "api2.cursor.sh:443"), "allow")  # the provider network is needed
         # ... but a path is a Unix-domain socket, and only the resolver's is reachable
         self.assertEqual(d("network-outbound", "/x"), "deny")
@@ -2580,7 +3096,12 @@ class CursorProfileTests(CursorCase):
         self.assertEqual(d("file-link", rt.tmp + "/link"), "deny")
         self.assertEqual(d("process-exec", "/usr/bin/true"), "allow")       # repository commands run
         self.assertEqual(d("process-exec", "/bin/bash"), "allow")
-        self.assertNotIn("(deny process-exec", prof)
+        self.assertIn('(deny process-exec (literal "/usr/bin/security"))', prof)
+        self.assertEqual(d("process-exec", "/usr/bin/security"), "deny")
+        # A Maker allows the three executables a panel/Checker is limited to (it allows everything)
+        for path in [os.path.realpath(self.build.node), os.path.realpath(self.build.rg), *self.build.system,
+                     "/usr/bin/sw_vers"]:
+            self.assertEqual(d("process-exec", path), "allow", path)
         # The Git denials come after the broader worktree grant, or they would not win.
         lines = prof.splitlines()
         grant = next(i for i, l in enumerate(lines) if l.startswith("(allow file-write*") and wt in l)
@@ -2635,15 +3156,16 @@ class CursorProfileTests(CursorCase):
                 self.assertEqual(d("mach-task-read", target="others"), "deny")
                 self.assertEqual(d("mach-task-read", target="self"), "allow")
                 # Mach services that act for a caller outside its sandbox: every lookup is
-                # denied unless it is on the exact allowlist (the keychain login item, TLS and
-                # name resolution stay reachable), so an UNLISTED service is unreachable too
+                # denied unless it is on the exact allowlist. TLS and name resolution stay
+                # reachable; file credentials are used and keychain services stay denied.
+                # An UNLISTED service is unreachable too.
                 for service in self.mod.CURSOR_MACH_RELAY_SERVICES:
                     self.assertEqual(d("mach-lookup", service), "deny", service)
-                for service in ("com.apple.SecurityServer", "com.apple.trustd", "com.apple.system.opendirectoryd.libinfo"):
+                for service in ("com.apple.trustd", "com.apple.system.opendirectoryd.libinfo"):
                     self.assertEqual(d("mach-lookup", service), "allow", service)
                 for service in self.mod.CURSOR_MACH_ALLOW:
                     self.assertEqual(d("mach-lookup", service), "allow", service)
-                for unlisted in ("com.example.relay", "com.apple.some.unlisted.service", "org.tmux.relay",
+                for unlisted in ("com.apple.SecurityServer", "com.apple.securityd.xpc", "com.example.relay", "com.apple.some.unlisted.service", "org.tmux.relay",
                                  "com.docker.socket", "com.apple.coreservices.uiagent",
                                  "com.apple.SecurityServer.extra", "com.apple.trustd2", ""):
                     self.assertEqual(d("mach-lookup", unlisted), "deny", unlisted)
@@ -2753,7 +3275,7 @@ class CursorProfileTests(CursorCase):
             seen.append(prof)
         rt = self.runtime()
         for kind in ("status", "version", "help", "models"):      # discovery/metadata use the panel profile
-            self.mod.cursor_command(kind, self.mod._CURSOR_METADATA[kind], exe=MOCK, runtime=rt)
+            self.mod.cursor_command(kind, self.mod._CURSOR_METADATA[kind], exe=self.launcher, runtime=rt)
             with open(rt.profile) as f:
                 seen.append(f.read())
         self.assertEqual(len(seen), 6)
@@ -2768,7 +3290,7 @@ class CursorProfileTests(CursorCase):
             # contains "secret" (any case), and everything beneath it -- a pattern, because
             # ALLOY_CURSOR_DENY_READ_PATHS refuses globs.
             for root in ("/private/tmp", "/tmp"):
-                for name in ("my-secrets", "anvil-secret.abc123", "SECRETS", "db_Secret.txt", "secret", "x-SeCrEt-y"):
+                for name in ("my-secrets", "tool-secret.abc123", "SECRETS", "db_Secret.txt", "secret", "x-SeCrEt-y"):
                     for op in ("file-read-data", "file-read-metadata"):
                         self.assertEqual(self.decision(prof, op, "%s/%s" % (root, name)), "deny", (root, name))
                     self.assertEqual(self.decision(prof, "file-read-data", "%s/%s/child/x" % (root, name)), "deny")
@@ -2778,8 +3300,8 @@ class CursorProfileTests(CursorCase):
             self.assertEqual(self.decision(prof, "file-read-data", "/private/tmpsecret"), "allow")
             self.assertEqual(self.decision(prof, "file-read-data", "/private/var/secret"), "allow")
             # Public repository: no operator-specific path is named in the built-in profile.
-            self.assertNotIn("openclaw", prof.lower())
-            self.assertNotIn("anvil", prof.lower())
+            self.assertNotIn("exampletool", prof.lower())
+            self.assertNotIn("exampleops", prof.lower())
             # Alloy's own secrets root and the future `alloy secrets` store
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "routing", "jev-key")), "deny")
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "state", "alloy", "secrets", "k")), "deny")
@@ -2790,11 +3312,11 @@ class CursorProfileTests(CursorCase):
     def test_operator_specific_paths_are_not_built_in_and_operators_add_their_own(self):
         with open(ALLOY, encoding="utf-8") as f:
             src = f.read().lower()
-        for name in ("openclaw", "anvil"):
+        for name in ("exampletool", "exampleops"):
             self.assertNotIn(name, src)
-        self.assertNotIn(".openclaw/secrets", self.mod._CURSOR_HOME_DENIALS)
+        self.assertNotIn(".exampletool/secrets", self.mod._CURSOR_HOME_DENIALS)
         home = self.mod.cursor_login_home()
-        private = os.path.join(home, ".openclaw", "secrets")
+        private = os.path.join(home, ".exampletool", "secrets")
         repo = self.repo()
         _a, prof, _ = self.gateway("panel", repo)
         self.assertEqual(self.decision(prof, "file-read-data", private), "allow")     # not built in
@@ -2803,7 +3325,7 @@ class CursorProfileTests(CursorCase):
         for path in (private, os.path.join(private, "k")):
             self.assertEqual(self.decision(prof, "file-read-data", path), "deny")
         with self.assertRaises(self.mod.CursorBoundaryError):                          # globs stay refused
-            self.mod.cursor_denials(extra="/private/tmp/anvil-secret.*")
+            self.mod.cursor_denials(extra="/private/tmp/tool-secret.*")
 
     def test_configured_denials_are_additive_and_cannot_remove_builtins(self):
         extra = os.path.join(self.tmp, "extra-denied")
@@ -2859,7 +3381,7 @@ class CursorProfileTests(CursorCase):
         tricky = os.path.join(self.tmp, 'we"ird\\dir')
         self.assertEqual(m._sb_path(tricky), '"' + self.tmp + '/we\\"ird\\\\dir"')
         rt = self.runtime()
-        prof = m.cursor_sbpl("panel", exe=MOCK, runtime=rt, denials=m.CursorDenials((tricky,), ()))
+        prof = m.cursor_sbpl("panel", exe=self.build.node, runtime=rt, denials=m.CursorDenials((tricky,), ()))
         self.assertEqual(self.decision(prof, "file-read-data", tricky + "/f"), "deny")      # the literal round-trips
         self.assertEqual(self.decision(prof, "file-read-data", self.tmp + "/weird/f"), "allow")
         for bad in ("relative", "/a/../b", "/a/*", "/a/b/", "", "/x\ny", tricky):
@@ -2877,7 +3399,7 @@ class CursorProfileTests(CursorCase):
         with self.mock.patch.object(m, "cursor_login_home", lambda: home):
             den = m.cursor_denials()
             rt = self.runtime()
-            prof = m.cursor_sbpl("panel", exe=MOCK, runtime=rt, denials=den)
+            prof = m.cursor_sbpl("panel", exe=self.build.node, runtime=rt, denials=den)
         self.assertEqual(self.decision(prof, "file-read-data", home + "/.ssh/id"), "deny")
         self.assertEqual(self.decision(prof, "file-read-data", home + "/dotfiles-ssh/id"), "deny")
 
@@ -2892,7 +3414,7 @@ class CursorProfileTests(CursorCase):
                                        side_effect=AssertionError("must not consult HOME")):
             with self.assertRaises(m.CursorBoundaryError):
                 m.cursor_login_home()
-            self.assertFalse(m.cursor_boundary(MOCK).ready)
+            self.assertFalse(m.cursor_boundary(self.launcher).ready)
 
     def test_dispatch_records_a_refusal_when_login_home_disappears(self):
         m = self.mod
@@ -2921,9 +3443,9 @@ class CursorProfileTests(CursorCase):
         self.assertEqual(m._canon_grant(real, "x"), real)
         rt = self.runtime()
         with self.assertRaises(m.CursorBoundaryError):
-            m.cursor_sbpl("maker", exe=MOCK, runtime=rt, denials=m.cursor_denials(), worktree=None)
+            m.cursor_sbpl("maker", exe=self.build.node, runtime=rt, denials=m.cursor_denials(), worktree=None)
         with self.assertRaises(m.CursorBoundaryError):
-            m.cursor_sbpl("nonsense", exe=MOCK, runtime=rt, denials=m.cursor_denials())
+            m.cursor_sbpl("nonsense", exe=self.build.node, runtime=rt, denials=m.cursor_denials())
 
     def test_runtime_is_private_outside_every_repository_and_removed(self):
         repo = self.repo()
@@ -2991,7 +3513,7 @@ class CursorProfileTests(CursorCase):
             with self.assertRaises(m.CursorBoundaryError):
                 m.cursor_make_runtime(run_root=run_root)
             with self.assertRaises(m.CursorBoundaryError):
-                m.cursor_metadata("status", MOCK, run_root=run_root)
+                m.cursor_metadata("status", self.launcher, run_root=run_root)
             rc, out, _err = self.cli(
                 "panel", "--prompt-file", self.prompt(), "--run-dir", run_root,
                 "--panelists", "cursor", "--repo", repo)
@@ -3017,17 +3539,17 @@ class CursorProfileTests(CursorCase):
         m = self.mod
         ad = m.CursorAgentAdapter()
         self.assertTrue(ad.cursor_boundary_ready)       # warm preflight before intercepting dispatch cleanup
-        real_rmtree = m.shutil.rmtree
+        real_run = m.subprocess.run
         retained = []
 
-        def leave_private_tree(path, *args, **kwargs):
-            if os.path.basename(path).startswith("alloy-cursor-"):
-                retained.append(path)
-                return None
-            return real_rmtree(path, *args, **kwargs)
+        def leave_private_tree(argv, *args, **kwargs):
+            if isinstance(argv, list) and argv[:3] == ["rm", "-r", "--"]:
+                retained.append(argv[-1])
+                return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+            return real_run(argv, *args, **kwargs)
 
         try:
-            with self.mock.patch.object(m.shutil, "rmtree", side_effect=leave_private_tree):
+            with self.mock.patch.object(m.subprocess, "run", side_effect=leave_private_tree):
                 st = self.dispatch(repo=self.repo(), adapter=ad)
             self.assertEqual(len(self.inference_calls()), 1)
             self.assertEqual(st["status"], "error")
@@ -3037,7 +3559,8 @@ class CursorProfileTests(CursorCase):
         finally:
             for path in set(retained):
                 if os.path.lexists(path):
-                    real_rmtree(path)
+                    real_run(["rm", "-r", "--", path], check=True, capture_output=True)
+
 
 
 class CursorGrammarTests(CursorCase):
@@ -3051,7 +3574,7 @@ class CursorGrammarTests(CursorCase):
         instr = self.mod.cursor_instruction(role, staged, os.path.realpath(ws))
         argv = ["-p"] + (["--mode", "ask"] if role == "panel" else []) + [
             "--output-format", "json", "--workspace", ws, "--model", "composer-2.5", "--trust",
-            "--sandbox", "enabled", "--skip-worktree-setup", instr]
+            "--sandbox", "disabled", "--skip-worktree-setup", instr]
         return argv, ws, staged
 
     def check(self, role, argv, ws, staged):
@@ -3078,7 +3601,7 @@ class CursorGrammarTests(CursorCase):
             ["--plugin-dir", "/x"], ["--add-dir", "/x"], ["--resume"], ["--resume", "abc"], ["--continue"],
             ["-w"], ["--worktree"], ["--worktree", "n"], ["--worktree-base", "main"], ["--effort", "high"],
             ["--stream-partial-output"], ["--mode", "plan"], ["--mode", "agent"], ["--mode", "ask"],
-            ["--sandbox", "disabled"], ["--sandbox", "enabled"], ["--output-format", "text"],
+            ["--sandbox", "disabled"], ["--sandbox", "disabled"], ["--output-format", "text"],
             ["--output-format", "json"], ["--model", "auto"], ["--model", "gpt-5"], ["--model=gpt-5.6-sol-high"],
             ["--workspace", "/elsewhere"], ["--trust"], ["-p"], ["--skip-worktree-setup"],
             ["worker"], ["login"], ["status"], ["--list-models"], ["extra positional"], ["-pFOO"], ["--"],
@@ -3120,7 +3643,7 @@ class CursorGrammarTests(CursorCase):
                 "known model replacement": [("gpt-5.6-sol-high" if a == "composer-2.5" else a) for a in argv],
                 "empty model": [("" if a == "composer-2.5" else a) for a in argv],
                 "bracketed unknown": [("kimi-k3[effort=low]" if a == "composer-2.5" else a) for a in argv],
-                "sandbox disabled": [("disabled" if a == "enabled" else a) for a in argv],
+                "sandbox enabled": [("enabled" if a == "disabled" else a) for a in argv],
                 "text output": [("text" if a == "json" else a) for a in argv],
                 "task text on argv": argv[:-1] + [argv[-1] + " Also do this task: " + "x" * 3000],
                 "other instruction": argv[:-1] + ["Please do the task described here."],
@@ -3172,7 +3695,7 @@ class CursorGrammarTests(CursorCase):
         staged = ctx["cursor_staged"]
         self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=staged)
         with self.assertRaises(m.CursorBoundaryError):
-            m.cursor_command("panel", tail, exe=MOCK, runtime=rt, workspace=repo,
+            m.cursor_command("panel", tail, exe=self.launcher, runtime=rt, workspace=repo,
                              staged=staged, expected_model=ctx["cursor_expected_model"])
         target = os.path.join(self.tmp, "other-prompt")
         with open(target, "w") as f:
@@ -3181,7 +3704,7 @@ class CursorGrammarTests(CursorCase):
         os.symlink(target, staged)
         self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=None)
         with self.assertRaises(m.CursorBoundaryError):
-            m.cursor_command("panel", tail, exe=MOCK, runtime=rt, workspace=repo,
+            m.cursor_command("panel", tail, exe=self.launcher, runtime=rt, workspace=repo,
                              staged=staged, expected_model=ctx["cursor_expected_model"])
 
     def test_metadata_roles_have_exact_grammars(self):
@@ -3203,7 +3726,7 @@ class CursorGrammarTests(CursorCase):
         self.assertTrue(self.mod.CursorAgentAdapter().cursor_boundary_ready)
         spawned = self.sandbox_calls()
         with self.assertRaises(self.mod.CursorBoundaryError):
-            self.mod.cursor_command("panel", argv[:-1] + ["--force", argv[-1]], exe=MOCK,
+            self.mod.cursor_command("panel", argv[:-1] + ["--force", argv[-1]], exe=self.launcher,
                                     runtime=rt, workspace=ws, staged=staged,
                                     expected_model="composer-2.5")
         self.assertFalse(os.path.exists(rt.profile))                  # no profile was even written
@@ -3232,7 +3755,7 @@ class CursorGrammarTests(CursorCase):
             "effort appended": lambda a: a[:-1] + ["--effort", "high", a[-1]],
             "mode edited": set_value("--mode", "accept-edits"),
             "mode plan": set_value("--mode", "plan"),
-            "sandbox disabled": set_value("--sandbox", "disabled"),
+            "sandbox enabled": set_value("--sandbox", "enabled"),
             "model auto": set_value("--model", "auto"),
             "known model swapped": set_value("--model", "gpt-5.6-sol-high"),
             "force appended": lambda a: a[:-1] + ["--force", a[-1]],
@@ -3266,7 +3789,7 @@ class CursorGrammarTests(CursorCase):
                                                           "OTHER_PROVIDER_TOKEN": "unrelated-config-secret"}):
             ad = self.mod.CursorAgentAdapter()
             self.assertEqual(ad.auth_state(), "ready")                  # status
-            self.mod.cursor_metadata("version", MOCK)                   # version
+            self.mod.cursor_metadata("version", self.launcher)               # version
             st = self.dispatch(repo=repo, adapter=ad)                   # panel
         self.assertEqual(st["status"], "ok", st)
         calls = self.all_cursor_calls()
@@ -3316,16 +3839,23 @@ class CursorEnvironmentTests(CursorCase):
         m = self.mod
         repo = self.repo()
         wt = make_worktree(repo, os.path.join(self.tmp, "wt"))
-        self.setenv(**self.AMBIENT, **self.KEPT)
+        self.setenv(**self.AMBIENT, **self.KEPT, AGENT_CLI_CREDENTIAL_STORE="default")
         ad = m.CursorAgentAdapter()
         self.assertEqual(ad.auth_state(), "ready")                          # status
-        self.assertEqual(m.cursor_metadata("version", MOCK)[0], 0)          # version (and the preflight's own launches)
+        self.assertEqual(m.cursor_metadata("version", self.launcher)[0], 0)      # version (and the preflight's own launches)
         self.assertEqual(self.dispatch(repo=repo, adapter=ad)["status"], "ok")            # panel
         self.assertEqual(self.dispatch(repo=wt, adapter=self.maker(), managed=True,
                                        mode="make", name="mk")["status"], "ok")            # Maker
         calls = self.all_cursor_calls()
         self.assertEqual(len(calls), 6)         # preflight --version x2, status, metadata --version, panel, Maker
-        runtime_names = {"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR"}
+        with open(self.nodelog) as handle:
+            node_calls = [json.loads(line) for line in handle]
+        self.assertEqual(len(node_calls), len(calls))
+        self.assertEqual(len({c["env"]["CURSOR_DATA_DIR"] for c in calls}), len(calls))
+        for call in node_calls:
+            self.assertEqual(call["credential_store"], "file")
+        # what the private runtime provides (the CLI's name and its compile cache inside the runtime)
+        runtime_names = {"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "CURSOR_INVOKED_AS", "NODE_COMPILE_CACHE", "AGENT_CLI_CREDENTIAL_STORE", "CURSOR_DATA_DIR", "CURSOR_CONFIG_DIR"}
         # The mock runs under /usr/bin/python3, whose Xcode shim re-exports these itself (in the
         # test process too); they are not something Alloy passes, so they say nothing here.
         interpreter_shim = {"SDKROOT", "CPATH", "LIBRARY_PATH", "MANPATH"}
@@ -3340,6 +3870,9 @@ class CursorEnvironmentTests(CursorCase):
             self.assertTrue({"PATH", "NO_PROXY", "LC_ALL", "TZ"} <= names, (call["argv"][:1], sorted(names)))
             self.assertTrue(runtime_names <= names)
             self.assertEqual(call["env"]["HOME"], m.cursor_login_home())
+            self.assertEqual(call["env"]["CURSOR_DATA_DIR"], call["env"]["XDG_STATE_HOME"])
+            self.assertEqual(call["env"]["CURSOR_CONFIG_DIR"], call["env"]["XDG_STATE_HOME"])
+            self.assertFalse(os.path.exists(call["env"]["CURSOR_DATA_DIR"]))
             for name in ("CURSOR_API_KEY", "CURSOR_API_ENDPOINT", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
                 self.assertNotIn(name, names)
         for call in calls[-2:]:                                              # panel and Maker: the private runtime only
@@ -3446,13 +3979,15 @@ class CursorPromptTests(CursorCase):
         repo = self.repo()
         st = self.dispatch(repo=repo)
         cmd = st["command"]
-        tail = cmd[4:]                                                        # sandbox-exec -f <profile> <exe> <tail>
+        # sandbox-exec -f <profile> <build>/node --use-system-ca <build>/index.js <tail>
+        self.assertEqual(cmd[3:6], [os.path.realpath(self.build.node), "--use-system-ca", os.path.realpath(self.build.index)])
+        tail = cmd[6:]
         self.assertEqual(tail[:2], ["-p", "--mode"])
         self.assertEqual(tail.count("--mode"), 1)
         self.assertEqual(tail[tail.index("--mode") + 1], "ask")
         self.assertEqual(tail[tail.index("--output-format") + 1], "json")
         self.assertEqual(tail[tail.index("--model") + 1], "composer-2.5[fast=false]")
-        self.assertEqual(tail[tail.index("--sandbox") + 1], "enabled")
+        self.assertEqual(tail[tail.index("--sandbox") + 1], "disabled")
         self.assertEqual(tail[tail.index("--workspace") + 1], os.path.realpath(repo))
         self.assertIn("--trust", tail)
         self.assertIn("--skip-worktree-setup", tail)
@@ -3534,7 +4069,7 @@ class CursorAuthAndDoctorTests(CursorCase):
     def test_status_uses_the_gateway_with_the_exact_status_grammar(self):
         self.mod.CursorAgentAdapter().auth_state()
         calls = self.cursor_calls()
-        self.assertEqual([c["argv"] for c in calls], [["status"]])
+        self.assertEqual([c["argv"] for c in calls], [["status", "--sandbox", "disabled"]])
         with open(self.sblog) as f:
             self.assertTrue(any('"status"' in line for line in f))
         self.assertEqual(calls[0]["stdin_bytes"], 0)
@@ -3644,8 +4179,8 @@ class CursorAuthAndDoctorTests(CursorCase):
         flat = [a for argv in spawned for a in argv if isinstance(a, str)]
         self.assertFalse([a for a in flat if os.path.basename(a) == "security"])
         self.assertFalse([a for a in flat if "Keychains" in a])
-        # the only executables Alloy starts for Cursor are the sandbox wrapper and git
-        self.assertEqual({os.path.basename(argv[0]) for argv in spawned}, {"mock_panelist.py", "git"})
+        # Cursor starts through the sandbox wrapper; the parent also runs Git and guarded cleanup.
+        self.assertEqual({os.path.basename(argv[0]) for argv in spawned}, {"mock_panelist.py", "git", "rm"})
 
 
 
@@ -3674,7 +4209,7 @@ class CursorJsonTests(CursorCase):
         cases = [("is_error", {}, "is_error"), ("is_error", {"MOCK_CURSOR_EXIT": "2"}, None),
                  ("is_error_int", {}, "is_error"), ("is_error_string", {}, "is_error"),
                  ("malformed", {}, "JSON"), ("no_result", {}, "result"), ("nonstring", {}, "result"),
-                 ("nonobject", {}, "JSON"), ("ok", {"MOCK_CURSOR_EXIT": "3"}, None)]
+                 ("nonobject", {}, "JSON"), ("ok", {"MOCK_CURSOR_EXIT": "3"}, "Cursor exited 3")]
         for i, (mode, extra, needle) in enumerate(cases):
             with self.subTest(mode=mode, extra=extra):
                 self.setenv(MOCK_CURSOR_JSON=mode, MOCK_CURSOR_EXIT=extra.get("MOCK_CURSOR_EXIT", "0"))
@@ -3734,13 +4269,17 @@ class CursorJsonTests(CursorCase):
                 self.assertNotIn(secrets[0], json.dumps(st))                    # nor the value returned for the manifest
 
     def test_secret_in_stderr_tail_is_absent_from_status_json_error(self):
-        self.setenv(MOCK_CURSOR_JSON="jwt_empty")
-        st = self.dispatch(repo=self.repo())
-        self.assertEqual(st["status"], "empty")
-        self.assertIn("REDACTED", st["error"])
-        body = self.read(st, "status.json")
-        self.assertNotIn(GOOD_JWT, body)
-        self.assertIn("REDACTED", body)
+        repo = self.repo()
+        for exit_code, expected in (("0", "empty"), ("4", "error")):
+            with self.subTest(exit_code=exit_code):
+                self.setenv(MOCK_CURSOR_JSON="jwt_empty", MOCK_CURSOR_EXIT=exit_code)
+                st = self.dispatch(repo=repo, name="stderr-" + exit_code)
+                self.assertEqual(st["status"], expected)
+                self.assertIn("warning: leaked", st["error"])
+                self.assertIn("REDACTED", st["error"])
+                body = self.read(st, "status.json")
+                self.assertNotIn(GOOD_JWT, body)
+                self.assertIn("REDACTED", body)
 
     def test_every_status_write_is_redacted_including_the_first_and_every_command_element(self):
         m = self.mod
@@ -3823,6 +4362,21 @@ class CursorTripwireTests(CursorCase):
         after = self.fp(path)
         self.assertNotEqual(before.digest, after.digest)
         return self.mod.cursor_fingerprint_changes(before, after)
+
+    def test_unrelated_sibling_activity_does_not_refuse_a_canary_snapshot(self):
+        rt = self.runtime()
+        before = rt.snapshot()
+        sibling = os.path.join(os.path.dirname(rt.canary_outside), "canary-neighbour-" + str(os.getpid()))
+        self.addCleanup(lambda: os.path.exists(sibling) and os.unlink(sibling))
+        original = self.mod._fp_entry_at
+        def racing_entry(fd, name, display, *args, **kwargs):
+            entry = original(fd, name, display, *args, **kwargs)
+            if display == rt.canary_outside:
+                with open(sibling, "w") as handle:
+                    handle.write("unrelated temporary file")
+            return entry
+        with self.mock.patch.object(self.mod, "_fp_entry_at", side_effect=racing_entry):
+            self.assertEqual(rt.snapshot(), before)
 
     def test_worktree_bytes_are_hashed_for_tracked_untracked_and_ignored_files(self):
         repo = self.repo()
@@ -4362,7 +4916,7 @@ class CursorManagedMakerTests(CursorCase):
         self.assertNotIn("--mode", tail)
         for required in ("-p", "--trust", "--skip-worktree-setup"):
             self.assertIn(required, tail)
-        self.assertEqual(tail[tail.index("--sandbox") + 1], "enabled")
+        self.assertEqual(tail[tail.index("--sandbox") + 1], "disabled")
         for forbidden in ("--force", "-f", "--yolo", "--auto-review", "--approve-mcps", "--mode", "--plan"):
             self.assertNotIn(forbidden, tail)
         self.assertIn(json.dumps(os.path.realpath(wt)), tail[-1])            # owned worktree in the reminder, no task text

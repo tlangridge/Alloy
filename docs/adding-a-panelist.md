@@ -136,16 +136,25 @@ flags can be the safety answer, and the real adapter, `CursorAgentAdapter` in
   one registry entry, one doctor row and one run directory.
   `bin_env_keys = ("ALLOY_BIN_CURSOR", "ALLOY_BIN_CURSOR_AGENT")` keeps the legacy
   key as a fallback.
+- **Setup.** Cursor requires a one-time `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`.
+  The login lives in `~/.cursor/auth.json` (0600). Every Cursor child receives
+  `AGENT_CLI_CREDENTIAL_STORE=file`; under Alloy the Cursor CLI is denied keychain
+  access and cannot start `/usr/bin/security`. Alloy never reads the keychain.
+  The pinned build writes `auth.json` directly and chmods it to 0600, with no temp
+  or atomic-rename files. Only that literal file is write-granted, plus permission
+  changes on the existing `~/.cursor` directory (the CLI chmods it to 0700).
+  No other home files are writable, and symlinked credential paths are refused.
+
 - **Auth.** `is_authed()` runs `cursor-agent status` through the sandbox gateway
   (stdin `/dev/null`, short timeout, bounded output) and reports ready only for
   exit code zero plus a recognized logged-in marker; anything else fails closed.
   The account text is masked before it reaches doctor. The login itself is a
-  keychain item that Cursor manages: Alloy never reads the keychain, never runs
+  file login that Cursor manages: Alloy never reads the keychain, never runs
   `security`, and never uses `CURSOR_API_KEY`, `CURSOR_API_ENDPOINT`, `--api-key`,
   `--endpoint` or `--header`. `auth_state()` can also return `sandbox_unavailable`.
 - **Invoke.** `stdin_from_prompt = False`. `build_args()` stages the prompt as an
   owner-only file and emits `-p --mode ask --output-format json --workspace <repo>
-  --model <model> --trust --sandbox enabled --skip-worktree-setup <instruction>`,
+  --model <model> --trust --sandbox disabled --skip-worktree-setup <instruction>`,
   where the instruction is a short fixed sentence naming the staged file. A Maker
   omits `--mode ask`. `--model` is always present and always names a model with a
   known family; `auto` and unknown IDs are refused.
@@ -153,9 +162,15 @@ flags can be the safety answer, and the real adapter, `CursorAgentAdapter` in
   owner-private runtime and canary files outside every repository. `wrap_argv()`
   is the only way to obtain a Cursor command line: it validates the boundary,
   parses the complete final argv against a closed grammar for the role, writes
-  the profile, and returns `/usr/bin/sandbox-exec -f <profile> <cursor-agent>
-  ...`. Status, version, help and model discovery use the same gateway; by design
-  no code path runs `cursor-agent` directly. Any doubt raises `CursorBoundaryError` and
+  the profile, and returns `/usr/bin/sandbox-exec -f <profile> <build>/node
+  --use-system-ca <build>/index.js ...`, where `<build>` is the pinned build
+  directory that `cursor_resolve_build()` finds behind the configured
+  `cursor-agent` path without executing anything. Status, version, help and model
+  discovery use the same gateway; by design no code path runs `cursor-agent`
+  directly. A panel or Checker profile allows exactly three literal executables
+  (the build's `node`, its bundled `rg` and
+  `/usr/bin/sw_vers`), each verified first; the CLI's own code starts the last
+  two and Alloy never runs them. Any doubt raises `CursorBoundaryError` and
   the run is refused before anything starts. It works on macOS only.
 - **Parse.** The answer is the JSON object's `result`. `output_error()` fails a run
   whose JSON is malformed, has no string `result` or says `is_error`, even with
@@ -195,3 +210,14 @@ coverage; do not route unsupported CLIs into a writable worktree by default.
 `command_execution`, records scope/enforcement, and discloses OS and Git metadata
 isolation. A normal panel remains read-only. See [managed execution](execution.md)
 for the complete contract and cleanup invariants.
+
+Every Cursor spawn explicitly passes `--sandbox disabled`. Alloy's macOS
+`sandbox-exec` profile is the enforced boundary; Cursor's own sandbox and ask/plan
+modes are not relied on. A fresh 0700 runtime sets `CURSOR_DATA_DIR` and
+`CURSOR_CONFIG_DIR` to its private state subdirectory and is removed after the
+call through the system `rm` command (including any installed guard). `HOME` stays
+unchanged; the CLI reads the literal `~/.cursor/auth.json` without copying or
+symlinking it. Home projects/config, skills manifests, the build's `.running`
+markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
+inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
+writes outside the task's allowed paths; the model may be offered tools it cannot use.

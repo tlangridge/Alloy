@@ -30,11 +30,35 @@ Cursor provider:
   `ALLOY_ALLOW_UNSANDBOXED=1` does not change that. Cursor CLI builds Alloy has
   not measured are refused too; the supported build for this release is
   `2026.09.28-64d2043`.
-- Panels and Checkers run `--mode ask` inside the sandbox: only a private
-  per-dispatch runtime directory is writable, process execution and hard links
-  are denied. Makers run Cursor's normal agent mode inside the sandbox: only the
-  non-Git contents of the Alloy-owned worktree and the private runtime are
-  writable, and Git metadata, the source checkout and everything else stay
+- Alloy never executes the `cursor-agent` shell launcher, or any wrapper script
+  in front of it: the launcher needs a shell and several coreutils, which a
+  panel or Checker sandbox denies, so on macOS every Cursor role was
+  unavailable. Alloy follows the symlinks behind the configured path to the
+  supported build's directory (behind a wrapper script it uses the supported
+  build in Cursor's standard install location, without running the wrapper),
+  checks that the build's `node` and `index.js` are regular files owned by you and
+  not writable by group or others, and starts `<build>/node --use-system-ca
+  <build>/index.js` directly, with `CURSOR_INVOKED_AS=cursor-agent` in its
+  environment. The launcher's compile cache is reproduced inside the private
+  runtime, never in your home cache.
+- Cursor requires a one-time `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`.
+  The login lives in `~/.cursor/auth.json` (0600). Every Cursor child receives
+  `AGENT_CLI_CREDENTIAL_STORE=file`; under Alloy the Cursor CLI is denied keychain
+  access and cannot start `/usr/bin/security`. Alloy never reads the keychain.
+  The pinned build writes `auth.json` directly and chmods it to 0600, with no temp
+  or atomic-rename files. Only that literal file is write-granted, plus permission
+  changes on the existing `~/.cursor` directory (the CLI chmods it to 0700).
+  No other home files are writable, and symlinked credential paths are refused.
+- Panels and Checkers run `--mode ask` inside the sandbox: a private
+  per-dispatch runtime directory and the CLI file login are writable, process execution is denied except
+  three literal paths (the Cursor CLI's own bundled Node runtime binary, the
+  build's bundled `rg` and `/usr/bin/sw_vers`), and hard links
+  are denied. `/bin/sh` and every other shell, `/usr/bin/open`, `/usr/bin/log` and
+  everything else stay denied. Under Alloy, the OS sandbox denies shell execution and file writes outside the task's allowed paths; the model may be offered tools it cannot use. `/usr/bin/security` is denied
+  in every role, and Alloy itself never runs `security`. Each
+  of the three is verified before use. Makers run Cursor's normal agent mode inside the sandbox: only the
+  non-Git contents of the Alloy-owned worktree, the private runtime and the CLI
+  file login are writable, and Git metadata, the source checkout and everything else stay
   write-denied. No Cursor role receives `--force`, `--yolo`, auto-review or MCP
   approval flags; the final argv is checked against a closed grammar for each
   role, so mode, sandbox, worktree, plugin, session and subcommand controls
@@ -52,12 +76,12 @@ Cursor provider:
   absolute paths, no globs); you can add denials but not remove built-in ones. `CURSOR_API_KEY` and `CURSOR_API_ENDPOINT` are scrubbed
   from every child environment and `--api-key`, `--endpoint` and `--header` are
   rejected. The Cursor child receives an explicit environment allowlist.
-- Accepted residual risk, stated plainly: the Cursor process uses its own keychain
-  login item through the system Security API, can read the repository and uses
+- Accepted residual risk, stated plainly: the Cursor process reads its own
+  file login, can read the repository and uses
   the network. The profile cannot separate Cursor's legitimate reads and network
   from its model-facing read tool, so a Cursor role is not a data-exfiltration
   boundary and a Checker is not exfiltration-proof. Mitigations: ask mode for
-  panels and Checkers, descendant-process denial, the credential-read denials,
+  panels and Checkers, descendant-process denial (except the three executables above), the credential-read denials,
   redaction of JWT-shaped values, secret assignments and authorization headers
   before every persisted output, and a Checker packet built only from redacted
   text. Alloy never reads the keychain or runs `security`.
@@ -95,6 +119,10 @@ Cursor provider:
 - Limits of this release: Cursor does not run on Linux, there is no Cursor
   benchmark row, Cursor quota cannot be read live, and Alloy does not observe every
   filesystem change.
+- Add an offline release-report verifier for the authenticated real-build gate
+  and the composer-2.5 ask probe. Missing, skipped or incomplete evidence fails
+  verification; accepted reports attach the complete ask record and both log hashes.
+  Offline unit tests do not supply either live release record.
 
 Usage and routing:
 
@@ -133,6 +161,18 @@ Fixes already on this branch (agy 1.2.12 Checkers):
   common directory. Other layouts receive the exact gitdir only.
 - Grant agy Checkers read access to the owner-private gate-log directory, and tell
   them in the prompt to read only inside the task worktree and that directory.
+
+Known issues:
+
+- Two tests can fail once under heavy machine load and pass on a re-run of the same
+  code. They are not fixed in this release:
+  `test_alloy.CursorJsonTests.test_secret_shaped_output_is_absent_from_every_persisted_sink`
+  (the `header` case: `result.md` is missing) and
+  `test_alloy.CursorManagedMakerTests.test_maker_gateway_requires_a_managed_linked_worktree_and_a_matching_cwd`
+  (the `managed flag unset` case: `fingerprint refused: a directory changed while
+  reading`). When the content tripwire cannot read a directory consistently, Alloy
+  refuses the call, so the failure is a refusal and never a pass. Re-run once
+  before treating either as a real failure.
 
 ## [0.10.0] - 2026-09-26
 
@@ -225,6 +265,17 @@ also blocks the cheap Luna reviewer from routing.
 
 - Add GPT-6 Sol and Gemini 3.8 Flash low/medium/high plus Gemini 3.1 Pro low/high to starter routing profiles. Preserve existing profiles and billing settings.
 - Add exact GPT-6 Sol capability and pricing references without transferring high-effort evidence to lower-effort Gemini variants.
+
+Every Cursor spawn explicitly passes `--sandbox disabled`. Alloy's macOS
+`sandbox-exec` profile is the enforced boundary; Cursor's own sandbox and ask/plan
+modes are not relied on. A fresh 0700 runtime sets `CURSOR_DATA_DIR` and
+`CURSOR_CONFIG_DIR` to its private state subdirectory and is removed after the
+call through the system `rm` command (including any installed guard). `HOME` stays
+unchanged; the CLI reads the literal `~/.cursor/auth.json` without copying or
+symlinking it. Home projects/config, skills manifests, the build's `.running`
+markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
+inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
+writes outside the task's allowed paths; the model may be offered tools it cannot use.
 
 ### Validation
 - 215 offline tests and skill validation pass, including additive/idempotent config upgrades, user settings preservation, model-card privacy and bounded Jev fit judgments. No paid inference used.

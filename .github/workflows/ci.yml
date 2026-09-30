@@ -13,6 +13,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         python: ["3.8", "3.12"]
     runs-on: ${{ matrix.os }}
+    env:
+      # Hosted runners cannot have the Cursor CLI, so the gate that starts the REAL Cursor runtime
+      # (RealCursorBuildGate) has nothing to start there. This excuses only the absence of any
+      # cursor-agent; on a machine that has one, the gate fails if it cannot start under the sandbox.
+      ALLOY_GATE_NO_CURSOR_BUILD: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,6 +25,14 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit tests (mock panelists, no tokens)
         run: python3 -m unittest discover -s tests -v
+      # Explicit real-kernel boundary checks use a stand-in CLI, no network or Cursor.
+      # The authenticated real-build gate is a separate operator action outside Codex's
+      # sandbox: ALLOY_CURSOR_SANDBOX_GATE=1 ALLOY_CURSOR_BUILD_GATE=1 with this command.
+      - name: Cursor OS sandbox release gate (real sandbox-exec)
+        if: runner.os == 'macOS'
+        run: |
+          test -x /usr/bin/sandbox-exec || { echo "::error::/usr/bin/sandbox-exec is missing"; exit 1; }
+          ALLOY_CURSOR_SANDBOX_GATE=1 python3 -m unittest discover -s tests -p 'test_cursor_sandbox_release_gate.py' -v
       - name: Validate SKILL.md
         run: python3 tests/validate_skill.py
       - name: Smoke test doctor/version/estimate

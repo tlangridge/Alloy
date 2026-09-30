@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -556,9 +557,10 @@ else:
         config['profiles']=[dict(base,id='maker',adapter='claude',model='test-maker',family='anthropic',tier='large',effort=None,billing_mode='subscription'),
                             dict(base,id='checker',adapter='grok',model='test-checker',family='xai',tier='large',effort=None,billing_mode='subscription')]
         r.save(r.root()/'routing.json',config)
-        env=dict(PATH=os.environ['PATH'], HOME=str(self.base/'home'), ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
+        env=dict(PATH=os.environ['PATH'], HOME=os.environ['HOME'], ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
                  ALLOY_RUN_ROOT=str(self.base/'state/runs'),ALLOY_ROUTING_HOME=str(self.base/'config'),
                  ALLOY_BIN_CLAUDE=str(binary),ALLOY_BIN_GROK=str(binary),ALLOY_BIN_CODEX='/nonexistent',ALLOY_BIN_ANTIGRAVITY='/nonexistent',
+                 ALLOY_BIN_CURSOR='/nonexistent',   # a real Cursor build on this machine must never be reached
                  ANTHROPIC_API_KEY='test-only',XAI_API_KEY='test-only')
         command=[sys.executable,str(ROOT/'bin/alloy')]
         result=subprocess.run(command+['execute','--repo',str(self.repo),'--prompt-file',str(self.prompt),'--host-family','openai',
@@ -647,12 +649,13 @@ else:
         ctx=dict(repo=str(self.repo),pdir=str(self.base/'agy-review'),timeout_s=10,
                  managed_worktree=False)
         ad=e.worker_adapter(core,dict(cli='antigravity',model='test',effort=None),False)
-        with patch.object(core.AntigravityAdapter,'_agy_version',return_value=(1,2,13)):
+        gate_logs = str(self.base / 'gate-logs')
+        with patch.object(core.AntigravityAdapter, '_agy_version', return_value=(1,2,13)), \
+                patch.object(core, 'gate_log_dir', return_value=gate_logs), \
+                patch.dict(os.environ, {'ALLOY_ANTIGRAVITY_HOME': str(self.base / 'agy-home')}):
             args=ad.build_args(str(prompt),str(self.base/'last'),'review',ctx)
             with patch.object(core.AntigravityAdapter,'_AUTH_LINKS',()), patch.object(core.AntigravityAdapter,'_keychain_plist',return_value=None):
                 env=ad.prepare_env(ctx)
-        gate_logs=core.gate_log_dir()
-        self.assertEqual(gate_logs,str(Path.home()/'.local/state/alloy/gate-logs'))
         add_dirs=[args[i+1] for i,value in enumerate(args[:-1]) if value=='--add-dir']
         self.assertIn(gate_logs,add_dirs)
         self.assertEqual(os.stat(gate_logs).st_mode & 0o777,0o700)
@@ -746,6 +749,8 @@ MOCKMOD = load_mock()
 FAKE_CURSOR = r'''
 import json, os, re, sys
 from pathlib import Path
+if os.environ.get('FAKE_CURSOR_VIA_NODE') != '1':      # Alloy must start the build's node, never the launcher
+    sys.stderr.write('the launcher was executed directly\n'); raise SystemExit(71)
 me = Path(__file__).resolve()
 side = lambda ext: Path(str(me) + ext)
 plan = json.loads(side('.plan.json').read_text()) if side('.plan.json').exists() else {}
@@ -755,11 +760,11 @@ def log(kind):
     if plan.get('log'):
         with open(plan['log'], 'a') as f:
             f.write(json.dumps(dict(kind=kind, argv=argv, cwd=os.getcwd(), env_names=sorted(os.environ))) + '\n')
-if argv == ['--version']:
+if argv == ['--version', '--sandbox', 'disabled']:
     print('2026.09.28-64d2043'); raise SystemExit(0)
-if argv == ['--help']:
+if argv == ['--help', '--sandbox', 'disabled']:
     log('help'); print(plan.get('help', HELP)); raise SystemExit(plan.get('help_exit', 0))
-if argv == ['status']:
+if argv == ['status', '--sandbox', 'disabled']:
     log('status'); print('\u2713 Logged in as tl***@gmail.com'); raise SystemExit(0)
 role = 'checker' if '--mode' in argv else 'maker'
 m = re.match(r'Read ("(?:[^"\\]|\\.)*") in full', argv[-1])
@@ -800,6 +805,78 @@ raise SystemExit(plan.get('exit', 0))
 HELP_ALL = ('--print --output-format --mode --model --list-models --sandbox --workspace '
             '--skip-worktree-setup --trust')
 
+# A fixture Cursor install laid out like the real one: <root>/versions/<build>/{cursor-agent, node,
+# index.js}. Alloy resolves the build directory and starts `<build>/node --use-system-ca
+# <build>/index.js <args>` directly, so the fixture `node` is a small Python shim that checks it was
+# started that way, records what it saw (MOCK_NODE_LOG) and runs the fake CLI in-process. The
+# `cursor-agent` launcher is a stub that exits 71 and leaves a marker: Alloy never executes it.
+CURSOR_BUILD = '2026.09.28-64d2043'
+LAUNCHER_STUB = '#!/bin/sh\necho "the bash launcher was executed" >> "@MARKER@"\nexit 71\n'
+NODE_SHIM = r'''#!@PYTHON@
+import json, os, runpy, sys
+here = os.path.dirname(os.path.abspath(__file__))
+log = os.environ.get("MOCK_NODE_LOG")
+if log:
+    with open(log, "a") as handle:
+        handle.write(json.dumps({"argv": sys.argv, "invoked_as": os.environ.get("CURSOR_INVOKED_AS"),
+                                 "compile_cache": os.environ.get("NODE_COMPILE_CACHE"),
+                                 "credential_store": os.environ.get("AGENT_CLI_CREDENTIAL_STORE")}) + "\n")
+if sys.argv[1:3] != ["--use-system-ca", os.path.join(here, "index.js")]:
+    sys.stderr.write("node: unexpected arguments\n")
+    raise SystemExit(9)
+cli = @CLI@
+sys.argv = [cli] + sys.argv[3:]
+if os.environ.get("MOCK_SANDBOX_PREFLIGHT") == "cli_fail" and "--version" in sys.argv:
+    raise SystemExit(7)
+os.environ["FAKE_CURSOR_VIA_NODE"] = "1"
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def make_cursor_build(root, cli=None, name=CURSOR_BUILD, launcher_text=None):
+    """Create the fixture install under `root` and return its parts. `cli` is the Python file the
+    fixture `node` runs (default: the launcher file itself, whose text is then `launcher_text`)."""
+    root = Path(root)
+    versions = root / 'versions'
+    build = versions / name
+    build.mkdir(parents=True)
+    for directory in (versions, build):
+        os.chmod(str(directory), 0o700)
+    marker = root / 'launcher-ran'
+    launcher = build / 'cursor-agent'
+    launcher.write_text(launcher_text if launcher_text is not None else LAUNCHER_STUB.replace('@MARKER@', str(marker)))
+    os.chmod(str(launcher), 0o755)
+    if cli is not None and Path(cli).resolve() == MOCK.resolve():
+        # Extend the shared legacy fixture's metadata/env logging without changing other adapters.
+        private_cli = root / "mock-panelist"
+        fixture = MOCK.read_text().replace('if argv == ["--version"]', 'if "--version" in argv')
+        fixture = fixture.replace('"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR")',
+                                  '"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "CURSOR_DATA_DIR", "CURSOR_CONFIG_DIR")')
+        private_cli.write_text(fixture)
+        cli = private_cli
+    node = build / 'node'
+    node.write_text(NODE_SHIM.replace('@PYTHON@', sys.executable).replace('@CLI@', repr(str(cli or launcher))))
+    os.chmod(str(node), 0o755)
+    index = build / 'index.js'
+    index.write_text('// fixture entry script: nothing ever runs it\n')
+    os.chmod(str(index), 0o644)
+    rg = build / 'rg'                     # the build's bundled ripgrep: a panel/Checker profile may run it
+    rg.write_text('#!/bin/sh\nexit 0\n')
+    os.chmod(str(rg), 0o755)
+    # Stand-in for /usr/bin/sw_vers (the fixture user plays the trusted owner),
+    # so a unit test never depends on, or starts, the real system tools.
+    system = root / 'system'
+    system.mkdir()
+    system_paths = []
+    for name in ('sw_vers',):
+        tool = system / name
+        tool.write_text('#!/bin/sh\nexit 0\n')
+        os.chmod(str(tool), 0o755)
+        system_paths.append(str(tool))
+    return types.SimpleNamespace(root=str(root), versions=str(versions), dir=str(build), launcher=str(launcher),
+                                 node=str(node), index=str(index), rg=str(rg), system=tuple(system_paths),
+                                 marker=str(marker))
+
 
 class CursorManagedBase(unittest.TestCase):
     """Shared fixture: a real temporary Git repo, the fake cursor-agent behind the mock
@@ -808,9 +885,10 @@ class CursorManagedBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli_dir = os.path.realpath(tempfile.mkdtemp(prefix='alloy-exec-cursor-'))
-        cls.cli = os.path.join(cls.cli_dir, 'cursor-agent')
-        Path(cls.cli).write_text('#!' + sys.executable + '\n' + FAKE_CURSOR)
-        os.chmod(cls.cli, 0o755)
+        # ALLOY_BIN_CURSOR is the build's `cursor-agent` launcher; here the launcher file is also the
+        # fake CLI (it refuses to run unless the fixture node started it, as Alloy must).
+        cls.install = make_cursor_build(cls.cli_dir + '/install', launcher_text='#!' + sys.executable + '\n' + FAKE_CURSOR)
+        cls.cli = cls.install.launcher
         os.chmod(str(MOCK), 0o755)
         # Fixed, so the cached sandbox self-test verdict is shared by every test in the class:
         # the verdict is keyed on the denial set, and that set includes Alloy's own state paths.
@@ -854,6 +932,7 @@ class CursorManagedBase(unittest.TestCase):
             os.environ.pop(name, None)
         self.patch_core(_CONFIG={}, SANDBOX_EXEC=str(MOCK), SANDBOX_TRUSTED_UID=os.getuid(),
                         CURSOR_PLATFORM=sys.platform, CURSOR_ENV_ALLOW_PREFIXES=('LC_', 'MOCK_'),
+                        CURSOR_VERSIONS_ROOT=self.install.versions, CURSOR_SYSTEM_EXEC=self.install.system,
                         log=lambda msg: None)
         core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None)
         self.addCleanup(lambda: core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None))
@@ -1112,7 +1191,7 @@ class CursorManagedContractTests(CursorManagedBase):
     def test_maker_argv_is_the_closed_non_force_form(self):
         ad, argv, wt = self.build(self.maker, True)
         self.assertNotIn('--mode', argv)
-        self.assertEqual(argv[argv.index('--sandbox') + 1], 'enabled')
+        self.assertEqual(argv[argv.index('--sandbox') + 1], 'disabled')
         for flag in ('--skip-worktree-setup', '--trust', '-p'):
             self.assertEqual(argv.count(flag), 1)
         self.assertEqual(argv[argv.index('--workspace') + 1], wt)
@@ -1127,7 +1206,7 @@ class CursorManagedContractTests(CursorManagedBase):
         ad, argv, wt = self.build(self.checker, False)
         self.assertEqual(argv[argv.index('--mode') + 1], 'ask')
         self.assertEqual(argv.count('--mode'), 1)
-        self.assertEqual(argv[argv.index('--sandbox') + 1], 'enabled')
+        self.assertEqual(argv[argv.index('--sandbox') + 1], 'disabled')
         self.assertIn('--skip-worktree-setup', argv)
         self.assertFalse(set(FORBIDDEN_FLAGS) & set(argv))
         self.assertTrue(ad.read_only)
@@ -1181,11 +1260,11 @@ class CursorManagedContractTests(CursorManagedBase):
             worktree=self.insert('-w'), worktree_long=self.insert('--worktree', 'n'),
             worktree_base=self.insert('--worktree-base', 'main'), plan=self.insert('--plan'),
             mode_ask=self.insert('--mode', 'ask'), mode_plan=self.insert('--mode', 'plan'),
-            sandbox_duplicate=self.insert('--sandbox', 'enabled'), model_duplicate=self.insert('--model', 'composer-2.5'),
+            sandbox_duplicate=self.insert('--sandbox', 'disabled'), model_duplicate=self.insert('--model', 'composer-2.5'),
             endpoint=self.insert('--endpoint', 'https://x.invalid'), endpoint_eq=self.insert('--endpoint=https://x.invalid'),
             attached_e=self.insert('-ehttps://x.invalid'), header=self.insert('--header', 'X: y'),
             attached_h=self.insert('-HX:y'), api_key=self.insert('--api-key', 'k'),
-            sandbox_disabled=lambda a: [('disabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
+            sandbox_enabled=lambda a: [('enabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
             no_sandbox=lambda a: [x for i, x in enumerate(a) if x != '--sandbox' and a[i - 1] != '--sandbox'],
             no_setup_skip=lambda a: [x for x in a if x != '--skip-worktree-setup'],
             subcommand=lambda a: ['worker'] + a, extra_positional=lambda a: a + ['also do this'])
@@ -1197,8 +1276,8 @@ class CursorManagedContractTests(CursorManagedBase):
             plan_mode=lambda a: [('plan' if a[i - 1] == '--mode' else x) for i, x in enumerate(a)],
             duplicate_mode=self.insert('--mode', 'ask'), yolo=self.insert('--yolo'), force=self.insert('--force'),
             plugin=self.insert('--plugin-dir', 'p'), worktree=self.insert('--worktree', 'n'),
-            resume=self.insert('--resume', 'abc'), sandbox_disabled=lambda a: [
-                ('disabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
+            resume=self.insert('--resume', 'abc'), sandbox_enabled=lambda a: [
+                ('enabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
             subcommand=lambda a: ['persist'] + a, header=self.insert('-H', 'X: y'))
         for name, mutate in checker_cases.items():
             with self.subTest(role='checker', case=name):
@@ -1271,8 +1350,7 @@ class CursorManagedContractTests(CursorManagedBase):
             REAL_PROBE(core, self.maker, True)
 
     def test_probe_accepts_the_recorded_real_help_text(self):
-        facts = (ROOT / 'docs/design/cursor/CURSOR-FACTS.md').read_text()
-        self.plan(help=facts[facts.index('## --help'):facts.index('## --list-models')])
+        self.plan(help=(ROOT / 'tests/fixtures/cursor-help.txt').read_text())
         REAL_PROBE(core, self.maker, True)
         REAL_PROBE(core, self.checker, False)
 
@@ -1867,10 +1945,12 @@ class CursorManagedEndToEndTests(CursorManagedBase):
         self.assertEqual(code, 0, task.get('error'))
         (maker_profile, maker_cmd), (checker_profile, checker_cmd) = self.inference()
         for cmd, role, decision in ((maker_cmd, 'maker', self.maker), (checker_cmd, 'checker', self.checker)):
-            tail = cmd[1:]
-            self.assertEqual(cmd[0], os.path.realpath(self.cli))
+            tail = cmd[3:]
+            # the build's own node, started directly: never the bash launcher
+            self.assertEqual(cmd[:3], [os.path.realpath(self.install.node), '--use-system-ca', os.path.realpath(self.install.index)])
+            self.assertFalse(os.path.exists(self.install.marker))
             self.assertEqual(tail[tail.index('--model') + 1], decision['effective_model'])
-            self.assertEqual(tail[tail.index('--sandbox') + 1], 'enabled')
+            self.assertEqual(tail[tail.index('--sandbox') + 1], 'disabled')
             self.assertEqual(tail[tail.index('--workspace') + 1], task['worktree'])
             for flag in ('-p', '--trust', '--skip-worktree-setup'):
                 self.assertEqual(tail.count(flag), 1, (role, flag))
@@ -1900,7 +1980,7 @@ class CursorManagedEndToEndTests(CursorManagedBase):
         for rel in BUILTIN_DENIALS:
             self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', home + '/' + rel + '/secret'), 'deny', rel)
 
-    def test_checker_profile_allows_only_the_private_runtime_and_no_process_execution(self):
+    def test_checker_profile_grants_only_the_runtime_file_login_and_three_executables(self):
         code, task = self.create()
         self.assertEqual(code, 0, task.get('error'))
         _, (profile, _) = self.inference()
@@ -1912,7 +1992,25 @@ class CursorManagedEndToEndTests(CursorManagedBase):
         for denied in (wt + '/file.txt', wt + '/new.txt', loc['dotgit'], loc['gitdir'] + '/x', loc['common'] + '/x',
                        home + '/x', '/private/tmp/x'):
             self.assertEqual(self.writes(profile, denied), 'deny', denied)
-        self.assertEqual(MOCKMOD.sbpl_decision(profile, 'process-exec', '/bin/sh'), 'deny')
+        # These are the three verified fixture binaries corresponding to the production
+        # node, bundled rg and /usr/bin/sw_vers. Assert the complete list, not just one denial.
+        allowed = [os.path.realpath(self.install.node), os.path.realpath(self.install.rg),
+                   os.path.realpath(self.install.system[0])]
+        self.assertEqual([line for line in profile.splitlines() if 'process-exec' in line],
+                         ['(deny process-exec*)', '(allow process-exec ' +
+                          ' '.join('(literal %s)' % json.dumps(path) for path in allowed) + ')'])
+        for path in allowed:
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'process-exec', path), 'allow', path)
+        for path in ('/bin/sh', '/bin/bash', '/usr/bin/security', '/usr/bin/open', '/usr/bin/log',
+                     '/usr/bin/env', self.install.launcher):
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'process-exec', path), 'deny', path)
+        auth = home + '/.cursor/auth.json'
+        self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', auth), 'allow')
+        self.assertEqual(self.writes(profile, auth), 'allow')
+        for path in (auth + '.tmp', home + '/.cursor/other.json'):
+            self.assertEqual(self.writes(profile, path), 'deny', path)
+        for path in (home + '/Library/Keychains', home + '/Library/Keychains/login.keychain-db'):
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', path), 'deny', path)
         self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-link', wt + '/link'), 'deny')
         for rel in BUILTIN_DENIALS:
             self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', home + '/' + rel + '/secret'), 'deny', rel)
