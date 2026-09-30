@@ -499,6 +499,16 @@ class AlloyTests(unittest.TestCase):
             p = by_name(m, name)
             self.assertNotIn("usage", p)
             self.assertNotIn("--json", p["command"])
+            if name == "claude":
+                # Claude's default output is stream-json (it needs --verbose): the run's own
+                # rate_limit_event feeds Claude quota. Capture-off still never asks for the
+                # single JSON result object, which is what ALLOY_CAPTURE_USAGE switches to.
+                cmd = p["command"]
+                self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+                self.assertIn("--verbose", cmd)
+                self.assertNotIn("json", cmd)
+                self.assertNotIn("text", cmd)
+                continue
             self.assertNotIn("json", " ".join(p["command"]))
 
     def test_usage_capture_codex(self):
@@ -513,6 +523,8 @@ class AlloyTests(unittest.TestCase):
         p, cmd = self._usage_panel("claude", {})
         self.assertIn("--output-format json", cmd)
         self.assertNotIn("--output-format text", cmd)
+        self.assertNotIn("--verbose", cmd)      # json + verbose would print the whole transcript
+        self.assertNotIn("stream-json", cmd)
         self.assertIn("--permission-mode plan", cmd)
         self.assertEqual(p["usage"], {"input_tokens": 5, "cache_read_tokens": 2000,
             "cache_write_tokens": 3000, "output_tokens": 60, "reasoning_tokens": 25,
@@ -855,67 +867,82 @@ def _import_alloy_module():
     return mod
 
 
-class AntigravityKeychainAuthUnitTests(unittest.TestCase):
-    """The keychain fallback in AntigravityAdapter.is_authed: a fresh agy login
-    stores the token ONLY in the login keychain (the token file is written just
-    when a keyring save fails), so file checks alone report a healthy install
-    as unauthenticated. Hermetic on every platform: HOME points at a fixture
-    dir, config/env auth is cleared, sys.platform and the `security` subprocess
-    are faked."""
+class AntigravityKeychainFreeAuthTests(unittest.TestCase):
+    """AntigravityAdapter's login check runs WITHOUT the macOS keychain (operator policy
+    2026-09-29: Alloy never reads it and never runs `security`). A fresh agy login on
+    macOS lives only in the login keychain, so with no key and no agy token file the
+    login is UNKNOWN: agy stays `ready` (routing and execute gate on that) and `doctor`
+    reports auth `unknown`; the first real dispatch reports `auth` if the login is bad.
+    Hermetic on every platform: `~` maps to a fixture dir through os.path.expanduser
+    (HOME is never set), config/env auth is cleared, sys.platform is faked and every
+    subprocess call is recorded, never run."""
 
     @classmethod
     def setUpClass(cls):
         cls.f = _import_alloy_module()
 
-    def _is_authed_with(self, fake_run, platform="darwin", token_file=False):
+    def _run_check(self, check, fake_run=None, platform="darwin", token_file=False, api_key=""):
         from unittest import mock
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return fake_run(cmd, **kw) if fake_run else subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def popen(cmd, *a, **kw):
+            calls.append(cmd)
+            raise AssertionError("no process may be spawned: %r" % (cmd,))
+
         with tempfile.TemporaryDirectory() as home:
             if token_file:
                 d = os.path.join(home, ".gemini", "antigravity-cli")
                 os.makedirs(d)
                 open(os.path.join(d, "antigravity-oauth-token"), "w").close()
-            env = {"HOME": home, "ANTIGRAVITY_API_KEY": "", "GEMINI_API_KEY": "",
-                   "GOOGLE_API_KEY": ""}
+            env = {"ANTIGRAVITY_API_KEY": api_key, "GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}
             with mock.patch.dict(os.environ, env), \
                  mock.patch.object(self.f, "_CONFIG", {}), \
+                 mock.patch.object(self.f.os.path, "expanduser",
+                                   lambda p: home + p[1:] if p.startswith("~") else p), \
                  mock.patch.object(self.f.sys, "platform", platform), \
-                 mock.patch.object(self.f.subprocess, "run", fake_run):
-                return self.f.AntigravityAdapter().is_authed()
+                 mock.patch.object(self.f.subprocess, "run", run), \
+                 mock.patch.object(self.f.subprocess, "Popen", popen):
+                result = check(self.f.AntigravityAdapter())
+        return result, calls
 
-    def test_keychain_item_present_counts_as_authed(self):
-        calls = []
+    def _is_authed_with(self, fake_run, platform="darwin", token_file=False):
+        result, _calls = self._run_check(lambda ad: ad.is_authed(), fake_run, platform, token_file)
+        return result
 
-        def fake_run(cmd, **kw):
-            calls.append((cmd, kw))
-            return subprocess.CompletedProcess(cmd, 0)
+    def test_unknown_login_counts_as_usable_and_no_command_runs(self):
+        seen, calls = self._run_check(lambda ad: (ad._auth_evidence(), ad.is_authed(), ad.auth_status("ready")))
+        self.assertEqual(seen, (None, True, "unknown"))
+        self.assertEqual(calls, [])
 
-        self.assertTrue(self._is_authed_with(fake_run))
-        # Metadata-only existence check: never -w, so the secret is never read
-        # and no keychain ACL dialog can appear. stdin is detached so an
-        # interactive-capable `security` can never consume the caller's input.
-        self.assertEqual(len(calls), 1)
-        cmd, kw = calls[0]
-        self.assertIn("find-generic-password", cmd)
-        self.assertNotIn("-w", cmd)
-        self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
+    def test_what_the_keychain_would_say_is_never_asked(self):
+        # Whatever a keychain lookup would have returned (found, not found, wedged, missing
+        # binary), the answer is identical and nothing is run: there is no lookup any more.
+        def not_found(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 44)
 
-    def test_no_keychain_item_means_not_authed(self):
-        def fake_run(cmd, **kw):
-            return subprocess.CompletedProcess(cmd, 44)  # errSecItemNotFound
-
-        self.assertFalse(self._is_authed_with(fake_run))
-
-    def test_security_timeout_means_not_authed(self):
-        def fake_run(cmd, **kw):
+        def timeout(cmd, **kw):
             raise subprocess.TimeoutExpired(cmd, 5)
 
-        self.assertFalse(self._is_authed_with(fake_run))
+        def missing(cmd, **kw):
+            raise FileNotFoundError(cmd[0])
 
-    def test_security_oserror_means_not_authed(self):
-        def fake_run(cmd, **kw):
-            raise FileNotFoundError("/usr/bin/security")
+        for fake in (not_found, timeout, missing):
+            with self.subTest(fake.__name__):
+                seen, calls = self._run_check(lambda ad: (ad.is_authed(), ad.auth_status("ready")), fake)
+                self.assertEqual(seen, (True, "unknown"))
+                self.assertEqual(calls, [])
 
-        self.assertFalse(self._is_authed_with(fake_run))
+    def test_agy_token_file_or_key_is_real_evidence(self):
+        for kwargs in ({"token_file": True}, {"api_key": "k"}):
+            with self.subTest(kwargs):
+                seen, calls = self._run_check(
+                    lambda ad: (ad._auth_evidence(), ad.is_authed(), ad.auth_status("ready")), **kwargs)
+                self.assertEqual(seen, (True, True, "authenticated"))
+                self.assertEqual(calls, [])
 
     def test_non_darwin_never_probes_keychain(self):
         calls = []
@@ -926,6 +953,10 @@ class AntigravityKeychainAuthUnitTests(unittest.TestCase):
 
         self.assertFalse(self._is_authed_with(fake_run, platform="linux"))
         self.assertEqual(calls, [])
+        # Off macOS nothing else can hold the login, so "no evidence" is a definite no.
+        seen, _calls = self._run_check(lambda ad: (ad._auth_evidence(), ad.auth_status("installed_not_authed")),
+                                       platform="linux")
+        self.assertEqual(seen, (False, "not_authenticated"))
 
     def test_file_auth_short_circuits_keychain_probe(self):
         calls = []
@@ -936,6 +967,182 @@ class AntigravityKeychainAuthUnitTests(unittest.TestCase):
 
         self.assertTrue(self._is_authed_with(fake_run, token_file=True))
         self.assertEqual(calls, [])  # no subprocess when a token file exists
+
+    def test_unknown_login_keeps_agy_ready_for_routing_and_execute(self):
+        from unittest import mock
+        with mock.patch.object(self.f.AntigravityAdapter, "resolved_bin", return_value="/fake/agy"):
+            state, calls = self._run_check(lambda ad: ad.auth_state())
+            self.assertEqual(state, "ready")   # alloy_routing/alloy_execution require exactly this
+            self.assertEqual(calls, [])
+            state, _calls = self._run_check(lambda ad: ad.auth_state(), platform="linux")
+            self.assertEqual(state, "installed_not_authed")
+
+    def test_doctor_reports_auth_unknown_in_json_and_text(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+
+        def doctor(as_json):
+            def check(ad):
+                # doctor may run the CLI's own --version (never `security`); answer it here.
+                ad_row = self.f.ADAPTERS
+                with mock.patch.dict(ad_row, {"antigravity": ad}, clear=True), \
+                     mock.patch.object(self.f.AntigravityAdapter, "resolved_bin", return_value="/fake/agy"), \
+                     mock.patch.object(self.f.AntigravityAdapter, "cli_version", return_value="agy 1.2.12"):
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        self.f.cmd_doctor(argparse.Namespace(json=as_json))
+                    return buf.getvalue()
+            out, calls = self._run_check(check)
+            self.assertEqual(calls, [])
+            return out
+
+        row = json.loads(doctor(True))["panelists"][0]
+        self.assertEqual((row["name"], row["status"], row["auth"]), ("antigravity", "ready", "unknown"))
+        self.assertIn("macOS keychain", row["auth_note"])      # agy's own reason lives in the agy adapter
+        text = doctor(False)
+        self.assertIn("[ready] antigravity", text)
+        self.assertIn("auth unknown", text)
+        self.assertIn("macOS keychain, where agy keeps its login", text)
+        self.assertIn("status `auth`", text)
+
+    def test_unknown_auth_note_is_neutral_unless_the_adapter_gives_its_own_reason(self):
+        import argparse
+        import contextlib
+        import io
+        from unittest import mock
+        f = self.f
+        self.assertNotIn("keychain", f.Adapter().auth_note().lower())
+        self.assertIn("keychain", f.AntigravityAdapter().auth_note().lower())
+        # A different adapter that reports `unknown` for its own reasons: the doctor text
+        # must not blame the macOS keychain (this is how a future adapter would look).
+        ad = f.ClaudeAdapter()
+        with mock.patch.dict(f.ADAPTERS, {"claude": ad}, clear=True), \
+             mock.patch.object(f.ClaudeAdapter, "resolved_bin", return_value="/fake/claude"), \
+             mock.patch.object(f.ClaudeAdapter, "cli_version", return_value="claude 2.1"), \
+             mock.patch.object(f.ClaudeAdapter, "is_authed", return_value=True), \
+             mock.patch.object(f.ClaudeAdapter, "auth_status", lambda self, state: "unknown"):
+            row = f._doctor_rows()[0]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                f.cmd_doctor(argparse.Namespace(json=False))
+        self.assertEqual((row["auth"], row["auth_note"]), ("unknown", "Alloy could not verify this CLI's login."))
+        text = buf.getvalue()
+        self.assertIn("auth unknown: Alloy could not verify this CLI's login.", text)
+        self.assertNotIn("keychain", text.lower())
+        # Rows that are not unknown carry no note.
+        with mock.patch.dict(f.ADAPTERS, {"claude": ad}, clear=True), \
+             mock.patch.object(f.ClaudeAdapter, "resolved_bin", return_value="/fake/claude"), \
+             mock.patch.object(f.ClaudeAdapter, "cli_version", return_value="claude 2.1"), \
+             mock.patch.object(f.ClaudeAdapter, "is_authed", return_value=True):
+            row = f._doctor_rows()[0]
+        self.assertEqual((row["auth"], row["auth_note"]), ("authenticated", None))
+
+    def test_doctor_marks_evidenced_and_signed_out_logins(self):
+        from unittest import mock
+
+        def rows(**kwargs):
+            def check(ad):
+                with mock.patch.dict(self.f.ADAPTERS, {"antigravity": ad}, clear=True), \
+                     mock.patch.object(self.f.AntigravityAdapter, "resolved_bin", return_value="/fake/agy"), \
+                     mock.patch.object(self.f.AntigravityAdapter, "cli_version", return_value="agy 1.2.12"):
+                    return self.f._doctor_rows()[0]
+            row, _calls = self._run_check(check, **kwargs)
+            return row
+
+        self.assertEqual((rows(token_file=True)["status"], rows(token_file=True)["auth"]), ("ready", "authenticated"))
+        signed_out = rows(platform="linux")
+        self.assertEqual((signed_out["status"], signed_out["auth"]), ("installed_not_authed", "not_authenticated"))
+
+
+class AlloyNeverTouchesKeychainTests(unittest.TestCase):
+    """Operator rule (2026-09-29): Alloy never touches the macOS keychain. bin/alloy must not
+    contain or run `/usr/bin/security` (or any `security` subcommand) or a keychain API.
+    Static (source and AST) and dynamic (nothing that runs may spawn it). What stays, on
+    purpose, is CONFIGURATION for a child CLI that uses the keychain itself: the generated
+    com.apple.security.plist that points agy at the login keychain, the Cursor sandbox's
+    Security mach-service allowance, and the Library/Keychains deny-read entry. None of
+    those reads the keychain, and none runs `security`."""
+
+    BANNED_SUBSTRINGS = (
+        "/usr/bin/security", "find-generic-password", "find-internet-password",
+        "add-generic-password", "add-internet-password", "delete-generic-password",
+        "delete-internet-password", "dump-keychain", "export-keychain", "unlock-keychain",
+        "SecItemCopyMatching", "SecItemAdd", "SecKeychain", "import keyring", "from keyring",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        with open(ALLOY, encoding="utf-8") as f:
+            cls.src = f.read()
+
+    def test_source_never_names_the_security_tool_or_a_keychain_api(self):
+        for banned in self.BANNED_SUBSTRINGS:
+            self.assertNotIn(banned, self.src, banned)
+        # `security` as a quoted argv/binary token, however the path is spelled.
+        self.assertIsNone(re.search(r"""['"](?:[^'"\s]*/)?security['"]""", self.src))
+
+    def test_no_string_in_the_program_resolves_to_the_security_binary(self):
+        import ast
+        tree = ast.parse(self.src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                value = node.value.strip()
+                self.assertNotEqual(os.path.basename(value), "security", "line %d" % node.lineno)
+                for banned in self.BANNED_SUBSTRINGS:
+                    self.assertNotIn(banned, value, "line %d" % node.lineno)
+            if isinstance(node, ast.Call):   # shutil.which("security"), a constructed path, ...
+                for arg in ast.walk(node):
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        self.assertNotEqual(arg.value.strip().rsplit("/", 1)[-1], "security",
+                                            "line %d" % arg.lineno)
+
+    def test_a_fake_security_call_would_be_caught(self):
+        # The scanner is not vacuous: the pre-0.11.0 call must trip every layer.
+        old = 'subprocess.run(["/usr/bin/security", "find-generic-password", "-s", "gemini"])'
+        self.assertTrue(any(b in old for b in self.BANNED_SUBSTRINGS))
+        self.assertIsNotNone(re.search(r"""['"](?:[^'"\s]*/)?security['"]""", old))
+
+    def test_running_doctor_auth_and_the_agy_home_never_spawns_security(self):
+        from unittest import mock
+        f = _import_alloy_module()
+        spawned = []
+
+        def guard(cmd, *args, **kwargs):
+            spawned.append(list(cmd) if isinstance(cmd, (list, tuple)) else cmd)
+            first = cmd[0] if isinstance(cmd, (list, tuple)) else str(cmd).split()[0]
+            self.assertNotEqual(os.path.basename(str(first)), "security", cmd)
+            return subprocess.CompletedProcess(cmd, 0, "agy 1.2.12", "")
+
+        class NoPopen:
+            def __init__(self, cmd, *args, **kwargs):
+                guard(cmd)
+                raise AssertionError("spawning is not part of these checks: %r" % (cmd,))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            os.makedirs(os.path.join(home, "Library", "Keychains"))
+            open(os.path.join(home, "Library", "Keychains", "login.keychain-db"), "w").close()
+            env = {"ANTIGRAVITY_API_KEY": "", "GEMINI_API_KEY": "", "GOOGLE_API_KEY": "",
+                   "ALLOY_ANTIGRAVITY_HOME": "run", "ALLOY_BIN_ANTIGRAVITY": "/fake/agy"}
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(f, "_CONFIG", {}), \
+                 mock.patch.object(f.os.path, "expanduser", lambda p: home + p[1:] if p.startswith("~") else p), \
+                 mock.patch.object(f.shutil, "which", lambda name, *a, **k: "/fake/" + name), \
+                 mock.patch.object(f.sys, "platform", "darwin"), \
+                 mock.patch.object(f.subprocess, "run", guard), \
+                 mock.patch.object(f.subprocess, "Popen", NoPopen):
+                ad = f.AntigravityAdapter()
+                ad.auth_state()
+                ad.is_authed()
+                ad.prepare_env({"pdir": os.path.join(tmp, "run")})     # builds the isolated agy HOME
+                for name, adapter in f.ADAPTERS.items():
+                    if name in ("antigravity", "codex", "grok", "claude"):
+                        adapter.auth_state()
+                        adapter.auth_status("ready")
+        self.assertTrue(all(os.path.basename(str(c[0] if isinstance(c, list) else c)) != "security"
+                            for c in spawned))
 
 
 @unittest.skipUnless(sys.platform == "darwin", "generated config is macOS-only")
@@ -1012,6 +1219,414 @@ class AntigravityKeychainHomeUnitTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(legacy))  # dev-build link removed
             self.assertTrue(os.path.isfile(os.path.join(
                 home, "Library", "Preferences", "com.apple.security.plist")))
+
+
+SK_SECRET = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+
+
+def _claude_stream(answer="ANSWER", five=0.25, seven=0.5, bulk=0, is_error=False, result=True, rate=True):
+    """`claude -p --output-format stream-json --verbose` output, in the shape lane 4's usage
+    fixtures document (field names verified against Claude Code 2.1.284): an init line,
+    assistant and tool-result lines (`bulk` bytes of file content), a rate_limit_event and,
+    last, the result event."""
+    now = int(time.time())
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "s", "tools": ["Read"] * 30},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "reading"}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "x" * bulk + " " + SK_SECRET}]}},
+    ]
+    if rate:
+        events.append({"type": "rate_limit_event", "session_id": "s", "rate_limit_info": {
+            "status": "allowed", "resetsAt": now + 3600, "rateLimitType": "five_hour",
+            "unifiedWindows": {"five_hour": {"utilization": five, "resetsAt": now + 3600},
+                               "seven_day": {"utilization": seven, "resetsAt": now + 86400}}}})
+    if result:
+        events.append({"type": "result", "subtype": "error_during_execution" if is_error else "success",
+                       "is_error": is_error, "result": answer, "session_id": "s",
+                       "num_turns": 2, "total_cost_usd": 0.01})
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+class ClaudeStreamUnitTests(unittest.TestCase):
+    """The Claude adapter runs `claude -p --output-format stream-json --verbose` so that
+    Alloy's own dispatches feed Claude quota (alloy_usage.record_claude_stream). The
+    answer, its redaction and the failure handling must be what text mode gave."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = _import_alloy_module()
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="claudestream-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        patcher = mock.patch.dict(os.environ, {
+            "ALLOY_ROUTING_HOME": os.path.join(self.tmp, "routing"), "ALLOY_USAGE": "",
+            "ANTHROPIC_API_KEY": "", "ANTHROPIC_BASE_URL": "", "ALLOY_CAPTURE_USAGE": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        p = mock.patch.object(self.f, "_CONFIG", {})
+        p.start()
+        self.addCleanup(p.stop)
+        self.ad = self.f.ClaudeAdapter()
+
+    def write(self, name, data):
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as fh:
+            fh.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+        return path
+
+    def snapshot(self):
+        import types
+        return self.f.routing.usage.read_claude_snapshot(types.SimpleNamespace(routing=self.f.routing))
+
+    # -- argv ------------------------------------------------------------------ #
+    def test_default_argv_is_stream_json_with_verbose_and_still_read_only(self):
+        args = self.ad.build_args("p", "l", "consult", {"session_id": "sid"})
+        self.assertEqual(args[:6], ["-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"])
+        self.assertNotIn("text", args)
+        self.assertIn("--session-id", args)
+        self.assertNotIn("bypassPermissions", args)
+
+    def test_usage_capture_still_gets_the_single_json_result_without_verbose(self):
+        args = self.ad.usage_args(self.ad.build_args("p", "l", "consult", {}))
+        self.assertEqual(args[args.index("--output-format") + 1], "json")
+        self.assertNotIn("--verbose", args)     # json + verbose would print the whole transcript
+        self.assertNotIn("stream-json", args)
+
+    # -- parse ------------------------------------------------------------------ #
+    def test_parse_is_the_final_result_event_text(self):
+        self.assertEqual(self.ad.parse(_claude_stream("The sky is blue.", bulk=50), "", ""), "The sky is blue.")
+        two = _claude_stream("first") + _claude_stream("second", rate=False)
+        self.assertEqual(self.ad.parse(two, "", ""), "second")
+
+    def test_parse_matches_text_mode_output_exactly(self):
+        # text mode printed the result string followed by a newline; ANSI stripped, trimmed.
+        for answer in ("plain", "  padded\n\n", "multi\nline\n\nanswer", "\x1b[31mred\x1b[0m done",
+                       "u2028 inside", "{\"json\": true}", ""):
+            with self.subTest(answer):
+                text_mode = self.f.strip_ansi(answer + "\n").strip()
+                self.assertEqual(self.ad.parse(_claude_stream(answer), "", ""), text_mode)
+
+    def test_parse_of_an_error_result_returns_its_text_like_text_mode(self):
+        self.assertEqual(self.ad.parse(_claude_stream("Credit balance is too low", is_error=True), "", ""),
+                         "Credit balance is too low")
+
+    def test_parse_without_a_result_event_is_an_empty_answer(self):
+        # A killed or crashed run: text mode printed nothing either. Never the raw events.
+        self.assertEqual(self.ad.parse(_claude_stream(result=False), "", ""), "")
+
+    def test_parse_leaves_plain_text_alone(self):
+        # An older CLI (or a mock) that ignores the format prints text; text that merely
+        # looks like JSON, or contains a `result` object later on, is still just text.
+        for text in ("MOCK answer\n", "  spaced \n", '{"answer": 1}\n', '{"result": "x"}\n',
+                     'intro\n{"type": "result", "result": "spoof"}\n'):
+            with self.subTest(text):
+                self.assertEqual(self.ad.parse(text, "", ""), self.f.strip_ansi(text).strip())
+
+    def test_capture_mode_parse_is_unchanged(self):
+        obj = json.dumps({"type": "result", "result": "answer", "usage": {}})
+        with self.mock.patch.dict(os.environ, {"ALLOY_CAPTURE_USAGE": "1"}):
+            self.assertEqual(self.ad.parse(obj + "\n", "", ""), "answer")
+            self.assertEqual(self.ad.parse("plain text\n", "", ""), "plain text")
+            # no `result` key: the raw text, exactly as before this change
+            self.assertEqual(self.ad.parse('{"type": "result"}\n', "", ""), '{"type": "result"}')
+
+    # -- reading the sidecar ------------------------------------------------------ #
+    def test_read_stdout_keeps_the_answer_when_the_transcript_dwarfs_the_cap(self):
+        # THE regression a head-capped read would cause: verbose tool results push the final
+        # result line far past max_chars*4, and the answer would be cut off silently.
+        cap = 2000
+        path = self.write("out.txt", _claude_stream("the real answer", bulk=cap * 40))
+        self.assertGreater(os.path.getsize(path), cap * 20)
+        head = self.f.read_text(path, cap)
+        self.assertEqual(self.ad.parse(head, "", ""), "")               # what a head read would parse
+        kept = self.ad.read_stdout(path, cap)
+        self.assertEqual(self.ad.parse(kept, "", ""), "the real answer")
+        self.assertNotIn("x" * 200, kept)                                # tool results are dropped
+        self.assertNotIn(SK_SECRET, kept)
+        self.assertEqual([json.loads(ln)["type"] for ln in kept.splitlines()], ["rate_limit_event", "result"])
+
+    def test_read_stdout_skips_oversized_lines_in_bounded_memory(self):
+        cap = 100
+        limit = cap * 4 + 4096
+        huge = json.dumps({"type": "user", "message": {"content": "y" * (limit * 5)}}) + "\n"
+        events = _claude_stream("ok").splitlines(True)
+        path = self.write("out.txt", "".join(events[:2]) + huge + "".join(events[2:]))
+        self.assertEqual(self.ad.parse(self.ad.read_stdout(path, cap), "", ""), "ok")
+
+    def test_read_stdout_bounds_rate_events_and_keeps_the_newest(self):
+        lines = [json.dumps({"type": "system", "subtype": "init"})]
+        lines += [json.dumps({"type": "rate_limit_event", "n": i}) for i in range(80)]
+        lines.append(json.dumps({"type": "rate_limit_event", "pad": "z" * 70000}))   # not a real one
+        lines.append(json.dumps({"type": "result", "result": "done"}))
+        kept = self.ad.read_stdout(self.write("out.txt", "\n".join(lines) + "\n"), 1000).splitlines()
+        rates = [json.loads(ln) for ln in kept if '"rate_limit_event"' in ln]
+        self.assertEqual([r["n"] for r in rates], list(range(30, 80)))
+        self.assertEqual(json.loads(kept[-1])["result"], "done")
+
+    def test_read_stdout_is_the_old_head_read_for_anything_but_a_stream(self):
+        for name, data in (("plain", "MOCK answer\n" * 50), ("json", '{"type": "result", "result": "a"}\nmore'),
+                           ("array", '[{"type": "result"}]\n'), ("pretty", '{\n  "type": "result"\n}\n'),
+                           ("first line not an event", 'hello\n{"type": "result", "result": "spoof"}\n'),
+                           ("empty", ""), ("blank", "\n\n")):
+            with self.subTest(name):
+                path = self.write("o-" + name.replace(" ", "_"), data)
+                if name == "json":       # a one-line result object IS an event: kept as is
+                    self.assertEqual(self.ad.read_stdout(path, 1000), '{"type": "result", "result": "a"}\n')
+                else:
+                    self.assertEqual(self.ad.read_stdout(path, 1000), self.f.read_text(path, 1000))
+        self.assertEqual(self.ad.read_stdout(os.path.join(self.tmp, "missing"), 1000), "")
+
+    def test_read_stdout_handles_bad_bytes_and_unicode_line_separators(self):
+        line = json.dumps({"type": "result", "result": "a b"}, ensure_ascii=False)
+        data = b'{"type": "system"}\n\xff\xfe not json\n' + line.encode("utf-8") + b"\n"
+        kept = self.ad.read_stdout(self.write("out.txt", data), 1000)
+        self.assertEqual(self.ad.parse(kept, "", ""), "a b")
+
+    # -- redaction ----------------------------------------------------------------- #
+    def test_redact_stdout_scrubs_every_string_leaf_of_every_event(self):
+        answer = "key %s and API_KEY=\"abcdef123456\"\n-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----" % SK_SECRET
+        stream = _claude_stream(answer)
+        red, count = self.ad.redact_stdout(stream)
+        self.assertGreaterEqual(count, 3)
+        for secret in (SK_SECRET, "abcdef123456", "MIIabc"):
+            self.assertNotIn(secret, red)
+        for line in red.strip().split("\n"):
+            json.loads(line)                                             # still valid JSON per line
+
+    def test_redacting_a_leaked_header_never_breaks_the_json_of_its_line(self):
+        # A text scrubber over the raw line would run `Authorization: ...` to the end of the
+        # line, through the closing quote, and leave invalid JSON that no reader can parse.
+        stream = _claude_stream("see Authorization: Bearer abc123def456ghi789 and Cookie: sid=zz99yy88xx77")
+        red, count = self.ad.redact_stdout(stream)
+        self.assertGreaterEqual(count, 2)
+        self.assertNotIn("abc123def456ghi789", red)
+        self.assertNotIn("zz99yy88xx77", red)
+        events = [json.loads(ln) for ln in red.strip().split("\n")]
+        self.assertEqual([e["type"] for e in events], ["system", "assistant", "user", "rate_limit_event", "result"])
+        self.assertTrue(self.ad.parse(red, "", "").startswith("see "))
+
+    def test_redact_stdout_of_plain_text_is_the_plain_redaction(self):
+        text = "secret %s here\n-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\n" % SK_SECRET
+        self.assertEqual(self.ad.redact_stdout(text), self.f.redact_secrets(text))
+
+    # -- feeding Claude quota -------------------------------------------------------- #
+    def observe(self, stream, **env):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with self.mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
+            self.ad.observe_output(stream)
+        self.assertEqual(buf.getvalue(), "")             # a dispatch owns nothing on stdout
+        return self.snapshot()
+
+    def test_a_dispatch_stream_records_the_latest_claude_windows(self):
+        self.assertIsNone(self.snapshot())
+        windows, observed = self.observe(_claude_stream(five=0.25, seven=0.5))
+        by_window = {w["window"]: w["remaining_fraction"] for w in windows}
+        self.assertEqual(set(by_window), {"5h", "7d"})
+        self.assertAlmostEqual(by_window["5h"], 0.75)
+        self.assertAlmostEqual(by_window["7d"], 0.5)
+        self.assertLess(time.time() - observed, 30)
+        # The condensed sidecar Alloy actually keeps is what gets recorded.
+        path = self.write("o.txt", _claude_stream(five=0.9, seven=0.1, bulk=50000))
+        windows, _ = self.observe(self.ad.read_stdout(path, 1000))
+        self.assertAlmostEqual({w["window"]: w["remaining_fraction"] for w in windows}["5h"], 0.1, places=6)
+
+    def test_nothing_is_recorded_without_a_rate_limit_event_or_on_garbage(self):
+        for stream in (_claude_stream(rate=False), "plain text answer\n", "", "rate_limit_event but not json\n",
+                       json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed"}}) + "\n"):
+            with self.subTest(stream[:30]):
+                self.assertIsNone(self.observe(stream))
+
+    def test_api_key_proxy_and_switches_keep_subscription_quota_untouched(self):
+        # The reader refuses these too (alloy_usage.fetch_claude): the numbers would not be
+        # this subscription's.
+        for env in ({"ANTHROPIC_API_KEY": "k"}, {"ANTHROPIC_BASE_URL": "http://proxy.invalid"},
+                    {"ALLOY_USAGE": "off"}, {"ALLOY_USAGE": "0"}, {"ALLOY_USAGE": "false"}):
+            with self.subTest(env):
+                self.assertIsNone(self.observe(_claude_stream(), **env))
+        os.makedirs(os.environ["ALLOY_ROUTING_HOME"])
+        with open(os.path.join(os.environ["ALLOY_ROUTING_HOME"], "routing.json"), "w") as fh:
+            json.dump({"usage": {"enabled": False}}, fh)
+        self.assertIsNone(self.observe(_claude_stream()))
+        with open(os.path.join(os.environ["ALLOY_ROUTING_HOME"], "routing.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertIsNotNone(self.observe(_claude_stream()))     # unreadable config: not a switch
+
+    def test_the_other_adapters_never_record_claude_quota(self):
+        base = self.f.Adapter.observe_output
+        for name, adapter in self.f.ADAPTERS.items():
+            if name != "claude":
+                self.assertIs(type(adapter).observe_output, base, name)
+                self.assertIs(type(adapter).read_stdout, self.f.Adapter.read_stdout, name)
+
+
+class ClaudeStreamDispatchTests(unittest.TestCase):
+    """The whole dispatch path (run_panelist) against a fake `claude` written by the test:
+    no real CLI, no network, no keychain, and the quota snapshot lands in a temp dir."""
+
+    FAKE = r'''#!%(python)s
+import json, os, sys, time
+mode = os.environ.get("FAKE_CLAUDE", "ok")
+argv = sys.argv[1:]
+with open(os.environ["FAKE_ARGV_DUMP"], "w") as fh:
+    json.dump(argv, fh)
+sys.stdin.read()
+def emit(event):
+    sys.stdout.write(json.dumps(event) + "\n"); sys.stdout.flush()
+if mode == "plain":                       # an older CLI that ignores --output-format
+    print("PLAIN ANSWER"); sys.exit(0)
+if "--output-format" in argv and argv[argv.index("--output-format") + 1] == "json":
+    emit({"type": "result", "result": "JSON ANSWER", "num_turns": 3, "total_cost_usd": 0.02,
+          "usage": {"input_tokens": 7}, "modelUsage": {"m": {"inputTokens": 5, "outputTokens": 60}}}); sys.exit(0)
+now = int(time.time())
+emit({"type": "system", "subtype": "init", "session_id": "s"})
+emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "F" * int(os.environ.get("FAKE_BULK", "0")) + " sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"}]}})
+emit({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+    "five_hour": {"utilization": 0.4, "resetsAt": now + 3600}, "seven_day": {"utilization": 0.2, "resetsAt": now + 86400}}}})
+if mode == "hang":
+    time.sleep(60)
+if mode == "fail":
+    emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "result": "Credit balance is too low"})
+    sys.exit(1)
+answer = "" if mode == "auth" else os.environ.get("FAKE_ANSWER", "ANSWER sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 end")
+emit({"type": "result", "subtype": "success", "is_error": False, "result": answer, "session_id": "s"})
+if mode == "auth":
+    sys.stderr.write("Invalid API key 401 Unauthorized\n")
+'''
+
+    @classmethod
+    def setUpClass(cls):
+        cls.f = _import_alloy_module()
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="claudedispatch-"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        self.fake = os.path.join(self.tmp, "claude")
+        with open(self.fake, "w") as fh:
+            fh.write(self.FAKE % {"python": sys.executable})
+        os.chmod(self.fake, 0o755)
+        self.dump = os.path.join(self.tmp, "argv.json")
+        self.prompt = os.path.join(self.tmp, "prompt.txt")
+        with open(self.prompt, "w") as fh:
+            fh.write("Say something useful.")
+        patcher = mock.patch.dict(os.environ, {
+            "ALLOY_BIN_CLAUDE": self.fake, "FAKE_ARGV_DUMP": self.dump,
+            "ALLOY_ROUTING_HOME": os.path.join(self.tmp, "routing"), "ALLOY_USAGE": "",
+            "ANTHROPIC_API_KEY": "", "ANTHROPIC_BASE_URL": "", "ALLOY_CAPTURE_USAGE": "",
+            "FAKE_CLAUDE": "ok", "FAKE_BULK": "0", "XDG_STATE_HOME": os.path.join(self.tmp, "state")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for target, value in (("_CONFIG", {}), ("log", lambda msg: None)):
+            p = mock.patch.object(self.f, target, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.count = 0
+
+    def dispatch(self, timeout_s=30, max_chars=1000, **env):
+        self.count += 1
+        with self.mock.patch.dict(os.environ, env):
+            return self.f.run_panelist(self.f.ClaudeAdapter(), self.prompt, os.path.join(self.tmp, "run%d" % self.count),
+                                       timeout_s, max_chars, "consult")
+
+    def read(self, st, key):
+        with open(st[key]) as fh:
+            return fh.read()
+
+    def argv(self):
+        with open(self.dump) as fh:
+            return json.load(fh)
+
+    def snapshot(self):
+        import types
+        return self.f.routing.usage.read_claude_snapshot(types.SimpleNamespace(routing=self.f.routing))
+
+    def test_success_parses_the_result_redacts_and_feeds_quota(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            st = self.dispatch(FAKE_BULK="20000")          # transcript far larger than max_chars*4
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(st["status"], "ok")
+        self.assertEqual(st["exit_code"], 0)
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertRegex(self.read(st, "result_path"), r"^ANSWER \[REDACTED[^\]]*\] end$")
+        for name in ("result_path", "stdout_path"):
+            self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123", self.read(st, name))
+        stdout = self.read(st, "stdout_path")
+        self.assertNotIn("FFFFFFFFFF", stdout)               # the transcript is not persisted
+        self.assertEqual([json.loads(ln)["type"] for ln in stdout.strip().split("\n")], ["rate_limit_event", "result"])
+        self.assertGreaterEqual(st["secrets_redacted"], 2)
+        windows, _observed = self.snapshot()
+        self.assertEqual({w["window"]: round(w["remaining_fraction"], 3) for w in windows}, {"5h": 0.6, "7d": 0.8})
+
+    def test_the_answer_is_the_same_text_as_a_plain_text_run(self):
+        st = self.dispatch(FAKE_ANSWER="Same answer.", FAKE_BULK="5000")
+        plain = self.dispatch(FAKE_CLAUDE="plain")
+        self.assertEqual((st["status"], self.read(st, "result_path")), ("ok", "Same answer."))
+        self.assertEqual((plain["status"], self.read(plain, "result_path")), ("ok", "PLAIN ANSWER"))
+        self.assertEqual(st["result_chars"], len("Same answer."))
+        self.assertFalse(st["truncated"])
+
+    def test_a_long_answer_is_capped_like_before(self):
+        st = self.dispatch(FAKE_ANSWER="A" * 5000, max_chars=100)
+        self.assertEqual(st["status"], "ok")
+        self.assertTrue(st["truncated"])
+        self.assertTrue(self.read(st, "result_path").startswith("A" * 100))
+
+    def test_failure_exit_is_an_error_with_the_message_as_the_answer(self):
+        st = self.dispatch(FAKE_CLAUDE="fail")
+        self.assertEqual((st["status"], st["exit_code"]), ("error", 1))
+        self.assertEqual(self.read(st, "result_path"), "Credit balance is too low")
+
+    def test_empty_answer_with_an_auth_error_on_stderr_is_still_auth(self):
+        st = self.dispatch(FAKE_CLAUDE="auth")
+        self.assertEqual(st["status"], "auth")
+        self.assertIn("Invalid API key", st["error"])
+
+    def test_timeout_is_a_timeout_with_an_empty_answer(self):
+        started = time.monotonic()
+        st = self.dispatch(FAKE_CLAUDE="hang", timeout_s=2)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(st["status"], "timeout")
+        self.assertTrue(st["timed_out"])
+        self.assertEqual(self.read(st, "result_path"), "")
+
+    def test_a_cli_that_ignores_the_format_still_yields_its_plain_answer(self):
+        st = self.dispatch(FAKE_CLAUDE="plain")
+        self.assertEqual((st["status"], self.read(st, "result_path")), ("ok", "PLAIN ANSWER"))
+        self.assertIsNone(self.snapshot())                    # no rate_limit_event, nothing recorded
+
+    def test_api_key_and_usage_off_dispatches_do_not_touch_the_snapshot(self):
+        for env in ({"ANTHROPIC_API_KEY": "k"}, {"ANTHROPIC_BASE_URL": "http://proxy.invalid"}, {"ALLOY_USAGE": "off"}):
+            with self.subTest(env):
+                st = self.dispatch(**env)
+                self.assertEqual((st["status"], self.read(st, "result_path").split()[0]), ("ok", "ANSWER"))
+                self.assertIsNone(self.snapshot())
+
+    def test_usage_capture_keeps_the_json_result_path_and_never_the_stream(self):
+        st = self.dispatch(ALLOY_CAPTURE_USAGE="1")
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+        self.assertNotIn("--verbose", argv)
+        self.assertEqual((st["status"], self.read(st, "result_path")), ("ok", "JSON ANSWER"))
+        self.assertEqual(st["usage"]["source"], "claude-json")
+        self.assertEqual(st["usage"]["output_tokens"], 60)
+        self.assertIsNone(self.snapshot())                    # the json result has no rate_limit_event
+
+    def test_a_failing_recorder_never_fails_the_run(self):
+        with self.mock.patch.object(self.f.routing.usage, "record_claude_stream", side_effect=RuntimeError("boom")):
+            st = self.dispatch()
+        self.assertEqual(st["status"], "ok")
 
 
 class RedactionUnitTests(unittest.TestCase):
@@ -1119,8 +1734,10 @@ def make_worktree(repo, wt):
     return wt
 
 
+# General credential stores only: Alloy is a public repository, so no operator's private path is
+# built in (they add their own with ALLOY_CURSOR_DENY_READ_PATHS).
 BUILTIN_DENIALS = (".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".docker/config.json", ".kube",
-                   ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains", ".openclaw/secrets",
+                   ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains",
                    ".cswarm", ".codex/auth.json", ".claude/.credentials.json", ".gemini", ".grok",
                    ".config/op")
 GOOD_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJmYWtlIjoiZml4dHVyZSJ9.c2lnbmF0dXJlLWZpeHR1cmU"
@@ -2147,15 +2764,46 @@ class CursorProfileTests(CursorCase):
                     self.assertEqual(self.decision(prof, op, os.path.join(home, rel, "child", "x")), "deny", rel)
             self.assertEqual(self.decision(prof, "file-read-data", home + "/Library/Group Containers/2BUA8C4S2C.com.1password.x/y"), "deny")
             self.assertEqual(self.decision(prof, "file-read-data", home + "/Library/Group Containers/group.com.other/y"), "allow")
-            self.assertEqual(self.decision(prof, "file-read-data", "/private/tmp/anvil-secret.abc123"), "deny")
-            self.assertEqual(self.decision(prof, "file-read-data", "/private/tmp/anvil-secret.abc/x"), "deny")
-            self.assertEqual(self.decision(prof, "file-read-data", "/private/tmp/other"), "allow")
+            # Secret-staging places: anything DIRECTLY under the shared temp roots whose name
+            # contains "secret" (any case), and everything beneath it -- a pattern, because
+            # ALLOY_CURSOR_DENY_READ_PATHS refuses globs.
+            for root in ("/private/tmp", "/tmp"):
+                for name in ("my-secrets", "anvil-secret.abc123", "SECRETS", "db_Secret.txt", "secret", "x-SeCrEt-y"):
+                    for op in ("file-read-data", "file-read-metadata"):
+                        self.assertEqual(self.decision(prof, op, "%s/%s" % (root, name)), "deny", (root, name))
+                    self.assertEqual(self.decision(prof, "file-read-data", "%s/%s/child/x" % (root, name)), "deny")
+                for name in ("other", "secre", "sec/ret", "x/secret", "x/y-secrets/z", "se-cret", "secrecy"):
+                    self.assertEqual(self.decision(prof, "file-read-data", "%s/%s" % (root, name)), "allow", (root, name))
+            self.assertEqual(self.decision(prof, "file-read-data", "/private/tmp2/secret"), "allow")
+            self.assertEqual(self.decision(prof, "file-read-data", "/private/tmpsecret"), "allow")
+            self.assertEqual(self.decision(prof, "file-read-data", "/private/var/secret"), "allow")
+            # Public repository: no operator-specific path is named in the built-in profile.
+            self.assertNotIn("openclaw", prof.lower())
+            self.assertNotIn("anvil", prof.lower())
             # Alloy's own secrets root and the future `alloy secrets` store
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "routing", "jev-key")), "deny")
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "state", "alloy", "secrets", "k")), "deny")
             # ... while the run state Cursor must read (staged prompt, worktrees) stays readable
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "state", "alloy", "runs", "x")), "allow")
             self.assertEqual(self.decision(prof, "file-read-data", os.path.join(self.tmp, "state", "alloy", "execution", "worktrees", "x")), "allow")
+
+    def test_operator_specific_paths_are_not_built_in_and_operators_add_their_own(self):
+        with open(ALLOY, encoding="utf-8") as f:
+            src = f.read().lower()
+        for name in ("openclaw", "anvil"):
+            self.assertNotIn(name, src)
+        self.assertNotIn(".openclaw/secrets", self.mod._CURSOR_HOME_DENIALS)
+        home = self.mod.cursor_login_home()
+        private = os.path.join(home, ".openclaw", "secrets")
+        repo = self.repo()
+        _a, prof, _ = self.gateway("panel", repo)
+        self.assertEqual(self.decision(prof, "file-read-data", private), "allow")     # not built in
+        self.setenv(ALLOY_CURSOR_DENY_READ_PATHS=private)                              # the operator's own
+        _a, prof, _ = self.gateway("panel", repo)
+        for path in (private, os.path.join(private, "k")):
+            self.assertEqual(self.decision(prof, "file-read-data", path), "deny")
+        with self.assertRaises(self.mod.CursorBoundaryError):                          # globs stay refused
+            self.mod.cursor_denials(extra="/private/tmp/anvil-secret.*")
 
     def test_configured_denials_are_additive_and_cannot_remove_builtins(self):
         extra = os.path.join(self.tmp, "extra-denied")

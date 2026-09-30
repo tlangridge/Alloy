@@ -726,7 +726,7 @@ FORBIDDEN_FLAGS = ('--force', '-f', '--yolo', '--auto-review', '--approve-mcps',
                    '--plugin-dir', '--add-dir', '-w', '--worktree', '--worktree-base', '--plan',
                    '--endpoint', '--api-key', '--header')
 BUILTIN_DENIALS = ('.ssh', '.aws', '.gnupg', '.config/gh', '.netrc', '.docker/config.json', '.kube', '.npmrc',
-                   '.pypirc', '.git-credentials', 'Library/Keychains', '.openclaw/secrets', '.cswarm',
+                   '.pypirc', '.git-credentials', 'Library/Keychains', '.cswarm',
                    '.codex/auth.json', '.claude/.credentials.json', '.gemini', '.grok', '.config/op')
 
 

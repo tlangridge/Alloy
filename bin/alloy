@@ -43,7 +43,9 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import collections
 import hashlib
+import io
 import json
 import os
 import re
@@ -56,9 +58,10 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import uuid
 from collections import namedtuple
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 
 # Resolve the companion module even when invoked through an installed symlink.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -450,7 +453,9 @@ def setting_int(key: str, default: int) -> int:
 #   prepare_env()  -> optional env overrides for the child (e.g. an isolated HOME)
 # Optional runner hooks (defaults change nothing): stdin_from_prompt, capture_in_memory,
 # open_scope()/wrap_argv()/before_spawn()/after_exit() (a per-dispatch resource, the
-# final spawn gateway and a post-run tripwire), output_error(), provider_meta().
+# final spawn gateway and a post-run tripwire), output_error(), provider_meta(),
+# read_stdout() (which part of a large stdout sidecar the engine parses) and
+# observe_output() (a side channel over the finished stdout, e.g. Claude quota).
 # See docs/adding-a-panelist.md for the full contract and a template.
 # --------------------------------------------------------------------------- #
 class Adapter:
@@ -495,6 +500,17 @@ class Adapter:
 
     def is_authed(self) -> bool:  # best-effort heuristic, overridden per adapter
         return True
+
+    def auth_status(self, state: str) -> "str | None":
+        """What `doctor` reports about login, honestly: 'authenticated' (evidence
+        found), 'not_authenticated', 'unknown' (the state cannot be known without
+        reading something Alloy never reads), or None when there is nothing to say."""
+        return {"ready": "authenticated", "installed_not_authed": "not_authenticated"}.get(state)
+
+    def auth_note(self) -> str:
+        """Why `doctor` shows auth `unknown`. Neutral by default; an adapter that returns
+        `unknown` says its own reason (see AntigravityAdapter)."""
+        return "Alloy could not verify this CLI's login."
 
     def cli_version(self) -> str:
         b = self.resolved_bin()
@@ -578,6 +594,19 @@ class Adapter:
         """Sanitize captured stdout for persistence. Structured adapters override
         this so escaped JSON syntax cannot hide string-leaf secrets."""
         return redact_secrets(stdout)
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        """The finished run's stdout as the engine parses, redacts and persists it.
+        Default: the first `cap` bytes of the sidecar file. An adapter whose CLI
+        streams far more than its answer overrides this so the answer, which
+        arrives last, is never cut off by the cap."""
+        return read_text(path, cap)
+
+    def observe_output(self, stdout: str) -> None:
+        """Called once per finished dispatch with the redacted text read_stdout() returned
+        (what is persisted as stdout.txt). Instrumentation only: an exception here never
+        fails a run."""
+        return None
 
     def provider_meta(self, stdout: str) -> dict:
         return {}
@@ -730,8 +759,11 @@ class AntigravityAdapter(Adapter):
     # GENERATED in the isolated HOME too (see _keychain_plist) -- agy stores
     # its OAuth token in the login keychain, and without that config its token
     # save falls through to the System keychain and raises an admin-auth
-    # Keychain dialog on every refresh. Never pass
-    # --dangerously-skip-permissions: it disables layer 1 outright.
+    # Keychain dialog on every refresh. That plist only configures agy's own
+    # keychain use: Alloy never reads the keychain or runs `security` itself,
+    # so it cannot verify a keychain-only login (see _auth_evidence; `doctor`
+    # reports auth `unknown` and the first dispatch reports `auth` if wrong).
+    # Never pass --dangerously-skip-permissions: it disables layer 1 outright.
     #
     # On an older agy (< 1.1.0) none of this holds, so the adapter reports
     # read_only=False + experimental=True and the engine refuses it unless the
@@ -797,7 +829,15 @@ class AntigravityAdapter(Adapter):
     def experimental(self) -> bool:   # type: ignore[override]
         return not self._enforced()
 
-    def is_authed(self) -> bool:
+    def _auth_evidence(self) -> "bool | None":
+        """Login evidence without touching the macOS keychain (operator policy: Alloy
+        never reads it, never runs `security`).
+        True   an API key is set, or agy's own token/credential file exists.
+        False  no evidence and the platform keeps no login anywhere else.
+        None   unknown: on macOS a fresh agy login lives ONLY in the login keychain
+               (the token file is a fallback agy writes when a keyring save fails), so
+               a healthy install can have no auth file at all. Alloy cannot tell that
+               apart from a signed-out one, and says so instead of guessing."""
         if (setting("ANTIGRAVITY_API_KEY") or setting("GEMINI_API_KEY")
                 or setting("GOOGLE_API_KEY")):
             return True
@@ -810,29 +850,23 @@ class AntigravityAdapter(Adapter):
         if os.path.isfile(os.path.join(gdir, "antigravity-cli",
                                        "antigravity-oauth-token")):
             return True
-        # macOS: a fresh agy login stores the token in the login keychain
-        # (service "gemini", account "antigravity"); the token *file* above is
-        # a fallback agy writes only when a keyring save fails, so a healthy
-        # fresh install may have no auth file at all. Metadata-only existence
-        # check: no -w, so the secret is never read and no ACL dialog can
-        # appear. (Existence can't prove the secret is *readable*; a stale
-        # item costs one failed dispatch reported honestly as `auth`.) Cached
-        # per instance -- a wedged securityd would otherwise cost 5s per call.
-        if sys.platform == "darwin":
-            cached = getattr(self, "_kc_authed", None)
-            if cached is not None:
-                return cached
-            try:
-                ok = subprocess.run(
-                    ["/usr/bin/security", "find-generic-password",
-                     "-s", "gemini", "-a", "antigravity"],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=5, env=routing.clean_env()).returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
-                ok = False
-            self._kc_authed = ok
-            return ok
-        return False
+        return None if sys.platform == "darwin" else False
+
+    def is_authed(self) -> bool:
+        # An UNKNOWN login counts as usable, so agy stays routable and dispatchable:
+        # routing and execute gate on auth_state() == "ready". A signed-out agy is
+        # then reported honestly by the first real dispatch (status `auth`, see
+        # _AUTH_FAIL_RE), and `doctor` shows auth `unknown` meanwhile (auth_status).
+        return self._auth_evidence() is not False
+
+    def auth_status(self, state: str) -> "str | None":
+        if state == "ready" and self._auth_evidence() is None:
+            return "unknown"
+        return super().auth_status(state)
+
+    def auth_note(self) -> str:
+        return ("Alloy never reads the macOS keychain, where agy keeps its login, so it "
+                "cannot verify it.")
 
     def model(self) -> "str | None":
         return setting("ALLOY_ANTIGRAVITY_MODEL", self.default_model)
@@ -846,8 +880,8 @@ class AntigravityAdapter(Adapter):
         os.path.join("antigravity-cli", "antigravity-oauth-token"),
     )
 
-    # macOS only: agy also keeps its OAuth token in the login keychain (it
-    # shells out to /usr/bin/security). Both the keychain search list AND the
+    # macOS only: agy also keeps its OAuth token in the login keychain (agy
+    # itself talks to the keychain; Alloy never does). Both the keychain search list AND the
     # default keychain resolve through $HOME/Library/Preferences/
     # com.apple.security.plist, so inside the isolated HOME only the *System*
     # keychain is in scope -- and agy's token save then needs admin auth,
@@ -1469,10 +1503,12 @@ def _rx_escape(text: str) -> str:
 # -- sensitive-read denials ---------------------------------------------------- #
 _CURSOR_HOME_DENIALS = (
     ".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".docker/config.json", ".kube",
-    ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains", ".openclaw/secrets",
+    ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains",
     ".cswarm", ".codex/auth.json", ".claude/.credentials.json", ".gemini", ".grok",
     ".config/op",
 )
+# Only general credential stores are built in. An operator's own paths (a private secrets
+# directory, a staging area in /tmp) are added with ALLOY_CURSOR_DENY_READ_PATHS.
 CursorDenials = namedtuple("CursorDenials", "paths regexes anchors", defaults=((),))
 
 
@@ -1518,7 +1554,13 @@ def cursor_denials(home: "str | None" = None, extra: "str | None" = None) -> Cur
                 paths.append(spelling)
     regexes = [
         "^" + _rx_escape(home) + "/Library/Group Containers/[^/]*1password[^/]*(/.*)?$",
-        "^/private/tmp/anvil-secret\\.[^/]*(/.*)?$",
+        # Common secret-staging places: anything directly under the shared temp roots whose
+        # name contains "secret" (any case), and everything beneath it. A pattern rather
+        # than a path because ALLOY_CURSOR_DENY_READ_PATHS refuses globs. The kernel matches
+        # the resolved path, so /private/tmp is the one that bites on macOS (/tmp is its
+        # symlink); /tmp is listed too so the profile says what it means.
+        "^/private/tmp/[^/]*[Ss][Ee][Cc][Rr][Ee][Tt][^/]*(/.*)?$",
+        "^/tmp/[^/]*[Ss][Ee][Cc][Rr][Ee][Tt][^/]*(/.*)?$",
     ]
     # Literal roots beneath which a regex denial may materialize. They are not
     # themselves denied; they let overlap checks refuse a fingerprint root that
@@ -3127,6 +3169,53 @@ class GrokAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
+# `claude -p --output-format stream-json --verbose` prints one JSON event per line: the
+# init, every assistant/tool message, `rate_limit_event`s and, last, the `result` (the
+# answer). Alloy keeps only those two event types (read_stdout). Everything else -- tool
+# results carry whole files -- is dropped before anything is parsed or persisted.
+_CLAUDE_MAX_RATE_LINE = 64 * 1024     # a rate_limit_event is tiny; a larger one is not one
+_CLAUDE_MAX_RATE_LINES = 50           # the newest ones carry the latest windows
+
+
+def _claude_event(line: str) -> "dict | None":
+    """One stream-json line as an event (a JSON object with a string `type`), else None."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) and isinstance(obj.get("type"), str) else None
+
+
+def claude_stream_events(text: str) -> "list[dict] | None":
+    """The events of a stream-json run, or None when `text` is not one. A stream's first
+    non-blank line is always an event, so a plain-text answer (older CLI, text mode) that
+    merely contains JSON is never mistaken for a stream. Split on \\n only: Claude's own
+    encoder leaves U+2028 raw inside strings and str.splitlines() would cut there."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines or _claude_event(lines[0]) is None:
+        return None
+    return [e for e in map(_claude_event, lines) if e is not None]
+
+
+def claude_quota_recording_enabled() -> bool:
+    """Whether a Claude dispatch may feed the subscription snapshot. Mirrors the reader's
+    own rules (alloy_usage.fetch_claude): usage off, an API key or a proxy override, or a
+    routing config that disables usage all mean the numbers are not this subscription's."""
+    if (setting("ALLOY_USAGE", "") or "").lower() in ("off", "0", "false"):
+        return False
+    if setting("ANTHROPIC_API_KEY") or setting("ANTHROPIC_BASE_URL"):
+        return False
+    try:
+        config = routing.read_json(routing.root() / "routing.json", {})
+    except Exception:
+        config = {}
+    options = config.get("usage") if isinstance(config, dict) else None
+    return not (isinstance(options, dict) and options.get("enabled") is False)
+
+
 class ClaudeAdapter(Adapter):
     # A FRESH `claude` (Claude Code) instance run headless and read-only
     # (`--permission-mode plan`; `-p` skips the trust dialog). Including it makes
@@ -3155,7 +3244,10 @@ class ClaudeAdapter(Adapter):
                    ctx: "dict | None" = None) -> "list[str]":
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
-        args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
+        # stream-json (which requires --verbose in print mode) instead of `text`, so the
+        # run's own rate_limit_event can feed Claude quota (observe_output). The answer is
+        # the stream's final `result` event -- the same text `text` mode prints (parse).
+        args = ["-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"]
         # Trim optional tools/skills, but retain every settings source: user
         # settings may contain deny rules, hooks and credential configuration.
         # ALLOY_CLAUDE_LEAN=0 restores the full tool/skill context.
@@ -3180,7 +3272,9 @@ class ClaudeAdapter(Adapter):
                 "--permission-mode plan --output-format text < <continue prompt file>")
 
     def usage_args(self, argv: "list[str]") -> "list[str]":
-        return _swap_flag(argv, "--output-format", "json")
+        # ALLOY_CAPTURE_USAGE reads the single JSON result object. With --verbose that
+        # output becomes the whole transcript, so the flag goes when the format swaps.
+        return [a for a in _swap_flag(argv, "--output-format", "json") if a != "--verbose"]
 
     def usage(self, stdout_tail: str) -> "dict | None":
         # Claude reports cache reads/writes apart from input; modelUsage also
@@ -3205,7 +3299,78 @@ class ClaudeAdapter(Adapter):
         obj = json_object(stdout) if capture_usage() else None
         if obj is not None and obj.get("type") == "result" and "result" in obj:
             return strip_ansi(str(obj.get("result") or "")).strip()
-        return strip_ansi(stdout).strip()
+        events = None if capture_usage() else claude_stream_events(stdout)
+        if events is not None:
+            # A stream run: the answer is the last `result` event. No `result` at all
+            # (killed, crashed) is an empty answer, exactly as text mode printed nothing.
+            final = [e for e in events if e.get("type") == "result"]
+            return strip_ansi(str(final[-1].get("result") or "")).strip() if final else ""
+        return strip_ansi(stdout).strip()   # plain text: an older CLI or ALLOY_CAPTURE_USAGE fallback
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        """A stream-json transcript can dwarf the answer (verbose tool results carry whole
+        files) and the answer is its LAST line, so a head cap would silently cut it off.
+        Read the sidecar line by line in bounded memory and keep only the `result` and
+        `rate_limit_event` lines. Anything that is not a stream is read exactly as before."""
+        limit = cap * 4 + 4096      # one JSON-escaped line; longer is skipped, never buffered
+        rates: "collections.deque[str]" = collections.deque(maxlen=_CLAUDE_MAX_RATE_LINES)
+        results: "collections.deque[str]" = collections.deque(maxlen=5)
+        first = True
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    raw = f.readline(limit + 1)
+                    if not raw:
+                        break
+                    oversized = len(raw) > limit and not raw.endswith(b"\n")
+                    while oversized:            # drop the rest of the line without holding it
+                        rest = f.readline(1 << 16)
+                        oversized = bool(rest) and not rest.endswith(b"\n")
+                    if len(raw) > limit and first:
+                        return read_text(path, cap)     # the first line cannot be classified
+                    if len(raw) > limit or not raw.strip():
+                        continue
+                    line = raw.decode("utf-8", errors="replace")
+                    event = _claude_event(line)
+                    if first:
+                        if event is None:
+                            return read_text(path, cap)     # plain text: exactly as before
+                        first = False
+                    kind = event.get("type") if event else None
+                    if kind == "result":
+                        results.append(line if line.endswith("\n") else line + "\n")
+                    elif kind == "rate_limit_event" and len(raw) <= _CLAUDE_MAX_RATE_LINE:
+                        rates.append(line if line.endswith("\n") else line + "\n")
+        except FileNotFoundError:
+            return ""
+        if first:                                   # no event at all (empty or blank): as before
+            return read_text(path, cap)
+        return "".join(rates) + "".join(results)
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        if claude_stream_events(stdout) is None:
+            return redact_secrets(stdout)
+        # One JSON event per line: redact every string leaf of each, so JSON escaping
+        # (\" \n \u...) cannot hide a secret from the text scrubber.
+        out, total = [], 0
+        for line in stdout.split("\n"):
+            red, n = redact_json_text(line) if line.strip() else (line, 0)
+            out.append(red)
+            total += n
+        return "\n".join(out), total
+
+    def observe_output(self, stdout: str) -> None:
+        """Alloy's own Claude dispatches feed Claude quota: hand the stream's
+        rate_limit_events to alloy_usage.record_claude_stream, which keeps the latest
+        five_hour/seven_day windows in the same snapshot the status-line command writes.
+        No extra Claude call, no keychain. That function prints a one-line meter; it is
+        swallowed here because a dispatch owns nothing on stdout (the panel prints its
+        manifest path there). A run that produced no rate_limit_event records nothing."""
+        if "rate_limit_event" not in stdout or not claude_quota_recording_enabled():
+            return
+        with redirect_stdout(io.StringIO()):
+            routing.usage.record_claude_stream(types.SimpleNamespace(routing=routing),
+                                               io.StringIO(stdout))
 
 
 # The default panel is the COMPLETE SET of available models: every verified,
@@ -3673,7 +3838,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 status["usage"] = adapter.usage(read_tail(out_path, USAGE_TAIL_BYTES))
             except Exception:  # pragma: no cover - instrumentation never fails a run
                 status["usage"] = None
-        stdout_text = read_text(out_path, read_cap)
+        stdout_text = adapter.read_stdout(out_path, read_cap)
         stderr_text = read_text(err_path, read_cap)
         last_text = read_text(last_path, read_cap)
 
@@ -3688,6 +3853,10 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         write_atomic(last_path, red_last)
 
     result = adapter.parse(stdout_text, stderr_text, last_text)
+    try:
+        adapter.observe_output(red_out)          # the redacted text: only what is persisted is handed on
+    except Exception:  # pragma: no cover - instrumentation never fails a run
+        pass
     result, c_res = redact_secrets(result)        # redact BEFORE capping
     result, truncated = cap_chars(result, max_chars)
     write_atomic(result_path, result)
@@ -4093,11 +4262,13 @@ def _doctor_rows() -> "list[dict]":
             "model": ad.model(),
             "install_hint": ad.install_hint,
             "auth_hint": ad.auth_hint,
+            "auth": ad.auth_status(state),
             "default_panel": ad.read_only and not ad.experimental,
         }
         # os_boundary (bool, Cursor only), a masked auth_detail, a specific
         # fail-closed reason and deprecation warnings; raw CLI output never lands here.
         row.update(ad.doctor_extra(state))
+        row["auth_note"] = ad.auth_note() if row["auth"] == "unknown" else None
         rows.append(row)
     return rows
 
@@ -4146,6 +4317,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"          not installed -> {r['install_hint']}")
         if r["status"] == "not_installed" and r["os_boundary"] is not None:
             print(f"          not installed -> {r['install_hint']}")
+        if r.get("auth") == "unknown":
+            note = r.get("auth_note") or "Alloy could not verify this CLI's login."
+            print(f"          auth unknown: {note}")
+            print(f"          If a run fails with status `auth`, sign in -> {r['auth_hint']}")
         if r.get("auth_detail"):
             print(f"          logged in as {r['auth_detail']}")
         for warning in r.get("warnings") or []:
