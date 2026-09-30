@@ -1,8 +1,9 @@
 # Host or Jev routing
 
 Alloy can ask Jev to assess a task, then choose a configured model through
-Codex, Claude, Grok or Antigravity (`agy`). Routing is opt-in. Regular panels
-retain their existing behavior.
+Codex, Claude, Grok, Antigravity (`agy`) or Cursor. Routing is opt-in. Regular
+panels retain their existing behavior. Cursor routing has extra rules and is
+opt-in per profile; see [Cursor](#cursor).
 
 ## Install and setup
 
@@ -21,7 +22,8 @@ same checkout; conflicting files are preserved and reported.
 Setup detects your CLIs, accepts a hidden Jev key, asks about billing and saves
 editable starter profiles. It then makes one synthetic Jev-only test call.
 Existing CLI logins are reused. You need only one compatible CLI for ordinary
-routing; execute's independent Maker and Checker need additional families.
+routing; execute's independent Maker and Checker need additional families. If it
+detects Cursor it asks whether to enable the shipped Cursor profiles (default no).
 
 For agents or offline configuration:
 
@@ -30,6 +32,9 @@ alloy setup --non-interactive --skip-live-test \
   --billing codex=subscription --billing claude=subscription \
   --billing grok=unknown --billing antigravity=unknown
 ```
+
+Add `--enable-cursor` to enable the shipped Cursor profiles non-interactively, and
+`--billing cursor=subscription` to record Cursor's billing.
 
 Use your actual billing modes. Supply `TYPESAFE_API_KEY` through your environment,
 not an argv flag. Alternatively save only the key in `~/.config/alloy/jev-key`
@@ -115,19 +120,99 @@ alloy models enable --id agy-flash-new
 ```
 
 `models add` updates an existing ID when supplied again. For new profiles,
-model family is explicit because Antigravity can expose other providers' models.
-Model IDs are data, not routing code. `models refresh` lists models through Grok
-and Antigravity; Codex and Claude use configured profiles because this integration
-has no stable model-list command for them. Discovered IDs are not automatically
+model family is explicit because Antigravity can expose other providers' models
+(for Cursor it is derived from the model ID and must match; see below).
+Model IDs are data, not routing code. `models refresh` lists models through Grok,
+Antigravity and Cursor; Codex and Claude use configured profiles because this
+integration has no stable model-list command for them. Discovered IDs are not automatically
 enabled or assigned capabilities. Catalog refresh preserves configured profiles.
 
 Routing refreshes discovery after its configured TTL (default one day), or when
 installed versions change. Failed discovery preserves previous observations and
 reports errors. Every routing call probes CLI version/help and checks the
-adapter's read-only eligibility. This detects missing invocation flags, but
+adapter's read-only eligibility. Cursor's probes run only inside its macOS
+sandbox; without a working sandbox Cursor is reported incompatible and is never
+routed. This detects missing invocation flags, but
 cannot certify unchanged CLI permission semantics. Incompatible adapters are
 excluded; substantial CLI changes can require adapter updates. Explicitly
 configured model access is still best-effort until its first execution.
+
+## Cursor
+
+Cursor is the fifth provider. Its public name is `cursor` and its executable is
+`cursor-agent`. The legacy name `cursor-agent` is accepted only as an input alias
+(`ALLOY_PANELISTS`, `--panelists`, `--cli`, imported profiles) and is saved as
+`cursor`. Cursor runs on macOS only: every Cursor process runs inside a
+`sandbox-exec` profile, and every Cursor role is refused on Linux, on any other
+platform, and whenever the sandbox self-test fails. See [SECURITY.md](../SECURITY.md).
+
+**Family comes from the model ID.** Cursor serves several vendors' models, so a
+Cursor profile's family is derived from its model (after removing bracket
+overrides and a trailing `-fast`), and a configured `family` must equal it:
+
+| Model ID starts with | Family |
+| --- | --- |
+| `claude-` | `anthropic` |
+| `gpt-`, `codex-` or exactly `codex` | `openai` |
+| `gemini-` | `google` |
+| `grok-`, `cursor-grok-` | `xai` |
+| `composer-` | `cursor` |
+| `auto` or anything else | none: refused |
+
+Family `cursor` is reserved for Composer models on the `cursor` adapter; no other
+adapter or model can claim it, and `--host-family cursor` is valid for a host
+running Composer. `auto` can change providers between calls, so it and every
+unknown model ID are refused at every step: they may appear in discovery as not
+routable, but they never enter a routed card, a panel command line or an
+execute role. A plain or default panel always sends an explicit model, `composer-2.5`
+unless you pin one with `ALLOY_CURSOR_MODEL`. Independence is judged on the
+derived family: a Cursor-served Claude model is Anthropic, so it can never be the
+Checker for an Anthropic host or Maker, and Composer is independent of all four
+vendors. Quota pacing likewise compares the model's derived family with the host's.
+
+**Profiles ship disabled.** Five starter profiles use adapter `cursor`, are billed
+as subscription, share the quota pool `cursor`, and carry the evidence note
+"Cursor discovery only; not benchmarked": `cursor-large-composer-2-5`,
+`cursor-large-gpt-5-6-sol`, `cursor-large-claude-opus-5-5`,
+`cursor-medium-gemini-3-8-flash` and `cursor-large-grok-4-7`. Installing the CLI
+enables nothing. Enable them with `alloy setup --enable-cursor` (or the guided
+prompt, default no), or one at a time:
+
+```sh
+alloy models enable --id cursor-large-composer-2-5
+```
+
+`alloy setup --refresh-defaults` adds missing shipped profiles without changing
+enabled states, pins or billing. An `ALLOY_CURSOR_MODEL` pin still limits routing
+to a profile with that exact model, like every other adapter's pin.
+
+**Effort and fast variants travel inside `--model`.** Alloy never passes
+`--effort` to Cursor. It rewrites the model to one string such as
+`claude-opus-5-5[effort=high,fast=false]`. Effort is taken from, in order:
+`ALLOY_CURSOR_EFFORT` (or its legacy spelling), the profile's `effort_by_mode` for
+the role, the profile's `effort`, an effort already in the model ID (a bracket
+field or a final `-none|-minimal|-low|-medium|-high|-xhigh|-max`), then Cursor's
+own default. The documented `gpt-5.5-extra-high` ID is one indivisible model.
+Cursor has no `ultra`; a Cursor profile that resolves to it fails validation
+rather than being downgraded. Fast variants use a different service tier, so
+they are refused (`-fast` IDs, `[fast=true]`) unless the profile sets
+`cursor_fast: true` (`alloy models add --cursor-fast`; `--no-cursor-fast` turns it
+off). Shipped profiles never opt in, and the opt-in applies to that profile only.
+
+**No borrowed evidence.** Evidence rows name the adapters they cover, and a match
+requires the same adapter, model, effort and fast state. Cursor has no benchmark
+row, so every Cursor profile is `unmatched` and gets no task preference, even when
+a native provider has evidence for the same model text.
+
+**Discovery.** `alloy models refresh` runs `cursor-agent --list-models` inside the
+sandbox, keeps only full `<id> - <label>` lines, derives each family from the ID
+(never from the label), records `auto` and unknown IDs as not routable, and keeps
+the previous cache if the command fails or its output is unrecognized.
+
+**Cost and quota.** Prefer Cursor-native models (`composer-*`, `cursor-grok-*`,
+pool `cursor:models`). Every other model through Cursor draws the more expensive
+`cursor:other` pool. Cursor quota is unknown unless you set it by hand; see
+[Cursor pools](usage.md#cursor-pools). Unknown quota does not block routing.
 
 ## Cost controls
 
@@ -136,7 +221,9 @@ cost premium for documented task fit (see below). When all eligible profiles
 have metered prices, estimated dollars replace relative ranks. Exhausted or reserved live quota is excluded first. Starter ranks and tiers are editable
 priors, not benchmark claims. Billing is subscription, metered or unknown;
 unknown does not mean free. [Live subscription meters](usage.md) supply Codex,
-Claude, Grok and Antigravity availability when their local quota sources are available.
+Claude, Grok and Antigravity availability when their local quota sources are
+available. Cursor's CLI has no usage source, so Cursor pools are unknown unless
+you set them by hand.
 
 For metered profiles, set `--input-per-million` and `--output-per-million` with
 `models add`. Estimates use policy token assumptions (10,000 input and 2,000
@@ -155,8 +242,11 @@ pool. Pools can be shared across profiles and set in `routing.json`:
 {"quota_pools": {"my-plan": {"remaining_fraction": 0.4, "reserve_fraction": 0.1}}}
 ```
 
-Assign that pool with `models add --id PROFILE --quota-pool my-plan`. Missing
-balances stay unknown; these manual pool values are separate from live provider
+Assign that pool with `models add --id PROFILE --quota-pool my-plan`. Every shipped
+Cursor profile uses the pool name `cursor`: a `cursor` entry at or below its reserve
+excludes all of them, whichever Cursor pool they draw on (`cursor:models` and
+`cursor:other` are separate usage pools; see [usage](usage.md#cursor-pools)).
+Missing balances stay unknown; these manual pool values are separate from live provider
 windows, which are refreshed automatically. Relative ranks
 express how you trade off dollar spend and subscription use without adding
 dollars to percentages. There is no automatic cross-model retry after execution:
@@ -209,7 +299,13 @@ bugs as reliably as large models (Luna 5/6, Flash Low 6/6) at 1–5% of the
 cost, while as Makers they fell behind on medium and large changes.
 The starter `gpt-6-sol` profile ships disabled: Codex with ChatGPT-account
 sign-in rejects that model. Enable it (`alloy models enable --id
-codex-large-gpt-6-sol`) only with API-key billing.
+codex-large-gpt-6-sol`) only with API-key billing. The starter
+`codex-large-gpt-6-1-sol` profile (GPT-6.1 Sol) is enabled, large-tier, and the
+preferred large Codex profile: Codex CLI 0.159.0 accepted it under ChatGPT-account
+sign-in when checked on 2026-09-29. It defaults to medium effort with high effort
+for review, and it is not benchmarked. A pinned `ALLOY_CODEX_MODEL` still excludes
+Codex profiles with a different model. Consider `usage.reserve_fraction: 0.15`
+(the default is 0.1; see [usage](usage.md)).
 
 `min_tier_by_mode` sets a minimum tier per mode. The shipped default is
 `{"consult": "medium"}`: a panel question's difficulty lives in the repository,

@@ -3,6 +3,137 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.11.0] - 2026-09-29
+
+**Upgrading:** on macOS, a Cursor CLI that is installed, logged in and passes the
+sandbox self-test now joins the default panel (`ALLOY_PANELISTS` unset), using
+`composer-2.5` unless you pin another model. Set `ALLOY_PANELISTS` to keep the
+old panel. Cursor profiles for routing and `alloy execute` ship disabled; opt in
+with `alloy setup --enable-cursor` or `alloy models enable --id ID`. Existing pins,
+billing and profiles are preserved. `alloy setup --refresh-defaults` adds the new
+profiles, including the enabled `codex-large-gpt-6-1-sol` (see below).
+
+Cursor provider:
+
+- Add Cursor as a panelist, managed Maker and managed Checker. The public name is
+  `cursor`; the executable is still `cursor-agent`. `cursor-agent` is accepted as
+  a legacy input name (`ALLOY_PANELISTS`, `--panelists`, routing profiles) and is
+  normalized to `cursor`; run directories, manifests and usage always say
+  `cursor`. Canonical settings win over the legacy ones (`ALLOY_BIN_CURSOR`,
+  `ALLOY_CURSOR_MODEL`, `ALLOY_CURSOR_EFFORT` over their `..._AGENT_...`
+  spellings); doctor warns when only the legacy model key is set.
+- Cursor runs on macOS only. Every Cursor process (login status, version and help
+  probes, model discovery, panels, Makers, Checkers) is started through one
+  gateway that wraps it in `/usr/bin/sandbox-exec` with a profile Alloy generates,
+  after a cached self-test of that profile. Without a working sandbox, on Linux
+  and on any other platform, every Cursor role is refused, and
+  `ALLOY_ALLOW_UNSANDBOXED=1` does not change that. Cursor CLI builds Alloy has
+  not measured are refused too; the supported build for this release is
+  `2026.09.28-64d2043`.
+- Panels and Checkers run `--mode ask` inside the sandbox: only a private
+  per-dispatch runtime directory is writable, process execution and hard links
+  are denied. Makers run Cursor's normal agent mode inside the sandbox: only the
+  non-Git contents of the Alloy-owned worktree and the private runtime are
+  writable, and Git metadata, the source checkout and everything else stay
+  write-denied. No Cursor role receives `--force`, `--yolo`, auto-review or MCP
+  approval flags; the final argv is checked against a closed grammar for each
+  role, so mode, sandbox, worktree, plugin, session and subcommand controls
+  cannot be added by a later rewrite.
+- Cursor's own controls are not the boundary. In the recorded probe, plan mode and
+  `--sandbox enabled` both wrote outside the workspace; ask mode refused in three
+  runs, but it is a tool-mode control, not an operating-system guarantee. The
+  macOS sandbox is the write boundary. Content fingerprints of the worktree and
+  Git internals, and canary files outside it, only detect a change afterwards.
+- Every Cursor role denies reads of a fixed list of credential locations (SSH,
+  cloud, GPG, `gh`, npm, PyPI, Docker, Kubernetes, the login keychain directory,
+  other agent CLIs' credential stores and Alloy's own configuration), of anything
+  directly under `/private/tmp` or `/tmp` whose name contains "secret" (any case),
+  and of any paths you add with `ALLOY_CURSOR_DENY_READ_PATHS` (comma-separated
+  absolute paths, no globs); you can add denials but not remove built-in ones. `CURSOR_API_KEY` and `CURSOR_API_ENDPOINT` are scrubbed
+  from every child environment and `--api-key`, `--endpoint` and `--header` are
+  rejected. The Cursor child receives an explicit environment allowlist.
+- Accepted residual risk, stated plainly: the Cursor process uses its own keychain
+  login item through the system Security API, can read the repository and uses
+  the network. The profile cannot separate Cursor's legitimate reads and network
+  from its model-facing read tool, so a Cursor role is not a data-exfiltration
+  boundary and a Checker is not exfiltration-proof. Mitigations: ask mode for
+  panels and Checkers, descendant-process denial, the credential-read denials,
+  redaction of JWT-shaped values, secret assignments and authorization headers
+  before every persisted output, and a Checker packet built only from redacted
+  text. Alloy never reads the keychain or runs `security`.
+- Every Cursor call names one explicit model whose family is derived from its ID:
+  `claude-` is Anthropic, `gpt-`/`codex` is OpenAI, `gemini-` is Google,
+  `grok-`/`cursor-grok-` is xAI, and `composer-` is the new family `cursor`.
+  `auto` and unknown prefixes are refused at every routing and dispatch step. A
+  profile cannot claim a different family than its model's, and only a Cursor
+  Composer profile may use family `cursor`. `--host-family` accepts `cursor`.
+  Routing rubric is now version 5.
+- Add five Cursor starter profiles, all disabled and billed as subscription:
+  `cursor-large-composer-2-5`, `cursor-large-gpt-5-6-sol`,
+  `cursor-large-claude-opus-5-5`, `cursor-medium-gemini-3-8-flash` and
+  `cursor-large-grok-4-7`. Effort and fast variants travel inside `--model`
+  (`[effort=...]`, `[fast=false]`); fast variants need a per-profile
+  `cursor_fast: true` (`alloy models add --cursor-fast`). `alloy models refresh`
+  lists Cursor models through the sandbox and records `auto` and unknown IDs as
+  not routable.
+- Model evidence rows now name the adapters they cover, and a match needs the same
+  adapter, model, effort and fast state. Cursor has no benchmark row, so its
+  profiles are always unmatched and cannot borrow another provider's evidence.
+  Quota pacing compares the effective model family with the host's.
+- Managed Cursor workers use `fresh_context_fallback`; native session reuse stays
+  limited to Claude and Grok. A Maker or Checker that changes protected Git
+  internals or a canary fails before gates or review, and the worktree is kept for
+  inspection.
+- Usage: Cursor's CLI has no usage source, so Cursor quota is `unknown` and never
+  blocks routing. Two pools exist, `cursor:models` (`composer-*`, `cursor-grok-*`)
+  and `cursor:other` (every other model served through Cursor, which draws the
+  more expensive pool); set `quota_pools["cursor:models"]` or
+  `quota_pools["cursor:other"]` `remaining_fraction` by hand to route on them.
+  Setting `quota_pools.cursor` (the shared pool every shipped Cursor profile uses)
+  blocks both. Per-call token counts are never treated as quota. An unknown usage
+  provider no longer falls through to Claude's credentials.
+- Limits of this release: Cursor does not run on Linux, there is no Cursor
+  benchmark row, Cursor quota cannot be read live, and Alloy does not observe every
+  filesystem change.
+
+Usage and routing:
+
+- Alloy no longer reads the macOS keychain for Claude quota, and `usage.keychain`
+  is now ignored (it is still accepted so existing files load). Claude quota comes
+  from an existing credentials file or `CLAUDE_CODE_OAUTH_TOKEN`; from the opt-in
+  Claude Code status-line hook (`alloy usage --record-claude-statusline`); from
+  recorded stream events (`claude -p ... --output-format stream-json --verbose |
+  alloy usage --record-claude-stream`, and the `claude` runs Alloy itself makes,
+  which now use `--output-format stream-json --verbose`; with
+  `ALLOY_CAPTURE_USAGE=1` they use plain `json` and record nothing); or, only with `usage.claude_probe: true`,
+  from one small Claude call per usage TTL. With none of these, Claude quota is
+  unknown. Alloy installs no status-line hook.
+- Antigravity's login check no longer runs `security`. On macOS a fresh `agy`
+  login lives only in the keychain, which Alloy does not read, so a signed-out
+  `agy` now shows `[ready]` in `alloy doctor` with auth `unknown` (JSON field
+  `auth`); it used to show `installed_not_authed`. The first real run reports
+  status `auth` if `agy` is not signed in.
+- Add the `codex-large-gpt-6-1-sol` starter profile (GPT-6.1 Sol, large tier,
+  medium effort and high effort for review, enabled; billing is your choice). It is
+  the preferred large Codex profile. A `gpt-6-sol` pin still needs API-key
+  billing. Recommend `usage.reserve_fraction: 0.15`; the default stays `0.1`.
+
+Fixes already on this branch (agy 1.2.12 Checkers):
+
+- Grant agy read access to the staged prompt directory and the worktree with
+  path-scoped `read_file(<dir>)` rules, one per `--add-dir` root. agy 1.2.12
+  ignores bare tool names, so the earlier Checker allow-list was deny-only and
+  could pass without reading the worktree.
+- Give agy `DEVNULL` as stdin. agy 1.2.12 treats a file on stdin as a `read_file`
+  that headless mode denies, even when the directory is granted.
+- Keep two agy settings grammars. agy 1.1 keeps bare read-tool names; agy 1.2.x
+  uses path-scoped `read_file(...)` grants and is the fail-closed current grammar.
+- For a linked-worktree Checker, grant agy the exact gitdir that `.git` points to
+  and, only for the standard `<common>/worktrees/<id>` layout, that gitdir's
+  common directory. Other layouts receive the exact gitdir only.
+- Grant agy Checkers read access to the owner-private gate-log directory, and tell
+  them in the prompt to read only inside the task worktree and that directory.
+
 ## [0.10.0] - 2026-09-26
 
 - Add profile `effort_by_mode`: implementation and independent review can use

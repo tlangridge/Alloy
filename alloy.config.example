@@ -8,10 +8,14 @@
 # Which adapters form the panel (comma-separated, in order).
 # LEAVE UNSET to use the default: the COMPLETE SET of available models -- every
 # verified read-only CLI that is installed + authenticated (codex, grok,
-# antigravity/Gemini on agy >= 1.1, and a fresh `claude` instance). Set this only
-# to pin a narrower/cheaper panel. `llm` is read-only but experimental (opt-in);
-# opencode/cursor-agent (and an agy older than 1.1) have no real read-only mode
-# and are skipped unless ALLOY_ALLOW_UNSANDBOXED=1.
+# antigravity/Gemini on agy >= 1.1, a fresh `claude` instance, and `cursor` on
+# macOS once its OS sandbox self-test passes). Set this only to pin a narrower/
+# cheaper panel. `llm` is read-only but experimental (opt-in); opencode (and an
+# agy older than 1.1) have no real read-only mode and are skipped unless
+# ALLOY_ALLOW_UNSANDBOXED=1. Cursor's name is `cursor`; the old name `cursor-agent`
+# is still accepted here and means the same thing. Cursor is refused on Linux and
+# whenever its sandbox is unavailable, and ALLOY_ALLOW_UNSANDBOXED never overrides
+# that.
 # ALLOY_PANELISTS=codex,grok
 
 # Per-panelist timeout in seconds (a panel runs in parallel, so this is the max,
@@ -58,12 +62,37 @@ ALLOY_WEB=1
 # ALLOY_ATTACH=src/foo.ts,src/bar.ts
 
 # Optional model overrides (leave unset to use each CLI's default model).
-# ALLOY_CODEX_MODEL=gpt-5.6-sol
+# ALLOY_CODEX_MODEL=gpt-6.1-sol
 # ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro-high  # unset -> gemini-3.6-flash-high; `agy models` lists the rest
 # ALLOY_ANTIGRAVITY_EFFORT=high        # agy reasoning effort (low|medium|high)
 # ALLOY_ANTIGRAVITY_HOME=run           # throwaway agy HOME per run instead of the shared alloy-owned one
 # ALLOY_GROK_MODEL=grok-4.5            # unset -> grok's default, now grok-4.6
 # ALLOY_CLAUDE_MODEL=opus              # alias (opus/sonnet/fable) or a full id
+
+# Cursor (`cursor`; the executable is `cursor-agent`). Log in with
+# `cursor-agent login`. Every Cursor call names one explicit model; `auto` and
+# unknown model IDs are refused, so a plain panel uses composer-2.5 unless pinned.
+# A model's family comes from its ID: claude-* anthropic, gpt-* openai, gemini-*
+# google, grok-*/cursor-grok-* xai, composer-* cursor (Cursor's own family).
+# Prefer Cursor-native models (composer-*, cursor-grok-*): they draw the
+# `cursor:models` quota pool. Every other model through Cursor draws the more
+# expensive `cursor:other` pool. See docs/usage.md.
+# ALLOY_BIN_CURSOR=/absolute/path/to/cursor-agent
+# ALLOY_CURSOR_MODEL=composer-2.5
+# ALLOY_CURSOR_EFFORT=high             # none|minimal|low|medium|high|xhigh|max; sent inside --model
+# Legacy names, read only when the canonical one is unset (the canonical key wins):
+# ALLOY_BIN_CURSOR_AGENT, ALLOY_CURSOR_AGENT_MODEL (deprecated; doctor warns),
+# ALLOY_CURSOR_AGENT_EFFORT.
+# Extra files or directories Cursor may never READ, comma-separated absolute
+# paths (no globs). Additive only: the built-in list (SSH, cloud, GPG, gh, keychain,
+# other agent CLIs' credentials, Alloy's own config, and anything directly under
+# /tmp or /private/tmp whose name contains "secret") always applies and cannot be
+# removed. A denial that covers a path Cursor must read makes Cursor refuse to run.
+# ALLOY_CURSOR_DENY_READ_PATHS=/absolute/path/one,/absolute/path/two
+# CURSOR_API_KEY and CURSOR_API_ENDPOINT are deliberately NOT supported: Alloy
+# removes both from every child process's environment (whether they came from
+# your shell or from this file) and rejects --api-key/--endpoint/--header, so
+# only Cursor's own login is ever used.
 
 # Codex reasoning effort for panel runs. Default "high" keeps runs inside the
 # timeout; otherwise a global `model_reasoning_effort = "xhigh"` in
@@ -80,11 +109,11 @@ ALLOY_CODEX_EFFORT=high
 # OUTSIDE your repo so prompts/diffs and CLI output are never committed.
 # ALLOY_RUN_ROOT=~/.cache/alloy/runs
 
-# DANGER: allow adapters that have no real read-only mode (e.g. cursor-agent,
-# opencode, or an agy older than 1.1). Off by default. Such a panelist can write
-# files and run shell;
-# alloy never gives it your real repo (it gets a disposable COPY instead), but
-# its writes/shell are otherwise uncontained. Only enable if you accept that.
+# DANGER: allow adapters that have no real read-only mode (e.g. opencode, or an
+# agy older than 1.1). Off by default. Such a panelist can write files and run
+# shell; alloy never gives it your real repo (it gets a disposable COPY instead),
+# but its writes/shell are otherwise uncontained. Only enable if you accept that.
+# This never applies to Cursor, which runs only inside its macOS sandbox.
 # ALLOY_ALLOW_UNSANDBOXED=0
 
 # Skill startup automatically installs stable releases on clean official Git installs.
@@ -92,7 +121,11 @@ ALLOY_CODEX_EFFORT=high
 # ALLOY_AUTO_UPDATE=1
 # ALLOY_NO_UPDATE_CHECK=0
 
-# Subscription meters: native Codex/Claude/Antigravity usage reads, cached for
-# two minutes, included in panel/route context. No generation calls. Grok's
-# remaining subscription quota is currently unknown. See docs/usage.md.
+# Subscription meters: native Codex/Antigravity/Grok usage reads and, for Claude,
+# a credentials file, the opt-in status-line hook or the opt-in probe (Alloy never
+# reads the macOS keychain), cached for two minutes and included in panel/route
+# context. Cursor's CLI exposes no usage, so Cursor quota is unknown unless you
+# set it by hand in routing.json. No generation calls unless you opt in to the
+# Claude probe. See docs/usage.md. In routing.json, `usage.reserve_fraction`
+# defaults to 0.1; 0.15 is recommended.
 # ALLOY_USAGE=off

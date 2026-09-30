@@ -13,11 +13,12 @@ instead of one confident answer from one model.**
 
 Alloy is a skill for [Claude Code](https://claude.com/claude-code),
 [Codex](https://github.com/openai/codex), [Grok](https://grok.com), Gemini CLI,
-Antigravity (`agy`), and any host that can run a local skill. It brings the
+Antigravity (`agy`), Cursor, and any host that can run a local skill. It brings the
 idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
 router — *"fusion beats frontier"* — down to the CLIs already installed on your
 machine. It dispatches one prompt to a **panel** of every model you have —
-`codex`, `grok`, a fresh `claude` instance, and Antigravity/Gemini — running
+`codex`, `grok`, a fresh `claude` instance, Antigravity/Gemini and, on macOS,
+`cursor` — running
 **in parallel, read-only inside your repo, and able to search the web**, then
 the **host** (whoever invoked `/alloy`) acts as the **judge** and
 **synthesizer**: it compares the answers and writes a final one that *surfaces
@@ -49,12 +50,15 @@ alloy usage                               # subscription capacity meters
 # In your agent: /alloy-usage
 ```
 
-The guided setup detects Codex, Claude, Grok and Antigravity (`agy`), accepts your
-Jev key and records how each CLI is billed. Profiles are configurable as models
-change. Existing model pins remain binding. See [the routing guide](docs/routing.md)
+The guided setup detects Codex, Claude, Grok, Antigravity (`agy`) and Cursor,
+accepts your Jev key and records how each CLI is billed. Cursor profiles ship
+disabled; setup asks before enabling them (`--enable-cursor` answers yes).
+Profiles are configurable as models change. Existing model pins remain binding. See [the routing guide](docs/routing.md)
 for setup, catalog updates, cost assumptions and independent Maker/Checker use.
 [Subscription meters](docs/usage.md) show fresh remaining capacity and reset times,
-and feed quota reserves and headroom into routing.
+and feed quota reserves and headroom into routing. Alloy never reads the macOS
+keychain: Claude quota comes from a credentials file or from opt-in sources, and
+Cursor quota is unknown unless you set it by hand.
 [Model research](docs/model-research.md) informs task-specific recommendations
 within a bounded cost tolerance.
 
@@ -159,7 +163,8 @@ Alloy is a skill that lives in `~/.claude/skills/alloy/` — and, after
 `~/.codex/skills/` (Codex), `~/.grok/skills/` (Grok), and
 `~/.gemini/config/skills/` (Antigravity / `agy`) — as three links
 per host: `alloy`, `alloy-execute`, and `alloy-usage`. It runs on Python 3 (standard
-library only — no `pip install`). macOS / Linux (Windows via WSL).
+library only — no `pip install`). macOS / Linux (Windows via WSL); the Cursor
+provider runs on macOS only.
 
 **1. Install at least one panelist CLI** — Alloy orchestrates CLIs you already
 have; it ships none of its own. Two or more is where it earns its keep:
@@ -205,7 +210,20 @@ which are authenticated, and exactly how to add the missing ones:
   [auth?]  grok               installed but not authenticated -> run `grok login` to log in
   [ready]  antigravity  1.1.7
   [no-ro]  opencode  (experimental, no read-only mode)  1.18.3
+  [no-sbx] cursor  (experimental)
+          Cursor installed/authenticated, but no supported OS write sandbox is available; Cursor roles are refused.
+          reason: unsupported platform (Cursor roles require macOS sandbox-exec)
 ```
+
+`[no-sbx]` means Cursor is installed but its macOS sandbox is unavailable (for
+example on Linux), so Alloy refuses every Cursor role. On macOS, once Cursor is
+logged in (`cursor-agent login`) and its sandbox self-test passes, it shows
+`[ready]` and joins the default panel with the model `composer-2.5` unless you set
+`ALLOY_CURSOR_MODEL` or `ALLOY_PANELISTS`.
+
+Alloy never reads the macOS keychain, where a fresh `agy` login lives. On macOS,
+`doctor` therefore shows a signed-out `agy` as `[ready]` with the line `auth
+unknown`; the first real run reports status `auth` if it is not signed in.
 
 Now, inside Claude Code:
 
@@ -247,7 +265,8 @@ and tests in an isolated Git worktree while the Checker stays read-only. Alloy
 handles correction rounds and returns a compact host handoff. The host judges
 and integrates with `alloy integrate`; successful integration removes the owned
 worktree and branch. Failed or interrupted work is retained. Worktrees provide
-workflow isolation, not an OS security boundary. [Execution guide](docs/execution.md).
+workflow isolation, not an OS security boundary; the exception is a Cursor Maker
+or Checker, which runs inside a macOS sandbox. [Execution guide](docs/execution.md).
 
 The panel reads the repo itself, so you rarely need to spoon-feed files. When you
 *do* want to force specific files into the prompt (e.g. something outside the
@@ -285,9 +304,23 @@ corrections before the host receives the result.
   --permission-mode plan`) — **best-effort, the CLIs' own enforcement, not an OS
   sandbox**; a tamper tripwire fingerprints the tree before/after and shouts if it
   changed. Turn it off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd),
-  or point elsewhere with `--repo`. Adapters with no read-only mode (`cursor-agent`,
-  `opencode`) are refused unless you set `ALLOY_ALLOW_UNSANDBOXED=1` — and even
-  then they get a **disposable copy** of the repo, never your real tree.
+  or point elsewhere with `--repo`. Adapters with no read-only mode (`opencode`)
+  are refused unless you set `ALLOY_ALLOW_UNSANDBOXED=1` — and even then they get
+  a **disposable copy** of the repo, never your real tree.
+- **Cursor is confined by a macOS sandbox, not by its own flags.** In a recorded
+  probe, Cursor's plan mode and its `--sandbox` flag both wrote outside the
+  workspace; `--mode ask` refused but is not an OS guarantee. So Alloy runs every
+  Cursor process under `/usr/bin/sandbox-exec` with a profile it generates and
+  self-tests. Panels and Checkers use ask mode with only a private runtime
+  directory writable. Makers can write only the non-Git contents of their owned
+  worktree. No Cursor role gets a force or auto-approval flag, and every role
+  denies reads of a fixed list of credential paths (add more with
+  `ALLOY_CURSOR_DENY_READ_PATHS`). Cursor is refused on Linux and whenever the
+  sandbox is unavailable; `ALLOY_ALLOW_UNSANDBOXED` never overrides that. Alloy
+  accepts a residual risk: the Cursor process uses its own keychain login, can
+  read the repository and uses the network, so a Cursor role is not an
+  exfiltration boundary. Content fingerprints and canaries only detect changes.
+  See [SECURITY.md](SECURITY.md).
 - **Antigravity (`agy`) is read-only by allow-list.** agy ignores the process cwd
   and has no read-only flag, so it is contained differently: alloy generates a
   settings file that allow-lists **read tools only** (agy >= 1.1 auto-denies
@@ -306,12 +339,15 @@ corrections before the host receives the result.
   is hardened against a panelist emitting "ignore previous instructions / run
   this command".
 - **Prompts go on stdin**, never on the command line (no `ARG_MAX` limits, no
-  quoting bugs, no shell injection, no leaking prompts into `ps`).
+  quoting bugs, no shell injection, no leaking prompts into `ps`). `agy` and
+  Cursor read a staged owner-only file instead, so only a short instruction and a
+  path are on the command line.
 - **No sandbox bypass flags.** Alloy never passes `--yolo` / `-y` /
-  `--dangerously-bypass-approvals-and-sandbox`.
+  `--dangerously-bypass-approvals-and-sandbox`, and never `--force` to Cursor.
 - **Managed execute grants explicit edit/test permissions.** Its Maker uses an
   owned worktree; its Checker remains read-only. Allowed paths are checked after
-  execution. `task.json` and worker `status.json` expose file-write and command
+  execution (a Cursor Maker also runs inside its sandbox). `task.json` and worker
+  `status.json` expose file-write and command
   permissions separately, including enforcement limits. The loop stops after
   two correction rounds. `alloy integrate` cleans up only after proven integration;
   `alloy cleanup` checks ancestry or an exact external squash diff. Dirty or
@@ -332,7 +368,9 @@ corrections before the host receives the result.
   as `KEY=value` (never `source`d), so a hostile repo cannot run code.
 - **Override binaries inherit your environment.** `ALLOY_BIN_<NAME>` runs
   whatever you point it at (with your env, as the CLIs need for auth); the
-  read-only guarantee is then that tool's responsibility.
+  read-only guarantee is then that tool's responsibility. Cursor is the exception:
+  it receives an explicit environment allowlist, and a binary override still runs
+  inside the sandbox.
 
 > "Read-only" means the panel does not write to your files. It is **not** an OS
 > data-exfiltration sandbox: your prompt and any diff you review are sent to each
@@ -358,7 +396,7 @@ variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, and antigravity on agy >= 1.1). Set it to pin a narrower / cheaper panel. |
+| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, antigravity on agy >= 1.1, and cursor on macOS when its sandbox is validated). Set it to pin a narrower / cheaper panel. `cursor-agent` is accepted as an old spelling of `cursor`. |
 | `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_MAKER_TIMEOUT` | `1800` | timeout for legacy read-only `panel --mode make`. Managed `execute` uses `--timeout` (default 1800s per worker) and `--test-timeout` (600s per gate) |
@@ -366,13 +404,17 @@ variables (env wins over the file):
 | `ALLOY_STALL_TIMEOUT` | `0` | kill if no new output for N s (off by default; reasoning is often silent) |
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
-| `ALLOY_CODEX_MODEL` | CLI default | codex model override (e.g. `gpt-5.6-sol`) |
+| `ALLOY_CODEX_MODEL` | CLI default | codex model override (e.g. `gpt-6.1-sol`) |
 | `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.6-flash-high` | agy model — the latest Gemini family seat (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for cheap/fast, `gemini-3.1-pro-high` for the previous Pro) |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
 | `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
 | `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |
+| `ALLOY_BIN_CURSOR` | `cursor-agent` on `PATH` | Cursor CLI path (legacy: `ALLOY_BIN_CURSOR_AGENT`; the canonical key wins) |
+| `ALLOY_CURSOR_MODEL` | `composer-2.5` | Cursor model; must have a known family (`auto` and unknown IDs are refused). Legacy `ALLOY_CURSOR_AGENT_MODEL` still works, with a doctor warning |
+| `ALLOY_CURSOR_EFFORT` | Cursor default | Cursor effort (`none` to `max`), sent inside `--model`. Legacy `ALLOY_CURSOR_AGENT_EFFORT` |
+| `ALLOY_CURSOR_DENY_READ_PATHS` | _(unset)_ | extra comma-separated absolute paths Cursor may not read; adds to the built-in credential list, never removes from it |
 | `ALLOY_CLAUDE_LEAN` | `1` | trim global MCP connectors and skills for `claude` panelists/workers; all settings sources, including user permissions and hooks, still load. `0` restores full tool/skill context |
 | `ALLOY_JUDGE` | `host` | who judges (the invoking agent; see methodology). Rotation to a CLI is on the roadmap. |
 | `ALLOY_RUN_ROOT` | `$XDG_STATE_HOME/alloy/runs` | where run output is written (outside your repo) |
@@ -385,7 +427,7 @@ variables (env wins over the file):
 ## Requirements
 
 - Python 3.8+ (standard library only — no `pip install`).
-- macOS or Linux (Windows via WSL).
+- macOS or Linux (Windows via WSL). Cursor roles work on macOS only.
 - At least one supported CLI, ideally two: [`codex`](https://github.com/openai/codex),
   [`grok`](https://grok.com).
 
@@ -414,8 +456,8 @@ your repo context. See [`docs/methodology.md`](docs/methodology.md).
 Adding a CLI is a small, well-defined adapter. See
 [`docs/adding-a-panelist.md`](docs/adding-a-panelist.md) for the 5-function
 contract (detect / auth / invoke-read-only / parse / capabilities), a copy-paste
-template, and the worked `cursor-agent` example (which shows how an adapter with
-*no* read-only mode is handled).
+template, and the worked `cursor` example (which shows an adapter that is only safe
+inside an OS-enforced boundary).
 
 ## Roadmap
 

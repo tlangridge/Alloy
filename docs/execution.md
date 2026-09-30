@@ -11,10 +11,12 @@ savings depend on the task and are not measured or guaranteed.
 
 Requirements: Python 3.8+, Git 2.31+, a clean committed repository on a branch,
 and eligible Maker and Checker profiles from two families distinct from the host.
-Codex, Claude, Grok and Antigravity (`agy` 1.1+) have managed-write adapters. CLI
-help/version checks fail closed when required permission flags are unavailable.
-These are compatibility checks, not proof that a particular CLI version correctly
-enforces its permissions. Provider profiles remain editable configuration.
+Codex, Claude, Grok, Antigravity (`agy` 1.1+) and Cursor (macOS only) have
+managed-write adapters. CLI help/version checks fail closed when required
+permission flags are unavailable. These are compatibility checks, not proof that
+a particular CLI version correctly enforces its permissions. Provider profiles
+remain editable configuration. Cursor profiles ship disabled; see
+[Cursor roles](#cursor-roles).
 
 Use `alloy setup --skip-live-test` if profiles are not configured, then
 `alloy models list`. Preserve existing model pins and billing settings. Setup
@@ -68,8 +70,9 @@ Maker a short update with revision-qualified finding IDs and failed checks.
 Interrupted calls retain their session identity. A failed resume stops for
 inspection instead of silently restarting. Codex, Antigravity and incompatible
 CLI versions currently report `fresh_context_fallback`; they retain the same
-worker profiles and receive full context on every call. No `--last` session
-selection is used.
+worker profiles and receive full context on every call. Cursor always reports
+`fresh_context_fallback`: no `--resume` or `--continue` is ever built for it, and
+a stored record cannot switch it to resume. No `--last` session selection is used.
 
 Each Checker receives a bounded, self-contained packet: goal, exact base/tip,
 changed filenames, complete diff, test commands/results and bounded test output.
@@ -189,6 +192,10 @@ result; they are not a new OS permission system.
 | Claude | `acceptEdits`, Read/Glob/Grep/Edit/Write/Bash tools, Bash allowed | Provider permission system; no Alloy OS sandbox |
 | Grok | `acceptEdits`, Read/Glob/Grep/Edit/Write/Bash tools, Bash allowed | Provider permission system; no Alloy OS sandbox |
 | Antigravity | `accept-edits`, `--sandbox`, private per-run write/command allowlist | Provider sandbox/settings; not certified as OS confinement |
+| Cursor (macOS only) | Normal agent mode (no `--mode`), no force or auto-approval flag, closed argument grammar | Alloy-generated `sandbox-exec` write boundary; Cursor's own flags are not the boundary. See [Cursor roles](#cursor-roles) |
+
+Cursor differs from the rows above: it runs inside an Alloy-generated macOS
+`sandbox-exec` profile, and its permissions record says so (next section).
 
 Consult/review panels retain their existing read-only flags. Antigravity Maker
 settings never reuse the shared read-only panel settings directory. No global
@@ -203,6 +210,84 @@ commands run with the user's permissions. The scope check does not prevent a
 shell command from writing elsewhere or making network calls. Use trusted projects
 and provider sandbox policies appropriate to the task. Paths and post-run checks
 must not be represented as a hard security boundary.
+
+## Cursor roles
+
+Cursor can serve as Maker or Checker on macOS only. Alloy refuses every Cursor
+role, and does not fall back to a disposable copy or to Cursor's own flags, when
+the platform is not macOS, `/usr/bin/sandbox-exec` is missing or not root-owned,
+the profile self-test fails, or the installed Cursor build is not one Alloy has
+measured. `ALLOY_ALLOW_UNSANDBOXED=1` never changes this. Boundary readiness is a
+separate check from a role's read-only flag, so a Maker is wrapped exactly like a
+Checker. `alloy doctor` shows `[no-sbx]` and the reason, and `--check` reports
+Cursor as unavailable.
+
+| Role | Cursor mode | Writable | Process execution |
+| --- | --- | --- | --- |
+| Checker | `--mode ask` | The per-dispatch private runtime only | Denied except the Cursor executable |
+| Maker | Cursor's normal agent mode (no `--mode`) | Non-Git contents of the owned worktree, and the private runtime | Allowed, inside the same write boundary |
+
+For both roles the worktree's `.git` entry, its gitdir, the shared Git directory,
+the source checkout, sibling worktrees, Cursor's own state and install
+directories and the rest of the filesystem are write-denied; hard links are
+denied; the fixed list of credential paths (and any you add with
+`ALLOY_CURSOR_DENY_READ_PATHS`) cannot be read; worktree setup scripts are skipped;
+and no force, auto-approval, MCP-approval, plan, plugin, session or worktree
+option is ever passed. Alloy checks the complete final command line against a
+closed grammar before starting the sandbox, so a later rewrite cannot add one.
+Each call names one explicit model with a known family.
+
+The permissions record is explicit. For a Cursor Maker it contains:
+
+```json
+{
+  "repository_write": true,
+  "command_execution": "allowed_in_worktree",
+  "enforcement": "macos_sandbox_exec",
+  "os_isolation": true,
+  "git_metadata_isolated": true,
+  "scope_validation": "content_fingerprint_tripwire",
+  "write_allowlist": ["owned_worktree_non_git_content", "private_runtime_state",
+                      "private_runtime_cache", "private_runtime_tmp"],
+  "cursor_mode": "agent_default",
+  "approval_bypass": false,
+  "sensitive_reads_denied": true,
+  "setup_scripts_skipped": true
+}
+```
+
+A Cursor Checker reports `repository_write: false`, `command_execution: "denied"`,
+`cursor_mode: "ask"` and only the three private-runtime write entries.
+
+**Family by model.** Independence is judged on the family derived from the model
+ID, not from the CLI name. With an OpenAI host, `cursor-large-claude-opus-5-5`
+(Anthropic) can be the Maker and `cursor-large-composer-2-5` (family `cursor`)
+can be the Checker. With an Anthropic host, a Cursor-served Claude model can be
+neither. A Cursor-served GPT model can never check an OpenAI Maker. Cursor
+Composer is its own family, independent of OpenAI, Anthropic, Google and xAI.
+`auto` and unknown model IDs are never dispatched.
+
+**Detection, not prevention.** The sandbox is the boundary. In addition, after the
+Cursor process group is dead, Alloy compares byte-level fingerprints of the
+worktree (tracked, untracked and ignored files, with their modes and symlink
+targets) and of the Git internals that change behavior, and checks canary files
+outside the workspace. For a Maker, ordinary files may differ only under
+`--allow-path`, including ignored files, which the normal scope check omits;
+Git internals and canaries may never differ. For a Checker nothing may differ.
+The check runs before the test gates or the review verdict is used. Any change, or
+any path that cannot be read or hashed, stops the task with the worktree retained
+and review skipped, and the task is then kept for inspection and cannot be resumed
+in place. These checks cannot prove the whole filesystem was unchanged.
+
+Every Git command Alloy itself runs (cleanliness, scope, worktree setup, add,
+commit, fingerprints) disables hooks and `core.fsmonitor`, ignores system
+configuration, detaches stdin and bounds output and time. The Checker packet is
+redacted before it is saved and before it is staged for Cursor. Cursor's own
+login is a keychain item that Cursor reads itself; Alloy never reads the keychain.
+Reads of the repository and the provider network stay available, so a Cursor role
+is not an exfiltration boundary; see [SECURITY.md](../SECURITY.md). The sandbox
+covers the Cursor process and what it starts. Your `--test` gate commands are run
+by Alloy with your permissions, outside that sandbox, as for every other provider.
 
 ## Storage and recovery
 
