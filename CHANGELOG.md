@@ -3,6 +3,15 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.12.1] - 2026-10-01
+
+- Managed Claude Makers and Checkers start with `--disallowedTools` denying direct rm
+  binaries and wrappers: `Bash(/bin/rm:*)`, `Bash(/usr/bin/rm:*)`, `Bash(command rm:*)`,
+  `Bash(\rm:*)`, `Bash(env rm:*)`, `Bash(xargs /bin/rm:*)`. Plain `rm` stays allowed so
+  an operator's PATH guard still applies. Existing sandboxes are unchanged.
+- Maker prompt rule: never call `/bin/rm` or `rm` on fixed paths; create scratch only with
+  `mktemp -d` inside the task area and leave cleanup to Alloy/the gate.
+
 ## [0.12.0] - 2026-09-30
 
 - Durable task owners, clone-independent logical IDs, lease heartbeats, closure

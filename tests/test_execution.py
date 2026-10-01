@@ -220,7 +220,7 @@ import json, sys, re
 from pathlib import Path
 if '--version' in sys.argv: print('test'); raise SystemExit(0)
 if '--help' in sys.argv:
-    print('--resume --session-id acceptEdits --allowedTools --allow --tools'); raise SystemExit(0)
+    print('--resume --session-id acceptEdits --allowedTools --disallowedTools --allow --tools'); raise SystemExit(0)
 mode = sys.argv[sys.argv.index('--permission-mode') + 1]
 role = 'maker' if mode == 'acceptEdits' else 'checker'
 resumed = '--resume' in sys.argv
@@ -428,6 +428,25 @@ else:
         core.routing.save(status,dict(status='running',pid=os.getpgrp()))
         with self.assertRaisesRegex(e.ExecutionError,'still be running'): self.action(task,'resume')
 
+    def test_claude_roles_deny_rm_bypass_forms(self):
+        for write in (True, False):
+            ad=e.worker_adapter(core,dict(cli='claude', model='test-model', effort=None),write)
+            prompt=self.base/'prompt.txt';prompt.write_text('Task')
+            with patch.object(core, 'setting', return_value=None):
+                args=ad.build_args(str(prompt),str(self.base/'out'),'make',dict(repo=str(self.repo),pdir=str(self.base/'c'),timeout_s=10))
+            self.assertEqual(args.count('--disallowedTools'),1)
+            denied=args[args.index('--disallowedTools')+1].split(',')
+            self.assertEqual(denied,['Bash(/bin/rm:*)','Bash(/usr/bin/rm:*)','Bash(command rm:*)','Bash(\\rm:*)',
+                                     'Bash(env rm:*)','Bash(xargs /bin/rm:*)'])
+            self.assertNotIn('Bash(rm:*)',denied)  # plain rm stays the user's guard
+            self.assertNotIn('bypassPermissions',args)
+        self.assertNotIn('--disallowedTools',core.ADAPTERS['claude'].build_args('p','o','make',None))
+
+    def test_maker_prompt_forbids_fixed_path_rm(self):
+        text=e.maker_prompt(dict(worktree='/w',allow_paths=[],tests=[]),'spec','')
+        self.assertIn('never call /bin/rm'.lower(),text.lower())
+        self.assertIn('mktemp -d',text)
+
     @patch.object(core.AntigravityAdapter, '_enforced', return_value=True)
     def test_adapter_write_flags_keep_read_only_defaults(self, _enforced):
         for name in ('codex','claude','grok','antigravity'):
@@ -459,7 +478,7 @@ from pathlib import Path
 if '--version' in sys.argv:
     print('1.2.3'); raise SystemExit(0)
 if '--help' in sys.argv:
-    print('acceptEdits --allowedTools --allow --tools --permission-mode --prompt-file --output-format'); raise SystemExit(0)
+    print('acceptEdits --allowedTools --disallowedTools --allow --tools --permission-mode --prompt-file --output-format'); raise SystemExit(0)
 assert 'TYPESAFE_API_KEY' not in os.environ
 mode = sys.argv[sys.argv.index('--permission-mode') + 1]
 if mode == 'acceptEdits':
@@ -880,7 +899,7 @@ from pathlib import Path
 if '--version' in sys.argv:
     print('1.2.3'); raise SystemExit(0)
 if '--help' in sys.argv:
-    print('--permission-mode --model --output-format --prompt-file acceptEdits --allowedTools --allow --tools'); raise SystemExit(0)
+    print('--permission-mode --model --output-format --prompt-file acceptEdits --allowedTools --disallowedTools --allow --tools'); raise SystemExit(0)
 mode=sys.argv[sys.argv.index('--permission-mode')+1]
 if mode=='acceptEdits':
     Path('file.txt').write_text('new\\n'); print('Done')
