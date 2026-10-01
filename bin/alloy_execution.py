@@ -3,6 +3,7 @@ import argparse
 import copy
 from contextlib import contextmanager
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import uuid
+import alloy_lifecycle as storage
 
 SCHEMA = 1
 ACTIVE = ('creating', 'running')
@@ -138,7 +140,9 @@ def taskdir(core, task_id):
 
 def save(core, task):
     task['updated_at'] = time.time()
-    core.routing.save(taskdir(core, task['id']) / 'task.json', task)
+    if task.get('_budget_tick'):
+        task['_budget_tick']()
+    core.routing.save(taskdir(core, task['id']) / 'task.json', {k: v for k, v in task.items() if not k.startswith('_')})
 
 
 def load(core, task_id):
@@ -152,6 +156,20 @@ def load(core, task_id):
         or Path(task.get('worktree', '')).absolute() != expected.absolute()
         or expected.is_symlink()):
         raise ExecutionError('Invalid task ownership record')
+    # Migrate legacy records in memory. Their budgets are seeded from the rounds
+    # already spent; no installed state is modified by listing or dry runs.
+    task.setdefault('owner', core.setting('ALLOY_OWNER') or getpass.getuser())
+    if 'repo_key' not in task:
+        try:
+            task['repo_key'] = storage.repo_key(task['repo'])
+        except (ExecutionError, OSError):
+            task['repo_key'] = hashlib.sha256(task['git_common_dir'].encode()).hexdigest()
+    task.setdefault('logical_task_id', hashlib.sha256((task['repo_key'] + '\0' + task['task_sha256']).encode()).hexdigest())
+    if not re.fullmatch(r'[0-9a-f]{64}', task['logical_task_id']) or not isinstance(task['owner'], str):
+        raise ExecutionError('Invalid logical task ownership record')
+    task.setdefault('budget_seconds', storage.number(core, 'ALLOY_TASK_BUDGET_MINUTES', 45) * 60)
+    task.setdefault('active_seconds', sum(c.get('duration_ms', 0) / 1000 for r in task['rounds']
+        for c in [r[role] for role in ('maker', 'checker') if role in r] + r.get('gates', [])))
     return task
 
 
@@ -224,6 +242,28 @@ def worker_adapter(core, decision, write=False):
     ad = core.routing.routed_adapter(core, decision)
     ad.execution_permissions = permissions(ad, write)
     if not write:
+        if ad.name != 'cursor':
+            wrap = ad.wrap_argv
+            def readonly_argv(argv, ctx):
+                argv = wrap(argv, ctx)
+                if sys.platform != 'darwin':
+                    if ad.name == 'codex':
+                        return argv  # Codex's -s read-only uses its native OS sandbox.
+                    raise core.CursorBoundaryError('Managed Checker requires an OS read-only boundary on this platform')
+                wt = Path(ctx['repo']).resolve()
+                paths = [str(wt), git(wt, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
+                         git(wt, 'rev-parse', '--path-format=absolute', '--git-dir')]
+                if getattr(ad, 'managed_source_repo', None):
+                    paths.append(str(Path(ad.managed_source_repo).resolve()))
+                profile = '(version 1)\n(allow default)\n(deny file-write* ' + ' '.join(
+                    '(subpath %s)' % json.dumps(p) for p in dict.fromkeys(paths)) + ')\n'
+                profile += '(deny file-read* (subpath %s))\n' % json.dumps(str(Path.home() / 'Library/Keychains'))
+                profile += '(deny process-exec (subpath "/Applications") (literal "/usr/bin/security") (literal "/usr/bin/open"))\n'
+                core.routing.save(Path(ctx['pdir']) / 'review-readonly.sb', profile)
+                return ['/usr/bin/sandbox-exec', '-p', profile] + argv
+            ad.wrap_argv = readonly_argv
+            ad.execution_permissions.update(os_isolation=True,
+                enforcement='macos_sandbox_exec' if sys.platform == 'darwin' else 'codex_read_only_sandbox')
         return ad
     if ad.name not in MANAGED_WRITERS:
         raise ExecutionError('No managed write adapter for ' + ad.name)
@@ -335,6 +375,8 @@ def probe(core, decision, write):
     if ad.auth_state() != 'ready' or not ad.read_only:
         raise ExecutionError('Adapter unavailable or lacks verified read-only review support')
     if not write:
+        if sys.platform != 'darwin' and ad.name != 'codex':
+            raise ExecutionError('Managed Checker requires an OS read-only boundary on this platform')
         return
     argv = [ad.resolved_bin()] + (['exec', '--help'] if ad.name == 'codex' else ['--help'])
     cp = subprocess.run(argv, capture_output=True, text=True, timeout=15, env=core.routing.clean_env())
@@ -353,11 +395,11 @@ def readiness(core, args, repo):
     branch = git(repo, 'symbolic-ref', '--short', 'HEAD', check=False)
     if branch.returncode or branch.stdout.decode().strip().startswith('alloy/task-'):
         blockers.append('repository: Use a source branch outside a managed task')
-    common = git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
-    retained = sum(t['git_common_dir'] == common and t['state'] != 'cleaned' and Path(t['worktree']).exists()
-                   for t in (load(core, p.parent.name) for p in (home(core) / 'tasks').glob('*/task.json')))
-    if retained >= 4:
-        blockers.append('capacity: Four retained tasks already exist; integrate/clean up first')
+    retained = storage.retained(core, storage.repo_key(repo))
+    cap = storage.number(core, 'ALLOY_REPO_RETAINED_CAP', 4)
+    if retained >= cap:
+        blockers.append('capacity: %d retained tasks reached repository cap %g; integrate/clean up first' % (retained, cap))
+    blockers.extend('resource: ' + p for p in storage.resources(core))
     candidates = {'maker': [], 'checker': []}
     r = core.routing
     try:
@@ -445,6 +487,7 @@ def review_packet(core, task, record, tip, diff, spec):
                                     '-z', task['base'], tip).split('\0')[:-1],
                   diff=diff, tests=gates, allowed_paths=task['allow_paths'],
                   dependencies='Read needed imports/configuration from this exact worktree; report missing context rather than assume a pass.')
+    packet['protected_changes'] = [p for p in packet['changed_files'] if protected_path(p)]
     # The packet is the ONLY thing a Checker prompt is built from, and it leaves this process for
     # a provider: recognised secret shapes (JWT, assignment, header forms) are scrubbed from every
     # source (goal, diff, gate command and output, paths) and again from the final encoded text,
@@ -551,7 +594,7 @@ def gate(core, task, command, output):
                 core._LIVE_PGIDS.add(cp.pid)
             core.routing.save(child_state, dict(status='running', pid=cp.pid))
             try:
-                code = cp.wait(timeout=task['test_timeout'])
+                code = cp.wait(timeout=min(task['test_timeout'], storage.remaining(task)))
             except subprocess.TimeoutExpired:
                 os.killpg(cp.pid, signal.SIGKILL)
                 cp.wait()
@@ -615,6 +658,9 @@ def dispatch(core, task, role, prompt, folder):
     revalidate(core, task, role)
     decision = task[role]
     ad = worker_adapter(core, decision, write=role == 'maker')
+    task.setdefault('permissions', {})[role] = dict(ad.execution_permissions)
+    if role == 'checker':
+        ad.managed_source_repo = task['repo']
     if ad.name == 'cursor':
         # Dispatch boundary, before anything is staged or persisted: the OS boundary is read
         # explicitly (never inferred from the role's read_only, which a Maker clears) and the
@@ -656,7 +702,7 @@ def dispatch(core, task, role, prompt, folder):
     session['started'] = True  # Persist exact identity before spawn, including interrupted calls.
     save(core, task)
     setup_ms = round((time.monotonic() - setup_started) * 1000)
-    result = core.run_panelist(ad, str(prompt_path), str(folder), task['timeout'], 64000,
+    result = core.run_panelist(ad, str(prompt_path), str(folder), min(task['timeout'], storage.remaining(task)), 64000,
                               'make' if role == 'maker' else 'review', repo=task['worktree'],
                               managed_worktree=role == 'maker')
     result['session_mode'] = 'resumed' if resume else session['mode']
@@ -708,6 +754,8 @@ def checker_prompt(packet, packet_id, tip, absolute_read_rule=''):
         'Use read-only evidence to check whether tests would distinguish the original defect from the fix; '
         'suggest a scoped reproducer, reference comparison or property test when useful. '
         'Report at most 5 concrete failures with reproduction/input and expected versus actual behavior. '
+        'Review protected_changes separately: compare acceptance checks and policy against the base, '
+        'and report any weakened check or concrete violated invariant. No defect found is a valid pass. '
         'Return ONLY JSON: {"verdict":"pass"|"fail","findings":[{"path":"...","evidence":"concrete failure",'
         '"fix":"scoped remedy"}],"packet_id":"' + packet_id + '","revision":"' + tip + '","context_complete":true}. '
         'Echo the packet ID and exact revision only after inspecting the supplied context. Set context_complete false '
@@ -788,6 +836,93 @@ def worker_failure(task, role, result, text):
 
 
 def run(core, task):
+    with storage.active_budget(core, task):
+        return run_attempt(core, task)
+
+
+def stop_progress(task, blockers):
+    """Gate failures are observed; review evidence must supply a reproducer/counterexample."""
+    previous = task.get('acceptance_blockers')
+    current = sorted(set(blockers))
+    task['acceptance_blockers'] = current
+    if previous and (set(previous) & set(current) or len(current) >= len(previous)):
+        raise ExecutionError('Repeated confirmed blocker or no acceptance progress; worktree retained')
+
+
+PROTECTED = ('tests', '.github', 'migrations', 'security', 'auth')
+
+
+def protected_path(path):
+    p = Path(path)
+    return bool(set(p.parts) & set(PROTECTED) or p.stem.lower() in PROTECTED or p.name in (
+        'AGENTS.md', 'SECURITY.md', 'package.json', 'package-lock.json', 'Cargo.lock',
+        'Makefile', 'pyproject.toml', 'tox.ini', 'pytest.ini', '.gitlab-ci.yml'))
+
+
+def light_path(core, task, diff):
+    paths = git(task['worktree'], 'diff', '--name-only', '--no-renames', '-z', task['base']).split('\0')[:-1]
+    protected = any(protected_path(p) for p in paths)
+    small = len(diff.splitlines()) <= storage.number(core, 'ALLOY_LIGHT_DIFF_LINES', 80)
+    task['light'] = bool(not protected and (task.get('light_requested') or small))
+    task['light_reason'] = 'protected paths require full gates' if protected else 'explicit' if task.get('light_requested') else 'small diff' if small else 'full'
+
+
+def checked_review(core, task, record, folder, tip, packet):
+    absolute_read_rule = ''
+    if task['checker']['cli'] == 'antigravity':
+        absolute_read_rule = ('The Checker reads files only inside the task worktree ' + task['worktree'] +
+            ' and the gate-log directory ' + core.gate_log_dir() +
+            ', and never opens another absolute path; use the text of the gate output that is in this prompt. ')
+    review = checker_prompt(packet, record['packet']['id'], tip, absolute_read_rule)
+    attempts = record.setdefault('checker_attempts', [])
+    record['review_pending'] = True
+    save(core, task)
+    while len(attempts) < 3:
+        storage.remaining(task)
+        before = tripwire_manifest(core, task) if cursor_worker(task, 'checker') else None
+        # Retry the same packet and revision. No Maker, gates or commit in this loop.
+        output = folder / ('checker' if not attempts else 'checker-retry-' + str(len(attempts)))
+        result = dispatch(core, task, 'checker', review, output)
+        attempts.append(result)
+        record['checker'] = result
+        save(core, task)
+        if before is not None:
+            tamper_checked(core, task, verify_cursor_checker, result, before)
+        if not clean(task['worktree']) or git(task['worktree'], 'rev-parse', 'HEAD') != tip:
+            raise ExecutionError('Checker changed worktree; no review accepted')
+        text = Path(result['result_path']).read_text() if result.get('result_path') and Path(result['result_path']).exists() else ''
+        if result['status'] != 'ok' or not text.strip():
+            if str(result.get('error', '')).startswith('refused:'):
+                raise ExecutionError(worker_failure(task, 'checker', result, 'Checker failed; no pass inferred'))
+            record.setdefault('transport_failures', []).append(dict(
+                attempt=len(attempts), status=result['status'], timeout=bool(result.get('timed_out')),
+                error='empty Checker output' if not text.strip() else 'provider error', revision=tip))
+            save(core, task)
+            continue
+        try:
+            verdict = review_json(text, record['packet'])
+        except ExecutionError as exc:
+            record['review_error'] = str(exc)
+            record['review_pending'] = False
+            raise
+        record.update(review=verdict, review_pending=False)
+        return verdict
+    raise ExecutionError('Checker transport failed after initial review + 2 retries; unchanged patch retained')
+
+
+def accept_review(core, task, verdict, tip):
+    if verdict['verdict'] == 'pass':
+        task.update(verified_at=time.time(), blocking_step=None, state='ready', tip=tip,
+                    reviewed_tree=git(task['worktree'], 'rev-parse', 'HEAD^{tree}'), feedback='')
+        save(core, task)
+        return True
+    stop_progress(task, [f['path'] + ':' + f['evidence'] for f in verdict['findings']])
+    task['feedback'] = 'Findings for revision ' + tip + ': ' + json.dumps(verdict)
+    save(core, task)
+    return False
+
+
+def run_attempt(core, task):
     directory = taskdir(core, task['id'])
     task.pop('error', None)
     task.update(state='running', pid=os.getpid(), blocking_step='readiness')
@@ -800,13 +935,24 @@ def run(core, task):
         probe(core, task['maker'], True)
         probe(core, task['checker'], False)
         spec = (directory / 'spec.txt').read_text()
+        if task['rounds'] and task['rounds'][-1].get('review_pending'):
+            record = task['rounds'][-1]
+            tip = record['packet']['revision']
+            if not clean(task['worktree']) or git(task['worktree'], 'rev-parse', 'HEAD') != tip:
+                raise ExecutionError('Pending review revision changed; no review accepted')
+            packet = json.dumps(core.routing.read_json(directory / ('review-' + str(record['index']) + '.json')), sort_keys=True)
+            verdict = checked_review(core, task, record, directory / ('round-' + str(record['index'])), tip, packet)
+            if accept_review(core, task, verdict, tip):
+                return task
         feedback = task.get('feedback', '')
-        while len(task['rounds']) < task['max_fix_rounds'] + 1:
+        while task['implementation_rounds'] < task['max_fix_rounds'] + 1:
+            storage.remaining(task)
             index = len(task['rounds'])
             folder = directory / ('round-' + str(index))
             folder.mkdir(exist_ok=True)
             record = dict(index=index, started_at=time.time())
             task['rounds'].append(record)
+            task['implementation_rounds'] += 1
             record['usage'] = round_usage(core, task, folder, index)
             save(core, task)
             prompt = maker_prompt(task, spec, feedback)
@@ -828,6 +974,7 @@ def run(core, task):
                 feedback = '\n'.join('GATE FAILURE ' + g['command'] + '\n' + Path(g['log']).read_text()[-12000:]
                                      for g in record['gates'] if g['exit_code'])
                 task['feedback'] = feedback
+                stop_progress(task, ['gate:' + g['command'] for g in record['gates'] if g['exit_code']])
                 save(core, task)
                 continue
             git(task['worktree'], 'add', '--all')
@@ -835,9 +982,11 @@ def run(core, task):
                 git(task['worktree'], '-c', 'user.name=Alloy', '-c', 'user.email=alloy@localhost',
                     'commit', '-qm', 'Alloy task ' + task['id'] + ' round ' + str(index))
             tip = git(task['worktree'], 'rev-parse', 'HEAD')
+            task['tip'] = tip
             for g in record['gates']:
                 g['revision'] = tip
             diff = git(task['worktree'], 'diff', '--binary', '--no-ext-diff', '--no-textconv', task['base'], tip)
+            light_path(core, task, diff)
             if not diff:
                 raise ExecutionError('Maker produced no changes; retained for host inspection')
             # Preserve non-UTF8 source bytes too; this is a source artifact, not a model log.
@@ -847,36 +996,10 @@ def run(core, task):
             task['blocking_step'] = 'review_context'
             save(core, task)
             packet, packet_id = review_packet(core, task, record, tip, diff, spec)
-            absolute_read_rule = ''
-            if task['checker']['cli'] == 'antigravity':
-                absolute_read_rule = (
-                    'The Checker reads files only inside the task worktree ' + task['worktree'] +
-                    ' and the gate-log directory ' + core.gate_log_dir() +
-                    ', and never opens another absolute path; if gate output names a path outside them, '
-                    'use the text of the gate output that is in this prompt. ')
-            review = checker_prompt(packet, packet_id, tip, absolute_read_rule)
-            checker_before = tripwire_manifest(core, task) if cursor_worker(task, 'checker') else None
-            record['checker'] = dispatch(core, task, 'checker', review, folder / 'checker')
-            save(core, task)
-            if checker_before is not None:
-                tamper_checked(core, task, verify_cursor_checker, record['checker'], checker_before)
-            if not clean(task['worktree']) or git(task['worktree'], 'rev-parse', 'HEAD') != tip:
-                raise ExecutionError('Checker changed worktree; no review accepted')
-            if record['checker']['status'] != 'ok':
-                raise ExecutionError(worker_failure(task, 'checker', record['checker'],
-                                                    'Checker failed; no pass inferred'))
-            try:
-                verdict = review_json(Path(record['checker']['result_path']).read_text(), record['packet'])
-            except ExecutionError as exc:
-                record['review_error'] = str(exc)
-                raise
-            record['review'] = verdict
-            if verdict['verdict'] == 'pass':
-                task.update(verified_at=time.time(), blocking_step=None, state='ready', tip=tip, reviewed_tree=git(task['worktree'], 'rev-parse', 'HEAD^{tree}'), feedback='')
-                save(core, task)
+            verdict = checked_review(core, task, record, folder, tip, packet)
+            if accept_review(core, task, verdict, tip):
                 return task
-            feedback = 'Findings for revision ' + tip + ': ' + json.dumps(verdict)
-            task['feedback'] = feedback
+            feedback = task['feedback']
             save(core, task)
         task.update(state='needs_attention', error='Correction limit reached; worktree retained')
     except (ExecutionError, core.routing.RoutingError, core.CursorBoundaryError, OSError,
@@ -887,6 +1010,17 @@ def run(core, task):
         save(core, task)
         raise
     save(core, task)
+    # A stopped task always returns its current patch, failing reproduction and
+    # unresolved decisions, even when gates failed before a commit was made.
+    try:
+        diff = git(task['worktree'], 'diff', '--binary', '--no-ext-diff', '--no-textconv', task['base'])
+        patch = directory / 'changes.patch'
+        patch.write_bytes(diff.encode(errors='surrogateescape'))
+        patch.chmod(0o600)
+    except (ExecutionError, OSError):
+        pass
+    task['open_decisions'] = [task.get('error', 'Host decision required')]
+    save(core, task)
     return task
 
 
@@ -894,10 +1028,23 @@ def create(core, args):
     started_at = time.time()
     repo = git(args.repo or os.getcwd(), 'rev-parse', '--show-toplevel')
     prompt = core.routing.read_prompt(args)
+    if not getattr(args, 'check', False):
+        storage.cleanup_finished(core, automatic=True)
+    key, logical, owner = storage.identity(core, args, repo, prompt)
+    with locked(storage.logical_lock(core, logical)):
+        return create_attempt(core, args, started_at, repo, prompt, key, logical, owner)
+
+
+def create_attempt(core, args, started_at, repo, prompt, key, logical, owner):
     if not prompt.strip() or not args.test:
         raise ExecutionError('A task specification and at least one --test command are required')
-    if args.timeout < 1 or args.test_timeout < 1 or not 0 <= args.max_fix_rounds <= 2:
-        raise ExecutionError('Positive timeouts and 0..2 fix rounds required')
+    if args.timeout < 1 or args.test_timeout < 1 or args.max_fix_rounds < 0:
+        raise ExecutionError('Positive timeouts and nonnegative fix rounds required')
+    minutes = getattr(args, 'budget_minutes', None)
+    if minutes is None:
+        minutes = storage.number(core, 'ALLOY_TASK_BUDGET_MINUTES', 45)
+    if not core.routing.number(minutes) or minutes <= 0:
+        raise ExecutionError('Budget minutes must be finite and positive')
     allowed = []
     for raw in args.allow_path:
         p = Path(raw)
@@ -910,6 +1057,8 @@ def create(core, args):
         raise ExecutionError('Test commands cannot be empty')
     if Path(repo) == home(core) or Path(repo) in home(core).parents:
         raise ExecutionError('Execution state must live outside the source repository')
+    if not getattr(args, 'check', False):
+        storage.resource_guard(core)
     report = readiness(core, args, repo)
     if getattr(args, 'check', False):
         core.routing.emit(report)
@@ -918,17 +1067,30 @@ def create(core, args):
         raise ExecutionError('Execution blocked:\n- ' + '\n- '.join(report['blockers']))
     if not clean(repo):
         raise ExecutionError('Start from a clean committed checkout; local changes are not copied')
-    with locked(repo_lock(core, repo)):
+    # Clone-independent admission serialization, held only during creation.
+    with locked(home(core) / 'locks' / ('repo-' + key + '.lock')), locked(repo_lock(core, repo)):
         if not clean(repo):
             raise ExecutionError('Start from a clean committed checkout; local changes are not copied')
         branch = git(repo, 'symbolic-ref', '--short', 'HEAD')
         if branch.startswith('alloy/task-'):
             raise ExecutionError('Cannot start an execution inside another managed task')
         common = git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')
-        tasks = [load(core, p.parent.name) for p in (home(core) / 'tasks').glob('*/task.json')]
-        if sum(t['git_common_dir'] == common
-               and t['state'] != 'cleaned' and Path(t['worktree']).exists() for t in tasks) >= 4:
+        tasks = storage.all_tasks(core)
+        for old in tasks:
+            if old['logical_task_id'] == logical and old['state'] in ACTIVE:
+                ensure_no_children(core, old)
+                raise ExecutionError('Logical task has an active attempt; resume it instead of relaunching')
+        if storage.retained(core, key) >= storage.number(core, 'ALLOY_REPO_RETAINED_CAP', 4):
             raise ExecutionError('Four retained tasks already exist for this repository; integrate/clean up first')
+        ledger_path = home(core) / 'logical' / (logical + '.json')
+        ledger = core.routing.read_json(ledger_path, {})
+        if not ledger:
+            prior = [t for t in tasks if t['logical_task_id'] == logical]
+            ledger = dict(active_seconds=sum(t.get('active_seconds', 0) for t in prior),
+                          implementation_rounds=sum(len(t['rounds']) for t in prior))
+            core.routing.save(ledger_path, ledger)
+        if ledger.get('active_seconds', 0) >= minutes * 60 or ledger.get('implementation_rounds', 0) >= args.max_fix_rounds + 1:
+            raise ExecutionError('Logical task budget/correction limit reached; extend --budget-minutes/--max-fix-rounds')
         maker, checker = select(core, args, prompt)
         if not clean(repo) or git(repo, 'symbolic-ref', '--short', 'HEAD') != branch:
             raise ExecutionError('Source changed during worker selection; retry from a clean checkout')
@@ -936,6 +1098,8 @@ def create(core, args):
         wt = home(core) / 'worktrees' / task_id
         wt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         task = dict(schema=SCHEMA, id=task_id, repo=repo, worktree=str(wt), branch='alloy/task-' + task_id,
+                    owner=owner, logical_task_id=logical, repo_key=key, budget_seconds=minutes * 60,
+                    light_requested=bool(getattr(args, 'light', False)), lease_heartbeat_at=time.time(),
                     target_branch=branch, base=git(repo, 'rev-parse', 'HEAD'), state='creating', created_at=started_at,
                     readiness=report, sessions={},
                     git_common_dir=common,
@@ -964,6 +1128,10 @@ def proof(task, commit=None):
     if git(repo, 'merge-base', '--is-ancestor', tip, target, check=False).returncode == 0:
         return dict(method='ancestry', commit=git(repo, 'rev-parse', target))
     candidate = commit or task.get('integration', {}).get('commit')
+    if not candidate:
+        receipt = storage.merged_elsewhere(task)
+        if receipt:
+            return receipt
     if not candidate or not re.fullmatch(r'[0-9a-f]{40,64}', candidate):
         raise ExecutionError('Integration is not proven; for squash merges supply --integrated-commit with full commit hash')
     if git(repo, 'merge-base', '--is-ancestor', candidate, target, check=False).returncode:
@@ -991,15 +1159,7 @@ def cleanup_one(core, task, commit=None, dry_run=False):
         receipt = proof(task, commit)
         if dry_run:
             return dict(id=task['id'], cleanup_eligible=True, integration=receipt)
-        listing = git(task['repo'], 'worktree', 'list', '--porcelain')
-        if 'worktree ' + task['worktree'] + '\n' in listing + '\n':
-            git(task['repo'], 'worktree', 'remove', task['worktree'])
-        ref = git(task['repo'], 'rev-parse', '--verify', 'refs/heads/' + task['branch'], check=False)
-        if ref.returncode == 0:
-            git(task['repo'], 'update-ref', '-d', 'refs/heads/' + task['branch'], task['tip'])
-        task.update(state='cleaned', cleaned_at=time.time(), integration=receipt)
-        save(core, task)
-        return task
+        return storage.remove_archived(core, task, receipt)
     validate_tree(task)
     if not clean(task['worktree']) or git(task['worktree'], 'rev-parse', 'HEAD') != task['tip']:
         raise ExecutionError('Worktree has local edits or new commits; retained')
@@ -1010,11 +1170,7 @@ def cleanup_one(core, task, commit=None, dry_run=False):
         return dict(id=task['id'], cleanup_eligible=True, integration=receipt)
     task.update(integration=receipt, state='integrated')
     save(core, task)  # Receipt is durable before removal. Git refuses untracked/modified files.
-    git(task['repo'], 'worktree', 'remove', task['worktree'])
-    git(task['repo'], 'update-ref', '-d', 'refs/heads/' + task['branch'], task['tip'])
-    task.update(state='cleaned', cleaned_at=time.time())
-    save(core, task)
-    return task
+    return storage.remove_archived(core, task, receipt)
 
 
 def ensure_no_children(core, task):
@@ -1033,13 +1189,30 @@ def ensure_no_children(core, task):
 
 
 def lifecycle(core, args):
+    if args.command == 'cleanup' and getattr(args, 'all_finished', False):
+        if args.task_id:
+            raise ExecutionError('Choose TASK_ID or --all-finished')
+        rows = storage.cleanup_finished(core, dry_run=args.dry_run, older_than=args.older_than)
+        core.routing.emit(rows)
+        return 3 if any(row.get('retained') for row in rows) else 0
+    if not args.task_id:
+        raise ExecutionError('TASK_ID or cleanup --all-finished required')
     with locked(taskdir(core, args.task_id) / 'task.lock'):
         task = load(core, args.task_id)
         ensure_no_children(core, task)
         if args.command == 'resume':
             if task['state'] not in ('interrupted', 'needs_attention', 'running', 'creating'):
                 raise ExecutionError('Only unfinished tasks can be resumed')
-            return finish(core, run(core, task))
+            if getattr(args, 'budget_minutes', None) is not None:
+                if not core.routing.number(args.budget_minutes) or args.budget_minutes <= 0:
+                    raise ExecutionError('Budget minutes must be finite and positive')
+                task['budget_seconds'] = args.budget_minutes * 60
+            if getattr(args, 'max_fix_rounds', None) is not None:
+                if args.max_fix_rounds < 0:
+                    raise ExecutionError('Fix rounds must be nonnegative')
+                task['max_fix_rounds'] = args.max_fix_rounds
+            with locked(storage.logical_lock(core, task['logical_task_id'])):
+                return finish(core, run(core, task))
         with locked(repo_lock(core, task['repo'])):
             if args.command == 'integrate':
                 if task['state'] != 'ready':
@@ -1065,11 +1238,13 @@ def lifecycle(core, args):
 
 def finish(core, task):
     # Host sees a compact packet; detailed logs stay on disk.
-    out = {k: task[k] for k in ('id', 'state', 'repo', 'worktree', 'branch', 'tip', 'integration', 'error', 'cleanup_eligible') if k in task}
+    out = {k: task[k] for k in ('id', 'owner', 'logical_task_id', 'state', 'repo', 'worktree', 'branch', 'tip', 'integration', 'archive', 'closure', 'light', 'light_reason', 'active_seconds', 'budget_seconds', 'implementation_rounds', 'open_decisions', 'error', 'cleanup_eligible') if k in task}
     out['record'] = str(taskdir(core, task['id']) / 'task.json')
     if 'rounds' in task:
         out['blocking_step'] = task.get('blocking_step')
-        calls = [r[role] for r in task['rounds'] for role in ('maker', 'checker') if role in r]
+        calls = [c for r in task['rounds'] for c in
+                 ([r['maker']] if 'maker' in r else []) +
+                 (r.get('checker_attempts') or ([r['checker']] if 'checker' in r else []))]
         out['metrics'] = dict(
             startup_ms=round((task['first_dispatch_at'] - task['created_at']) * 1000) if task.get('first_dispatch_at') else None,
             worker_setup_ms=sum(c.get('setup_ms', 0) for c in calls),
@@ -1077,6 +1252,8 @@ def finish(core, task):
             resumed_worker_calls=sum(c.get('session_mode') == 'resumed' for c in calls),
             review_context_failures=sum('context receipt' in r.get('review_error', '') for r in task['rounds']),
             review_retries=max(0, sum('checker' in r for r in task['rounds']) - 1),
+            review_transport_failures=sum(len(r.get('transport_failures', [])) for r in task['rounds']),
+            review_transport_retries=sum(max(0, len(r.get('checker_attempts', [])) - 1) for r in task['rounds']),
             verified_result_ms=round((task['verified_at'] - task['created_at']) * 1000) if task.get('verified_at') else None)
         out['verification'] = dict(tests_passed=bool(task['rounds']) and bool(task['rounds'][-1].get('gates')) and
                                   all(g['exit_code'] == 0 for g in task['rounds'][-1]['gates']),
@@ -1085,6 +1262,7 @@ def finish(core, task):
         out['maker'] = task['maker']['model']
         out['checker'] = task['checker']['model']
         out['diff'] = str(taskdir(core, task['id']) / 'changes.patch')
+        out['failing_reproduction'] = task.get('feedback') or '\n'.join(task['tests'])
         if task['rounds']:
             latest = task['rounds'][-1]
             out['tests'] = [{k: g[k] for k in ('command', 'exit_code')} for g in latest.get('gates', [])]
@@ -1098,7 +1276,7 @@ def tasks(core, args):
     rows = []
     for p in sorted((home(core) / 'tasks').glob('*/task.json')):
         t = load(core, p.parent.name)
-        row = {k: t[k] for k in ('id', 'state', 'repo', 'worktree', 'created_at', 'updated_at')}
+        row = {k: t[k] for k in ('id', 'owner', 'logical_task_id', 'state', 'repo', 'worktree', 'created_at', 'updated_at')}
         if t['state'] in ACTIVE:
             try:
                 with locked(p.parent / 'task.lock'):
@@ -1125,7 +1303,11 @@ def register(sub, core):
     p.add_argument('--max-estimated-usd', type=float)
     p.add_argument('--allow-path', action='append', required=True)
     p.add_argument('--test', action='append', required=True)
-    p.add_argument('--max-fix-rounds', type=int, default=2)
+    p.add_argument('--owner', help='durable task owner (default ALLOY_OWNER or login user)')
+    p.add_argument('--logical-task-id', help='stable work identifier across clones/relaunches; default repository + exact specification hash')
+    p.add_argument('--budget-minutes', type=float, help='cumulative active budget (default ALLOY_TASK_BUDGET_MINUTES or 45)')
+    p.add_argument('--light', action='store_true', help='one Maker, focused supplied gates and one cross-family Checker for low-risk changes')
+    p.add_argument('--max-fix-rounds', type=int, default=int(storage.number(core, 'ALLOY_MAX_FIX_ROUNDS', 1)))
     p.add_argument('--timeout', type=int, default=1800)
     p.add_argument('--test-timeout', type=int, default=600)
     p.set_defaults(func=lambda a: create(core, a))
@@ -1133,10 +1315,15 @@ def register(sub, core):
     p.set_defaults(func=lambda a: tasks(core, a))
     for name in ('resume', 'integrate', 'cleanup'):
         p = sub.add_parser(name, help=name + ' an Alloy-owned execution task')
-        p.add_argument('task_id')
+        p.add_argument('task_id', nargs='?' if name == 'cleanup' else None)
+        if name == 'resume':
+            p.add_argument('--budget-minutes', type=float, help='extend total cumulative active budget')
+            p.add_argument('--max-fix-rounds', type=int, help='extend total cumulative correction allowance')
         if name == 'integrate':
             p.add_argument('--squash', action='store_true')
         if name == 'cleanup':
             p.add_argument('--integrated-commit', help='full hash of an externally created squash commit')
             p.add_argument('--dry-run', action='store_true')
+            p.add_argument('--all-finished', action='store_true', help='archive and remove finished tasks, including abandoned work')
+            p.add_argument('--older-than', help='idle age filter, e.g. 24h or 7d')
         p.set_defaults(func=lambda a: lifecycle(core, a))
