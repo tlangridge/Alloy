@@ -8,10 +8,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -40,7 +43,8 @@ class ExecutionTests(unittest.TestCase):
         (self.repo / 'file.txt').write_text('old\n')
         e.git(self.repo, 'add', '.'); e.git(self.repo, 'commit', '-qm', 'base')
         self.env = patch.dict(os.environ, {'ALLOY_RUN_ROOT': str(self.base / 'state/runs'),
-            'ALLOY_ROUTING_HOME': str(self.base / 'config'), 'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off'})
+            'ALLOY_ROUTING_HOME': str(self.base / 'config'), 'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off',
+            'ALLOY_MIN_FREE_GB': '0', 'ALLOY_RETAINED_BUDGET_GB': '10'})
         self.env.start(); self.addCleanup(self.env.stop)
         patch.object(core, '_CONFIG', {}).start()
         self.maker = dict(cli='claude', family='anthropic', model='sonnet', effort=None, profile='maker')
@@ -57,6 +61,19 @@ class ExecutionTests(unittest.TestCase):
             max_fix_rounds=2, timeout=10, test_timeout=5, max_estimated_usd=None)
         self.verdicts = []
         self.calls = []
+        self.review_profiles = []
+        real_launch = subprocess.Popen
+        def launch(argv, *args, **kwargs):
+            # Fake coding CLIs stay offline. Emulate sandbox-exec here because
+            # the host sandbox forbids nested Seatbelt; policy is interpreted by
+            # the same independent fixture used for Cursor boundary tests.
+            if isinstance(argv, list) and argv[:2] == ['/usr/bin/sandbox-exec', '-p']:
+                profile = argv[2]
+                self.review_profiles.append(profile)
+                self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-write-data', kwargs['cwd'] + '/file.txt'), 'deny')
+                argv = argv[3:]
+            return real_launch(argv, *args, **kwargs)
+        patch.object(core.subprocess, 'Popen', side_effect=launch).start()
         def dispatch(core, task, role, prompt, folder):
             self.calls.append((role, prompt))
             folder.mkdir(parents=True, exist_ok=True)
@@ -73,10 +90,10 @@ class ExecutionTests(unittest.TestCase):
         patch.object(e, 'dispatch', side_effect=dispatch).start()
 
     def create(self):
-        with contextlib.redirect_stdout(io.StringIO()):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
             code = e.create(core, self.args)
-        ids = list((e.home(core) / 'tasks').glob('*/task.json'))
-        return code, e.load(core, ids[-1].parent.name)
+        return code, e.load(core, json.loads(output.getvalue())['id'])
 
     def action(self, task, command, **kw):
         args = argparse.Namespace(task_id=task['id'], command=command, squash=False, integrated_commit=None, dry_run=False)
@@ -95,7 +112,9 @@ class ExecutionTests(unittest.TestCase):
     def test_readiness_collects_dirty_auth_and_capacity_without_inference(self):
         self.args.max_fix_rounds = 0
         self.args.test = ['exit 1']
-        for _ in range(4): self.create()
+        for i in range(4):
+            self.args.logical_task_id = 'capacity-' + str(i)
+            self.create()
         (self.repo / 'file.txt').write_text('dirty')
         r = core.routing
         config = r.starter(core)
@@ -193,6 +212,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual([role for role, _ in self.calls], ['maker'])
         self.assertTrue(Path(task['worktree']).exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_native_sessions_reused_with_same_permissions_and_short_updates(self):
         binary = self.base / 'session-cli'
         binary.write_text('#!' + sys.executable + '\n' + r'''
@@ -309,7 +329,7 @@ else:
         _, task = self.create()
         e.git(self.repo, 'merge', '--squash', task['tip']); e.git(self.repo, 'commit', '-qm', 'squashed')
         merged = e.git(self.repo, 'rev-parse', 'HEAD')
-        with self.assertRaises(e.ExecutionError): self.action(task, 'cleanup')
+        self.assertEqual(self.action(task, 'cleanup', dry_run=True), 0)
         self.assertEqual(self.action(task, 'cleanup', integrated_commit=merged, dry_run=True), 0)
         self.assertTrue(Path(task['worktree']).exists())
         self.assertEqual(self.action(task, 'cleanup', integrated_commit=merged), 0)
@@ -365,7 +385,8 @@ else:
         self.args.test = [sys.executable + ' -c "raise SystemExit(1)"']
         code, task = self.create()
         self.assertEqual(code, 3); self.assertEqual(task['state'], 'needs_attention')
-        self.assertEqual(len(task['rounds']), 3)
+        self.assertEqual(len(task['rounds']), 2)
+        self.assertIn('Repeated confirmed blocker', task['error'])
         self.assertTrue(all(c[0] == 'maker' for c in self.calls))
         self.assertTrue(Path(task['worktree']).exists())
         with self.assertRaises(e.ExecutionError): self.action(task,'cleanup')
@@ -429,6 +450,7 @@ else:
                 self.assertEqual(args.count('--tools'),1)
                 self.assertEqual(args[args.index('--tools')+1],'Read,Glob,Grep,Edit,Write,Bash')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_real_subprocess_writes_worktree_and_records_boundary(self):
         binary = self.base / 'mock-cli'
         binary.write_text('#!' + sys.executable + "\n" + """
@@ -459,6 +481,11 @@ else:
         self.assertEqual((self.repo/'file.txt').read_text(), 'old\n')
         m, c = task['rounds'][0]['maker'], task['rounds'][0]['checker']
         self.assertEqual(m['cwd'], task['worktree'])
+        self.assertEqual(c['cwd'], task['worktree'])
+        self.assertFalse((e.taskdir(core, task['id']) / 'round-0/checker/cwd_repo').exists())
+        self.assertTrue(self.review_profiles)
+        for path in (task['worktree'] + '/new.txt', str(self.repo / 'file.txt'), task['git_common_dir'] + '/HEAD'):
+            self.assertEqual(MOCKMOD.sbpl_decision(self.review_profiles[0], 'file-write-data', os.path.realpath(path)), 'deny', path)
         self.assertFalse(m['read_only']); self.assertTrue(c['read_only'])
         self.assertEqual(m['permissions']['command_execution'], 'allowed')
         self.assertEqual(c['permissions']['command_execution'], 'provider_read_only_policy')
@@ -496,9 +523,320 @@ else:
     def test_retained_worktree_cap(self):
         self.args.max_fix_rounds=0
         self.args.test=['exit 1']
-        for _ in range(4): self.create()
+        for i in range(4):
+            self.args.logical_task_id = 'capacity-' + str(i)
+            self.create()
         with self.assertRaisesRegex(e.ExecutionError,'Four retained'): self.create()
         self.assertEqual(len(list((e.home(core)/'worktrees').iterdir())),4)
+
+    def aged(self, task, state='needs_attention'):
+        task.update(state=state, updated_at=time.time() - 90000)
+        core.routing.save(e.taskdir(core, task['id']) / 'task.json', task)
+
+    def cleanup_all(self, **kwargs):
+        args = core.build_parser().parse_args(['cleanup', '--all-finished'] +
+            (['--dry-run'] if kwargs.get('dry_run') else []) +
+            (['--older-than', kwargs['older_than']] if kwargs.get('older_than') else []))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = e.lifecycle(core, args)
+        return code, json.loads(output.getvalue())
+
+    def test_finished_cleanup_archives_dirty_work_bundle_and_manifest_before_removal(self):
+        _, task = self.create()
+        wt = Path(task['worktree'])
+        (wt / 'file.txt').write_text('unfinished correction\n')
+        (wt / 'new.txt').write_text('untracked work\n')
+        (wt / 'node_modules').mkdir()
+        (wt / 'node_modules/cache').write_text('regenerable')
+        self.aged(task)
+        code, rows = self.cleanup_all(dry_run=True, older_than='24h')
+        self.assertEqual(code, 0)
+        self.assertTrue(rows[0]['cleanup_eligible'])
+        self.assertTrue(wt.exists())
+        self.assertFalse((e.home(core) / 'archive').exists())
+        code, rows = self.cleanup_all(older_than='24h')
+        self.assertEqual(code, 0, rows)
+        self.assertFalse(wt.exists())
+        saved = e.load(core, task['id'])
+        self.assertEqual(saved['closure']['disposition'], 'abandoned')
+        archive = Path(saved['archive'])
+        manifest = json.loads((archive / 'MANIFEST.json').read_text())
+        self.assertTrue(manifest['bundle'])
+        self.assertIn('+unfinished correction', (archive / 'changes.patch').read_text())
+        with tarfile.open(archive / 'files.tar.gz') as tar:
+            self.assertEqual(tar.extractfile('new.txt').read(), b'untracked work\n')
+            self.assertNotIn('node_modules/cache', tar.getnames())
+        # Recover the commits into another repository that has the named base.
+        recovery = self.base / 'recovery'
+        subprocess.run(['git', 'clone', '-q', str(self.repo), str(recovery)], check=True)
+        e.git(recovery, 'fetch', str(archive / 'commits.bundle'), 'HEAD:refs/heads/recovered')
+        self.assertEqual(e.git(recovery, 'show', 'recovered:file.txt'), 'new')
+
+    def test_archive_corruption_or_upload_failure_never_removes_work(self):
+        _, task = self.create()
+        self.aged(task)
+        real = e.storage.verify_archive
+        def corrupt(core, task, directory):
+            (directory / 'changes.patch').write_text('corrupt')
+            return real(core, task, directory)
+        with patch.object(e.storage, 'verify_archive', side_effect=corrupt):
+            code, rows = self.cleanup_all()
+        self.assertEqual(code, 3)
+        self.assertIn('verification failed', rows[0]['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+        with patch.dict(os.environ, ALLOY_ARCHIVE_UPLOAD_HOOK='exit 1'):
+            code, rows = self.cleanup_all()
+        self.assertEqual(code, 3)
+        self.assertIn('upload hook failed', rows[0]['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_archive_preserves_commits_added_during_upload(self):
+        _, task = self.create()
+        self.aged(task)
+        hook = 'git -C ' + shlex.quote(task['worktree']) + ' -c core.hooksPath=/dev/null commit --allow-empty -qm late-commit'
+        with patch.dict(os.environ, ALLOY_ARCHIVE_UPLOAD_HOOK=hook):
+            code, rows = self.cleanup_all()
+        self.assertEqual(code, 3)
+        self.assertIn('commits changed after archive', rows[0]['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+        self.assertEqual(e.git(task['worktree'], 'log', '-1', '--format=%s'), 'late-commit')
+
+    def test_missing_source_cleanup_recovers_files_and_respects_rm_guard(self):
+        _, task = self.create()
+        (Path(task['worktree']) / 'file.txt').write_text('recover me\n')
+        self.repo.rename(self.base / 'moved-source')
+        self.aged(task)
+        real_run = e.storage.subprocess.run
+        def refuse(argv, *args, **kwargs):
+            if isinstance(argv, list) and argv[0] == 'rm':
+                return subprocess.CompletedProcess(argv, 1, '', 'rm guard: refused')
+            return real_run(argv, *args, **kwargs)
+        with patch.object(e.storage.subprocess, 'run', side_effect=refuse):
+            code, rows = self.cleanup_all()
+        self.assertEqual(code, 3)
+        self.assertIn(task['worktree'], rows[0]['error'])
+        self.assertIn('rm guard: refused', rows[0]['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+        code, rows = self.cleanup_all()
+        self.assertEqual(code, 0, rows)
+        archive = Path(e.load(core, task['id'])['archive'])
+        self.assertEqual(json.loads((archive / 'MANIFEST.json').read_text())['kind'], 'files')
+        with tarfile.open(archive / 'files.tar.gz') as tar:
+            self.assertEqual(tar.extractfile('file.txt').read(), b'recover me\n')
+        self.assertFalse(Path(task['worktree']).exists())
+
+    def test_batch_detects_cherry_pick_and_later_changes_by_patch_identity(self):
+        _, task = self.create()
+        e.git(self.repo, 'commit', '--allow-empty', '-qm', 'unrelated target advance')
+        e.git(self.repo, 'cherry-pick', task['tip'])
+        (self.repo / 'file.txt').write_text('later change\n')
+        e.git(self.repo, 'commit', '-qam', 'later edit')
+        self.aged(task, 'ready')
+        code, rows = self.cleanup_all()
+        self.assertEqual(code, 0, rows)
+        saved = e.load(core, task['id'])
+        self.assertEqual(saved['closure']['disposition'], 'merged')
+        self.assertEqual(saved['integration']['method'], 'patch_id')
+
+    def test_automatic_hygiene_skips_recent_running_and_locked_tasks(self):
+        _, old = self.create()
+        self.aged(old)
+        self.args.logical_task_id = 'other goal'
+        _, recent = self.create()  # execute-start hygiene retires the old task
+        self.assertEqual(e.load(core, old['id'])['state'], 'cleaned')
+        self.assertTrue(Path(recent['worktree']).exists())
+        self.aged(recent, 'running')
+        self.assertEqual(e.storage.cleanup_finished(core, automatic=True), [])
+        self.aged(recent)
+        with e.locked(e.taskdir(core, recent['id']) / 'task.lock'):
+            rows = e.storage.cleanup_finished(core, automatic=True)
+        self.assertTrue(rows[0]['retained'])
+        self.assertTrue(Path(recent['worktree']).exists())
+
+    def test_owner_response_window_is_durable_and_configurable(self):
+        _, task = self.create()
+        self.aged(task)
+        with patch.dict(os.environ, ALLOY_CLEANUP_GRACE_HOURS='1'):
+            rows = e.storage.cleanup_finished(core, automatic=True)
+            self.assertTrue(rows[0]['owner_notice'])
+            self.assertTrue(Path(task['worktree']).exists())
+            saved = e.load(core, task['id'])
+            notice = core.routing.read_json(e.taskdir(core, task['id']) / 'owner-notice.json')
+            self.assertEqual(notice['owner'], saved['owner'])
+            self.assertEqual(e.storage.cleanup_finished(core, automatic=True), [])
+            saved['owner_notice_at'] -= 4000
+            core.routing.save(e.taskdir(core, task['id']) / 'task.json', saved)
+            e.storage.cleanup_finished(core, automatic=True)
+        self.assertFalse(Path(task['worktree']).exists())
+
+    def test_clone_identity_shares_budget_cap_and_active_lock(self):
+        e.git(self.repo, 'remote', 'add', 'origin', 'git@example.invalid:team/project.git')
+        _, task = self.create()
+        clone = self.base / 'clone'
+        subprocess.run(['git', 'clone', '-q', str(self.repo), str(clone)], check=True)
+        e.git(clone, 'remote', 'set-url', 'origin', 'https://example.invalid/team/project.git')
+        self.args.repo = str(clone)
+        key, logical, _ = e.storage.identity(core, self.args, str(clone), self.prompt.read_text())
+        self.assertEqual(key, task['repo_key'])
+        self.assertEqual(logical, task['logical_task_id'])
+        with e.locked(e.storage.logical_lock(core, logical)):
+            with self.assertRaisesRegex(e.ExecutionError, 'busy'):
+                self.create()
+        self.args.max_fix_rounds = 0
+        with self.assertRaisesRegex(e.ExecutionError, 'Logical task budget/correction'):
+            self.create()
+        self.args.logical_task_id = 'different work'
+        self.args.max_fix_rounds = 1
+        with patch.dict(os.environ, ALLOY_REPO_RETAINED_CAP='1'):
+            with self.assertRaisesRegex(e.ExecutionError, 'retained tasks'):
+                self.create()
+
+    def test_resource_guard_hygiene_reclaims_then_refuses_only_if_still_short(self):
+        _, task = self.create()
+        self.aged(task)
+        self.args.logical_task_id = 'resource task'
+        with patch.object(e.storage.shutil, 'disk_usage', side_effect=[
+                types.SimpleNamespace(free=1), types.SimpleNamespace(free=100 << 30)]), \
+                patch.dict(os.environ, ALLOY_MIN_FREE_GB='15'):
+            code, new = self.create()
+        self.assertEqual(code, 0)
+        self.assertFalse(Path(task['worktree']).exists())
+        self.assertTrue(Path(new['worktree']).exists())
+        self.args.logical_task_id = 'short disk'
+        with patch.object(e.storage.shutil, 'disk_usage', return_value=types.SimpleNamespace(free=1)), \
+                patch.dict(os.environ, ALLOY_MIN_FREE_GB='15'):
+            with self.assertRaisesRegex(e.ExecutionError, 'Resource guard after automatic hygiene'):
+                self.create()
+        self.assertEqual(len(list((e.home(core) / 'worktrees').iterdir())), 1)
+
+    def test_budget_carries_across_relaunch_and_owner_can_extend(self):
+        self.args.max_fix_rounds = 0
+        self.args.test = ['exit 1']
+        self.args.owner = 'test-owner'
+        self.args.logical_task_id = 'shared work'
+        _, task = self.create()
+        ledger = core.routing.read_json(e.storage.ledger_path(core, task))
+        self.assertGreater(ledger['active_seconds'], 0)
+        self.assertEqual(task['owner'], 'test-owner')
+        with self.assertRaisesRegex(e.ExecutionError, 'budget/correction limit'):
+            self.create()
+        self.args.max_fix_rounds = 1
+        self.args.test = ['exit 0']
+        code, new = self.create()
+        self.assertEqual(code, 0)
+        self.assertEqual(new['logical_task_id'], task['logical_task_id'])
+        self.assertEqual(new['implementation_rounds'], 2)
+        self.assertGreater(new['active_seconds'], ledger['active_seconds'])
+
+    def test_budget_expiry_returns_uncommitted_patch_and_failing_reproduction(self):
+        self.args.budget_minutes = 0.05
+        original = e.dispatch.side_effect
+        def slow(core, task, role, prompt, folder):
+            result = original(core, task, role, prompt, folder)
+            time.sleep(3.1)
+            return result
+        with patch.object(e, 'dispatch', side_effect=slow):
+            code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('budget expired', task['error'])
+        self.assertIn('+new', (e.taskdir(core, task['id']) / 'changes.patch').read_text())
+        self.assertTrue(task['open_decisions'])
+        self.assertEqual([role for role, _ in self.calls], ['maker'])
+
+    def test_checker_transport_retries_same_revision_without_implementation_rounds(self):
+        original = e.dispatch.side_effect
+        attempts = []
+        def retry(core, task, role, prompt, folder):
+            result = original(core, task, role, prompt, folder)
+            if role == 'checker':
+                attempts.append(task['rounds'][-1]['packet'].copy())
+                if len(attempts) == 1:
+                    Path(result['result_path']).write_text('')
+                elif len(attempts) == 2:
+                    result.update(status='error', timed_out=True)
+            return result
+        with patch.object(e, 'dispatch', side_effect=retry):
+            code, task = self.create()
+        self.assertEqual(code, 0)
+        self.assertEqual([role for role, _ in self.calls], ['maker', 'checker', 'checker', 'checker'])
+        self.assertEqual(task['implementation_rounds'], 1)
+        self.assertEqual(attempts, [attempts[0]] * 3)
+        self.assertEqual(len(task['rounds'][0]['transport_failures']), 2)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            e.finish(core, task)
+        self.assertEqual(json.loads(output.getvalue())['metrics']['review_transport_retries'], 2)
+
+    def test_checker_transport_exhaustion_never_runs_another_maker_on_resume(self):
+        original = e.dispatch.side_effect
+        def empty(core, task, role, prompt, folder):
+            result = original(core, task, role, prompt, folder)
+            if role == 'checker':
+                Path(result['result_path']).write_text('')
+            return result
+        with patch.object(e, 'dispatch', side_effect=empty):
+            code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('initial review + 2 retries', task['error'])
+        before = len(self.calls)
+        self.assertEqual(self.action(task, 'resume'), 3)
+        self.assertEqual(len(self.calls), before)
+        self.assertEqual(task['implementation_rounds'], 1)
+
+    def test_light_automatic_and_protected_paths_keep_all_explicit_gates(self):
+        code, task = self.create()
+        self.assertEqual(code, 0)
+        self.assertTrue(task['light'])
+        self.assertEqual(len(task['rounds'][0]['gates']), len(self.args.test))
+        e.git(self.repo, 'checkout', '-b', 'protected-test')
+        (self.repo / 'tests').mkdir()
+        (self.repo / 'tests/acceptance.py').write_text('old\n')
+        e.git(self.repo, 'add', '.'); e.git(self.repo, 'commit', '-qm', 'acceptance file')
+        self.args.logical_task_id = 'protected change'
+        self.args.light = True
+        self.args.allow_path = ['tests']
+        self.args.test = ['exit 0', 'echo required gate']
+        def maker(core, task, role, prompt, folder):
+            folder.mkdir(parents=True, exist_ok=True)
+            if role == 'maker':
+                (Path(task['worktree']) / 'tests/acceptance.py').write_text('new\n')
+                text = 'changed acceptance'
+            else:
+                receipt = task['rounds'][-1]['packet']
+                text = json.dumps(dict(verdict='pass', findings=[], packet_id=receipt['id'], revision=receipt['revision'], context_complete=True))
+            path = folder / 'result.md'; path.write_text(text)
+            return dict(status='ok', result_path=str(path))
+        with patch.object(e, 'dispatch', side_effect=maker):
+            code, task = self.create()
+        self.assertEqual(code, 0)
+        self.assertFalse(task['light'])
+        self.assertEqual(len(task['rounds'][0]['gates']), 2)
+
+    def test_legacy_records_share_new_logical_identity_and_round_budget(self):
+        self.args.max_fix_rounds = 0
+        self.args.test = ['exit 1']
+        _, task = self.create()
+        ledger_path = e.storage.ledger_path(core, task)
+        ledger_path.unlink()
+        for key in ('logical_task_id', 'owner', 'repo_key', 'budget_seconds', 'active_seconds'):
+            task.pop(key, None)
+        core.routing.save(e.taskdir(core, task['id']) / 'task.json', task)
+        with self.assertRaisesRegex(e.ExecutionError, 'budget/correction limit'):
+            self.create()
+        migrated = e.load(core, task['id'])
+        _, logical, _ = e.storage.identity(core, self.args, str(self.repo.resolve()), self.prompt.read_text())
+        self.assertEqual(migrated['logical_task_id'], logical)
+        self.assertTrue(migrated['owner'])
+
+    def test_unrelated_logical_tasks_execute_while_another_logical_lock_is_held(self):
+        _, task = self.create()
+        self.args.logical_task_id = 'unrelated task'
+        with e.locked(e.storage.logical_lock(core, task['logical_task_id'])):
+            code, other = self.create()
+        self.assertEqual(code, 0)
+        self.assertNotEqual(task['logical_task_id'], other['logical_task_id'])
+        self.assertTrue(Path(task['worktree']).exists())
 
     def test_dirty_source_stops_before_selection(self):
         (self.repo/'file.txt').write_text('uncommitted')
@@ -533,6 +871,7 @@ else:
             config['profiles'][1]['family']='anthropic'; r.save(r.root()/'routing.json',config)
             with self.assertRaises(r.RoutingError): REAL_SELECT(core,self.args,'Task')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_cli_execute_to_integrate_offline(self):
         binary=self.base/'mock-cli'
         binary.write_text('#!' + sys.executable + '\n' + """
@@ -562,7 +901,23 @@ else:
                  ALLOY_BIN_CLAUDE=str(binary),ALLOY_BIN_GROK=str(binary),ALLOY_BIN_CODEX='/nonexistent',ALLOY_BIN_ANTIGRAVITY='/nonexistent',
                  ALLOY_BIN_CURSOR='/nonexistent',   # a real Cursor build on this machine must never be reached
                  ANTHROPIC_API_KEY='test-only',XAI_API_KEY='test-only')
-        command=[sys.executable,str(ROOT/'bin/alloy')]
+        # Separate-process CLI integration with fake transport and fake Seatbelt;
+        # no installed CLI or real authentication is used by this runner.
+        bootstrap = self.base / 'offline-runner.py'
+        bootstrap.write_text('''import runpy, subprocess, sys
+launch = subprocess.Popen
+def spawn(argv, *args, **kwargs):
+    if isinstance(argv, list) and argv[:2] == ['/usr/bin/sandbox-exec', '-p']:
+        assert '(deny file-write*' in argv[2]
+        argv = argv[3:]
+    return launch(argv, *args, **kwargs)
+subprocess.Popen = spawn
+entry = sys.argv.pop(1)
+sys.path.insert(0, str(__import__('pathlib').Path(entry).parent))
+sys.argv[0] = entry
+runpy.run_path(entry, run_name='__main__')
+''')
+        command=[sys.executable,str(bootstrap),str(ROOT/'bin/alloy')]
         result=subprocess.run(command+['execute','--repo',str(self.repo),'--prompt-file',str(self.prompt),'--host-family','openai',
             '--maker-profile','maker','--checker-profile','checker','--allow-path','file.txt','--test',self.args.test[0]],
             env=env,capture_output=True,text=True,timeout=30)
@@ -643,6 +998,28 @@ else:
         self.assertIn('command(*)',ad._settings()['permissions']['allow'])  # agy >= 1.2 grammar
         self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
+
+    def test_non_macos_checker_requires_codex_native_read_only_sandbox(self):
+        class OtherSys:
+            platform = 'linux'
+            def __getattr__(self, name):
+                return getattr(sys, name)
+        ctx=dict(repo=str(self.repo),pdir=str(self.base/'review'),timeout_s=10,managed_worktree=False)
+        with patch.object(e, 'sys', OtherSys()):
+            for cli in ('claude', 'grok', 'antigravity'):
+                with self.subTest(cli=cli):
+                    with patch.object(type(core.ADAPTERS[cli]), 'auth_state', return_value='ready'), \
+                            patch.object(type(core.ADAPTERS[cli]), 'read_only', True), \
+                            self.assertRaisesRegex(e.ExecutionError, 'requires an OS read-only boundary'):
+                        REAL_PROBE(core, dict(cli=cli, model='test', effort=None), False)
+                    ad = e.worker_adapter(core, dict(cli=cli, model='test', effort=None), False)
+                    with self.assertRaisesRegex(core.CursorBoundaryError, 'requires an OS read-only boundary'):
+                        ad.wrap_argv([cli, 'review'], ctx)
+            with patch.object(type(core.ADAPTERS['codex']), 'auth_state', return_value='ready'):
+                REAL_PROBE(core, dict(cli='codex', model='test', effort=None), False)
+            ad = e.worker_adapter(core, dict(cli='codex', model='test', effort=None), False)
+            self.assertEqual(ad.execution_permissions['enforcement'], 'codex_read_only_sandbox')
+            self.assertNotIn('/usr/bin/sandbox-exec', ad.wrap_argv(['codex', 'exec'], ctx))
 
     def test_antigravity_checker_grants_only_the_private_gate_log_root(self):
         prompt=self.base/'prompt.txt';prompt.write_text('Review')
@@ -1690,7 +2067,7 @@ class CursorManagedPacketTests(CursorManagedBase):
         encoded, saved, packet_id, _ = self.packet(task, 99, spec='plain goal', diff='+ plain\n')
         self.assertNotIn('REDACTED', encoded)
         self.assertEqual(set(json.loads(encoded)), {'goal', 'base', 'revision', 'changed_files', 'diff', 'tests',
-                                                    'allowed_paths', 'dependencies'})
+                                                    'allowed_paths', 'dependencies', 'protected_changes'})
 
     def test_secrets_in_spec_and_diff_never_reach_the_checker_prompt_or_saved_packet(self):
         for kind, (text, value) in SECRETS.items():
