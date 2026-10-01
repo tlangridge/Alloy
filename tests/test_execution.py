@@ -212,6 +212,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual([role for role, _ in self.calls], ['maker'])
         self.assertTrue(Path(task['worktree']).exists())
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_native_sessions_reused_with_same_permissions_and_short_updates(self):
         binary = self.base / 'session-cli'
         binary.write_text('#!' + sys.executable + '\n' + r'''
@@ -449,6 +450,7 @@ else:
                 self.assertEqual(args.count('--tools'),1)
                 self.assertEqual(args[args.index('--tools')+1],'Read,Glob,Grep,Edit,Write,Bash')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_real_subprocess_writes_worktree_and_records_boundary(self):
         binary = self.base / 'mock-cli'
         binary.write_text('#!' + sys.executable + "\n" + """
@@ -869,6 +871,7 @@ else:
             config['profiles'][1]['family']='anthropic'; r.save(r.root()/'routing.json',config)
             with self.assertRaises(r.RoutingError): REAL_SELECT(core,self.args,'Task')
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'non-Codex managed Checkers need the macOS sandbox-exec boundary')
     def test_cli_execute_to_integrate_offline(self):
         binary=self.base/'mock-cli'
         binary.write_text('#!' + sys.executable + '\n' + """
@@ -995,6 +998,27 @@ runpy.run_path(entry, run_name='__main__')
         self.assertIn('command(*)',ad._settings()['permissions']['allow'])  # agy >= 1.2 grammar
         self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
+
+    def test_non_macos_checker_requires_codex_native_read_only_sandbox(self):
+        class OtherSys:
+            platform = 'linux'
+            def __getattr__(self, name):
+                return getattr(sys, name)
+        ctx=dict(repo=str(self.repo),pdir=str(self.base/'review'),timeout_s=10,managed_worktree=False)
+        with patch.object(e, 'sys', OtherSys()):
+            for cli in ('claude', 'grok', 'antigravity'):
+                with self.subTest(cli=cli):
+                    with patch.object(type(core.ADAPTERS[cli]), 'auth_state', return_value='ready'), \
+                            self.assertRaisesRegex(e.ExecutionError, 'requires an OS read-only boundary'):
+                        REAL_PROBE(core, dict(cli=cli, model='test', effort=None), False)
+                    ad = e.worker_adapter(core, dict(cli=cli, model='test', effort=None), False)
+                    with self.assertRaisesRegex(core.CursorBoundaryError, 'requires an OS read-only boundary'):
+                        ad.wrap_argv([cli, 'review'], ctx)
+            with patch.object(type(core.ADAPTERS['codex']), 'auth_state', return_value='ready'):
+                REAL_PROBE(core, dict(cli='codex', model='test', effort=None), False)
+            ad = e.worker_adapter(core, dict(cli='codex', model='test', effort=None), False)
+            self.assertEqual(ad.execution_permissions['enforcement'], 'codex_read_only_sandbox')
+            self.assertNotIn('/usr/bin/sandbox-exec', ad.wrap_argv(['codex', 'exec'], ctx))
 
     def test_antigravity_checker_grants_only_the_private_gate_log_root(self):
         prompt=self.base/'prompt.txt';prompt.write_text('Review')
