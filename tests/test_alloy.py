@@ -2172,8 +2172,10 @@ class CursorBoundaryTests(CursorCase):
         self.setenv(ALLOY_ALLOW_UNSANDBOXED="1")
         m = self.mod = self.fresh()
         # Production keeps CURSOR_PLATFORM="darwin"; changing only the actual
-        # platform must still fail closed.
-        with self.mock.patch.object(m.sys, "platform", "linux"):
+        # platform must still fail closed. fresh() sets CURSOR_PLATFORM to the
+        # host platform, so the stand-in must differ from it on Linux runners too.
+        other = "linux" if m.CURSOR_PLATFORM != "linux" else "win32"
+        with self.mock.patch.object(m.sys, "platform", other):
             ad = m.CursorAgentAdapter()
             self.assertFalse(ad.cursor_boundary_ready)
             self.assertIn("unsupported platform", ad.boundary_reason)
