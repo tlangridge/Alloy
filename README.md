@@ -266,7 +266,7 @@ Now, inside Claude Code:
 | `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
-| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** An efficient other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy handles up to two correction rounds. The host judges and integrates, with automatic cleanup after verified integration. |
+| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** An efficient other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy permits one correction by default within 45 active minutes. The host judges and integrates, with archived cleanup after verified integration. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
 Consult/review panels stay read-only. In managed `execute`, the Maker writes
@@ -357,10 +357,13 @@ corrections before the host receives the result.
   owned worktree; its Checker remains read-only. Allowed paths are checked after
   execution (a Cursor Maker also runs inside its sandbox). `task.json` and worker
   `status.json` expose file-write and command
-  permissions separately, including enforcement limits. The loop stops after
-  two correction rounds. `alloy integrate` cleans up only after proven integration;
-  `alloy cleanup` checks ancestry or an exact external squash diff. Dirty or
-  unreviewed worktrees are retained. See [execution boundaries](docs/execution.md).
+  permissions separately, including enforcement limits. By default a logical task
+  gets 45 active minutes and one correction, including relaunches. Checker
+  transport retries do not consume implementation rounds. `alloy integrate`
+  requires merge proof; `alloy cleanup --all-finished [--dry-run] [--older-than 24h]`
+  verifies an archive before removing finished worktrees, including abandoned work.
+  Execute automatically reclaims stale closed tasks and checks disk resources.
+  See [execution boundaries](docs/execution.md) for limits, light mode and recovery.
 - **Secret scanning.** Panelist output (both the saved answer and the raw
   stdout/stderr files) is scanned and redacted for common secret shapes before it
   is saved. This is a best-effort heuristic, not a guarantee.

@@ -91,9 +91,10 @@ which model holds the gavel.
 - It is not local inference. Your prompts, your repo files the panel reads, and
   any diffs are sent to the providers behind each CLI.
 - It is not an answer-merger. It is a disagreement surfacer.
-- It is not a code-writing swarm. The panel reads your repo but is read-only
-  (best-effort, via each CLI's flag); the host does all the writing. Execute
-  mode does not change this: the Maker returns a diff, the host applies it.
+- Consult/review panels read your repo with provider read-only policies (Cursor
+  also has an OS write sandbox). Managed execute authorizes one Maker to edit
+  and test in an owned worktree; a different-family Checker reviews that revision,
+  and the host decides integration.
 
 ## On debate rounds (and the "bully effect")
 
@@ -128,11 +129,24 @@ evidence above:
 - **A confident wrong voice can drag a group** (debate section). So Checker
   cards are classified by the host against a fixed rule (`CONFIRMED` + high
   severity + locus inside the diff + fix fits the blast radius), not by how
-  forcefully they are worded, and the loop is capped at two rounds.
+  forcefully they are worded. Default execution permits an initial implementation
+  and one correction within 45 active minutes, shared across relaunches/resumes.
 
-The Maker runs read-only through the same dispatcher as every panelist and
-returns a diff; the host applies it. That keeps the "panel reads, host writes"
-boundary intact while still moving the implementation work off the host.
+The Maker has explicit edit/test permissions in the task worktree. Consult and
+review panels remain read-only. The Checker reads that same worktree without
+copying it and acknowledges the packet hash and exact reviewed revision. Family
+diversity and role separation reduce correlated errors; they do not eliminate them.
+
+Executable review has a bounded purpose: one plan-review pass and one focused
+correction, then implementation and tests. A blocking finding must provide a
+failing reproduction or a concrete counterexample with expected and actual
+behavior; "no defect found" is a valid result. Confidence or vote count does not
+replace evidence. The Maker verifies claims before changing code. Repeated
+blockers, no acceptance progress or cumulative budget expiry stop the loop and
+return the patch, reproduction and open decisions to the owner. Reports count
+implementation rounds separately from Checker transport retries: an empty output,
+timeout or provider error retries the unchanged revision at most twice and never
+means another implementation round failed.
 
 ## Sources
 

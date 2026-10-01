@@ -599,9 +599,10 @@ class ReleaseWordingTests(unittest.TestCase):
     def test_the_changelog_entry_is_the_latest_and_matches_the_shipped_version(self):
         raw = read("CHANGELOG.md")
         headings = re.findall(r"(?m)^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})$", raw)
-        self.assertEqual(headings[0], (RELEASE, "2026-09-29"))
+        self.assertEqual(headings[0], ("0.12.0", "2026-09-30"))
         self.assertTrue(changelog_section().startswith(RELEASE_HEADING))
-        self.assertEqual(self.facts.ALLOY_VERSION, RELEASE)
+        self.assertEqual(self.facts.ALLOY_VERSION, headings[0][0])
+        self.assertEqual(read("VERSION").strip(), headings[0][0])
         self.assertGreater(len(headings), 2)
         self.assertEqual(len(set(h[0] for h in headings)), len(headings), "a duplicate release heading")
 

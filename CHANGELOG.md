@@ -3,6 +3,32 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.12.0] - 2026-09-30
+
+- Durable task owners, clone-independent logical IDs, lease heartbeats, closure
+  receipts and cumulative budgets: 45 active minutes, initial implementation plus
+  one correction by default. Owner flags can extend the total allowances.
+- `cleanup --all-finished [--dry-run] [--older-than 24h]` verifies private archives
+  (record, patch, recoverable commit bundle, files and manifest) before removing
+  finished/abandoned worktrees. Squash/cherry-pick detection accepts content or
+  patch-ID proof. Broken/missing-source work is recoverable from file archives.
+  Optional archive location/upload hook and owner-response window are configurable.
+- Execute-start hygiene retires stale closed tasks. Remote-keyed per-repository
+  retained limits and measured free-disk/workspace guards replace clone-specific
+  accounting; unrelated tasks have no global concurrency cap.
+- Repeated blockers, no acceptance progress and budget expiry return the patch,
+  failing reproduction and open decisions. Checker empty output, timeout and
+  provider errors retry the unchanged revision twice without consuming Maker
+  rounds, and are reported separately.
+- Checkers read the owned worktree directly. Managed macOS Checkers deny writes
+  to task/source trees and Git metadata under `sandbox-exec`; non-macOS Checkers
+  require Codex's native read-only sandbox or refuse. Cursor temporary allocations are
+  registered immediately and cleaned on failure, normal exit and signals.
+- Explicit/automatic light mode uses one Maker, focused supplied gates and one
+  cross-family Checker; protected paths retain all gates. Model pins, billing,
+  opt-in routing, read-only panels and independent family checks are preserved.
+- Correct managed-Maker permissions and bounded executable review documentation.
+
 ## [0.11.0] - 2026-09-29
 
 **Upgrading:** on macOS, a Cursor CLI that is installed, logged in and passes the

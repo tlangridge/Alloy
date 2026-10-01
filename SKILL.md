@@ -348,7 +348,7 @@ Parse the **first token** of the skill arguments:
 | `debate` | Gated debate | a second, evidence-gated rebuttal round — see "Debate round". Used rarely. Stop. |
 | `review` | Diff review | gather the diff, one Alloy round in `review` mode, give a pass/fail + findings. Stop. |
 | `plan` | Plan | research + plan rounds, present the plan for approval. Stop at the plan. |
-| `execute` | **Execute** | SPEC → `alloy execute`: Maker edits/tests in a managed worktree → independent Checker → up to two correction rounds → compact host judgment → integrate and clean up. See "Execute mode". |
+| `execute` | **Execute** | SPEC → `alloy execute`: Maker edits/tests in a managed worktree → independent Checker → one correction by default → compact host judgment → integrate and clean up. See "Execute mode". |
 | anything else (a task description) | **Full lifecycle** | research → plan → collaborate → implement → test, with approval gates. |
 | *(empty)* | Help | run `doctor` and briefly list the modes. Stop. |
 
@@ -544,8 +544,9 @@ Start from a clean committed checkout on the intended target branch. Never
 stash, reset, or commit unrelated user work just to satisfy this condition.
 
 Run `alloy models list` to inspect configured profiles; run `alloy setup` if
-needed (use `alloy setup --keyless --non-interactive` when Jev is not configured). Preserve model pins and billing preferences. Show the usage table and task assignments as required in Step 0. Explain that execute makes at most three
-Maker calls and three Checker calls, plus local tests. Estimated spend limits
+needed (use `alloy setup --keyless --non-interactive` when Jev is not configured). Preserve model pins and billing preferences. Show the usage table and task assignments as required in Step 0. Explain that execute defaults to an initial Maker call
+plus one correction within 45 active minutes per logical task. Checker transport
+failures can retry the unchanged revision twice without another Maker. Estimated spend limits
 apply **per provider dispatch**, not as a hard whole-task billing cap.
 
 ### 2. Dispatch once
@@ -575,8 +576,10 @@ quota reserves before each dispatch. It never silently changes models mid-loop.
 The same Maker verifies Checker evidence before fixing; unsupported claims must
 be challenged, not blindly obeyed. Independent Checker contexts reduce shared
 assumptions. Each review returns at most 5 findings with path, evidence and a
-scoped remedy. Malformed reviews fail closed. Stop after two fix rounds; the
-runtime enforces this bound, including resumes.
+scoped remedy. Malformed reviews fail closed. Stop after one correction by default;
+the runtime shares active budget and implementation rounds across resumes and
+relaunches. Repeated blockers or no acceptance progress stop earlier. Owner flags
+may extend the total allowance; retain pins, billing and independent review.
 
 Each round emits `ALLOY_ROUND_USAGE` with the usage table and planned worker roles
 on stderr and saves `round-N/usage.md` plus a public snapshot in the task record.
@@ -636,12 +639,16 @@ For a merge performed outside Alloy:
 # Squash: add --integrated-commit <full-commit-hash> to both commands.
 ```
 
-Cleanup requires ancestry proof or an exact squash commit diff matching the
-reviewed result. Never delete a worktree with local edits, new commits, incomplete
-review or uncertain integration. Never run force removal or broad worktree pruning.
-Failed/interrupted tasks stay recoverable; Alloy caps retained worktrees at four
-per repository and lists them with `alloy tasks`. Abandoned tasks require manual
-inspection and preservation before any separately authorized destructive disposal.
+Single-task cleanup requires ancestry proof, exact squash commit diff or full
+content/patch-ID proof on the default branch. Local edits, new commits, incomplete
+review or uncertain integration prevent single-task merge cleanup. For finished
+abandoned work, use `"$ALLOY_BIN" cleanup --all-finished --dry-run` to inspect the
+archive disposition, then the same command without `--dry-run`. Alloy verifies
+an archive before force-removing only its owned worktree and pruning stale Git
+registrations. Never manually force-remove unfinished work. Execute-start hygiene
+does the same for closed tasks idle over 24 hours; owner-response windows and
+archive upload hooks are configurable. Four retained tasks per remote repository
+remain the default; disk guards run hygiene before refusing new worktrees.
 
 Finish with the task ID, workers, changes, test/review outcome, and whether it is
 ready, integrated/cleaned, or retained with a reason. See `docs/execution.md` for

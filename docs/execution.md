@@ -2,7 +2,7 @@
 
 `alloy execute` delegates implementation and testing to a provider CLI in an
 Alloy-owned Git worktree. A different model family reviews the result read-only;
-Alloy passes evidence back to the same Maker for up to two correction rounds.
+Alloy passes evidence back to the same Maker for one correction by default.
 The host receives a compact JSON handoff and decides whether to integrate.
 This reduces host-agent implementation and transcript handling; actual token
 savings depend on the task and are not measured or guaranteed.
@@ -45,17 +45,41 @@ Dependencies and ignored local environment files are not copied from the source
 checkout. Include needed setup in the test commands or project instructions.
 
 `--timeout` defaults to 1800 seconds per worker. `--test-timeout` defaults to 600
-seconds per test command. `--max-fix-rounds` defaults to 2 and cannot exceed 2.
-That permits at most three Maker and three Checker dispatches. Failed local tests
-return to the Maker without spending a Checker call. Resumes share the original
-attempt limit. `--max-estimated-usd` is a per-dispatch routing estimate, not a
+seconds per test command. `--max-fix-rounds` defaults to 1 (initial implementation
+plus one correction); `ALLOY_MAX_FIX_ROUNDS` configures the default. The cumulative
+active execution budget is 45 minutes (`ALLOY_TASK_BUDGET_MINUTES` or
+`--budget-minutes`). Worker and gate deadlines are capped by the remaining budget.
+Idle time between executions does not consume it. Failed local tests return to
+the Maker without spending a Checker call. Repeated confirmed blockers, no
+acceptance progress or budget expiry stop execution with a patch, failing
+reproduction and open decisions. Transport failures count separately: empty
+Checker output, timeout or provider error gets at most two retries of the same
+revision and packet, without another Maker, commit or gate round. Malformed
+nonempty verdicts and mismatched context receipts fail closed.
+
+Every task records an `owner`, `logical_task_id`, attempt ID and lease heartbeat.
+The default logical identity is the remote repository plus exact specification
+hash; supply `--logical-task-id issue-123` when the specification may change across
+clones or relaunches. Only one attempt of that logical task can execute at once.
+Active seconds and implementation rounds accumulate across attempts and resumes.
+Use `--owner` or `ALLOY_OWNER` to identify the person responsible. An owner can
+extend the cumulative limits with `alloy resume TASK_ID --budget-minutes 90
+--max-fix-rounds 3`, or those same options on a relaunch with the same logical ID.
+These are total allowances, not additional allowances. `--max-estimated-usd` is a per-dispatch routing estimate, not a
 hard provider billing limit or whole-task budget. Subscription quota information
 can be cached or unavailable; unknown quota does not mean unlimited capacity.
+
+`--light`, or an automatically small diff (at most `ALLOY_LIGHT_DIFF_LINES`,
+default 80 patch lines) uses one Maker and one cross-family Checker with the
+focused gates supplied by `--test`. All explicit gates still run. Changes under
+tests, CI, migrations, security or auth, and protected policy/lock files, use the
+full gate path even with `--light`. The normal execution path also uses one
+Maker/Checker pair; light mode never relaxes independence, pins or receipts.
 
 ## Readiness, sessions and review context
 
 Add `--check` to the same execute command for a JSON readiness report. It checks
-source cleanliness/branch, the four-worktree limit, configured models and pins,
+source cleanliness/branch, retained-worktree and disk resource limits, configured models and pins,
 authentication indicators, quota/budget eligibility, CLI permission support, and
 whether independent Maker/Checker families are available. It reports blockers
 together without calling Jev, launching a worker, or creating a worktree. Normal
@@ -95,7 +119,8 @@ Passing local gates does not imply deployment or verified live behavior.
 The compact result exposes the current `blocking_step` and `metrics`: startup
 milliseconds to the first worker dispatch (a proxy, not time to its first useful
 output), worker setup milliseconds, fresh starts, resumed calls, review retries,
-context receipt failures, and wall time to the locally verified result. Timings
+context receipt failures, separate review transport failures/retries, cumulative
+implementation rounds and active seconds, and wall time to the locally verified result. Timings
 include waits across task resumes. Managed workers suppress repeated waiting
 heartbeats; report phase results, failures, blockers and decisions in chat.
 
@@ -138,29 +163,59 @@ After a merge outside Alloy:
 ```sh
 alloy cleanup TASK_ID --dry-run
 alloy cleanup TASK_ID
-# For an external squash, add this option to both commands:
+# To prove a specific external squash, optionally add:
 # --integrated-commit FULL_COMMIT_HASH
 ```
 
-Cleanup verifies that the exact reviewed commit is an ancestor of the recorded
-local target branch. For squash merges it requires a single-parent commit on that
-branch whose full binary diff exactly matches the task diff. Squashes with extra
-changes or conflict adaptations do not qualify. Remote-only merges require local
-branch synchronization before proof. No fuzzy patch matching and no force removal.
+Single-task cleanup requires the independently reviewed worktree to remain clean
+and unchanged. Integration proof accepts ancestry, exact squash diff, or full
+changed-path content equality / stable patch-ID equivalence on the default branch.
+Thus externally squashed or cherry-picked work can be detected without a supplied
+commit hash, including a matching patch followed by later edits. Alloy does not
+fetch; synchronize local default-branch refs for remote-only merges.
 
-Only the registered Alloy worktree and its matching branch are removed. Local
-tracked/untracked edits, new commits, missing review, a branch moved to another
-worktree, or uncertain integration block cleanup. Ignored build/dependency files
-are disposable when Git permits removal. A durable integration receipt supports
-retrying cleanup after an interruption. Cleanup is idempotent; it never broadly
-prunes Git worktrees. Diff, specification, gate results and model logs remain on
-disk after worktree removal.
+```sh
+alloy cleanup --all-finished --dry-run --older-than 24h
+alloy cleanup --all-finished --older-than 24h
+```
 
-Alloy allows at most four retained tasks per repository. Failed/interrupted tasks
-are not age-deleted: inspect and recover them. There is intentionally no automatic
-abandon/discard operation for unintegrated work. Any manual destructive disposal
-requires separately deciding how to preserve that work. Removing only a directory
-outside Alloy does not mark a task cleaned and can leave Git registrations behind.
+Batch cleanup also closes unmerged finished tasks as **abandoned**. It skips active
+and locked tasks and checks saved worker processes. Before every removal it saves
+the task record, binary patch against the base, a Git bundle of task commits and
+a file tarball, plus `MANIFEST.json` with checksums, owner, logical ID and bundle
+prerequisites. The bundle includes all commits after base (a conservative superset
+of unpushed commits); restore it into a repo containing the recorded base. Bundles
+and archive bytes are verified before removal. Broken or missing-source tasks use
+a file archive excluding `.git`, `node_modules`, `.next`, `dist`, `build` and
+`coverage`; these caches are disposable. Tracked and untracked ordinary files,
+including dirty work, are preserved. Symlinks are archived without following them.
+
+Archives default to `<execution-state>/archive/`; configure `ALLOY_ARCHIVE_DIR`
+outside source/worktrees. An optional trusted `ALLOY_ARCHIVE_UPLOAD_HOOK` command
+gets the archive directory in `ALLOY_ARCHIVE_PATH`; a failed hook prevents removal.
+Configure it for your storage provider (for example R2); no uploads occur by
+default. Archives and task logs have no automatic expiry. After verification,
+Alloy removes only the owned worktree with `git worktree remove --force`, prunes
+stale registrations, and deletes its matching branch. When the source is gone,
+it uses the system `rm` guard. Any refusal retains work and reports the exact path.
+A closure receipt records `merged` with proof, or `abandoned`, and the archive.
+
+Every execute runs the same hygiene before admission. Integrated, failed,
+interrupted and needs-attention tasks idle over 24 hours are eligible, as is stale
+merged work. Running and recently updated tasks remain. Set
+`ALLOY_CLEANUP_GRACE_HOURS` to a nonzero response window to write an owner notice
+before abandoned cleanup; the default is zero (archive immediately after expiry).
+Notices live at `tasks/ID/owner-notice.json`; operators surface them to owners.
+Resuming updates activity and protects the task. No external messages are sent.
+
+There is no machine-wide concurrency count. Four retained worktrees per logical
+repository remain the default (`ALLOY_REPO_RETAINED_CAP`); the remote URL keys this
+limit across clones, with Git common-dir identity for repositories without a
+remote. SSH/HTTPS forms share identity. Before creation, free disk must be at least
+`ALLOY_MIN_FREE_GB` (15 GiB) and retained workspaces must fit
+`ALLOY_RETAINED_BUDGET_GB` (10 GiB). If short, hygiene runs again and admission is
+refused only if still short, with measured resource values. Archive storage counts
+against free disk; use an external archive volume if local capacity is tight.
 
 ## Machine-readable action boundary
 
@@ -378,6 +433,17 @@ resume/integrate/cleanup; repository locks serialize Alloy lifecycle mutations.
 Saved process IDs guard against resuming while a worker may still be alive.
 External editors and Git commands do not honor Alloy's locks: avoid concurrent
 manual mutations of a task worktree during execution or cleanup.
+
+Checkers read the same task worktree directly; there is no per-round repository
+copy. On macOS, managed non-Cursor Checkers also run through `sandbox-exec` with
+writes denied to the task tree, source checkout and shared Git metadata. Their
+CLI read-only flags remain in place. Cursor retains its stronger dedicated OS
+sandbox and tripwires. On other platforms Codex uses its native read-only sandbox;
+other managed Checkers refuse without an OS boundary. This restriction applies
+to managed execute, while consult/review panels retain their existing policies.
+Post-call revision/tamper checks still run. Every Cursor temporary runtime is
+registered immediately and cleaned after dispatch, at exit and on SIGINT/SIGTERM.
+Signals retain implementation work and its cumulative budget for recovery.
 
 ### Every-round usage display
 
