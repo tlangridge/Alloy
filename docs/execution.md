@@ -11,10 +11,12 @@ savings depend on the task and are not measured or guaranteed.
 
 Requirements: Python 3.8+, Git 2.31+, a clean committed repository on a branch,
 and eligible Maker and Checker profiles from two families distinct from the host.
-Codex, Claude, Grok and Antigravity (`agy` 1.1+) have managed-write adapters. CLI
-help/version checks fail closed when required permission flags are unavailable.
-These are compatibility checks, not proof that a particular CLI version correctly
-enforces its permissions. Provider profiles remain editable configuration.
+Codex, Claude, Grok, Antigravity (`agy` 1.1+) and Cursor (macOS only) have
+managed-write adapters. CLI help/version checks fail closed when required
+permission flags are unavailable. These are compatibility checks, not proof that
+a particular CLI version correctly enforces its permissions. Provider profiles
+remain editable configuration. Cursor profiles ship disabled; see
+[Cursor roles](#cursor-roles).
 
 Use `alloy setup --skip-live-test` if profiles are not configured, then
 `alloy models list`. Preserve existing model pins and billing settings. Setup
@@ -68,8 +70,9 @@ Maker a short update with revision-qualified finding IDs and failed checks.
 Interrupted calls retain their session identity. A failed resume stops for
 inspection instead of silently restarting. Codex, Antigravity and incompatible
 CLI versions currently report `fresh_context_fallback`; they retain the same
-worker profiles and receive full context on every call. No `--last` session
-selection is used.
+worker profiles and receive full context on every call. Cursor always reports
+`fresh_context_fallback`: no `--resume` or `--continue` is ever built for it, and
+a stored record cannot switch it to resume. No `--last` session selection is used.
 
 Each Checker receives a bounded, self-contained packet: goal, exact base/tip,
 changed filenames, complete diff, test commands/results and bounded test output.
@@ -189,6 +192,10 @@ result; they are not a new OS permission system.
 | Claude | `acceptEdits`, Read/Glob/Grep/Edit/Write/Bash tools, Bash allowed | Provider permission system; no Alloy OS sandbox |
 | Grok | `acceptEdits`, Read/Glob/Grep/Edit/Write/Bash tools, Bash allowed | Provider permission system; no Alloy OS sandbox |
 | Antigravity | `accept-edits`, `--sandbox`, private per-run write/command allowlist | Provider sandbox/settings; not certified as OS confinement |
+| Cursor (macOS only) | Normal agent mode (no `--mode`), no force or auto-approval flag, closed argument grammar | Alloy-generated `sandbox-exec` write boundary; Cursor's own flags are not the boundary. See [Cursor roles](#cursor-roles) |
+
+Cursor differs from the rows above: it runs inside an Alloy-generated macOS
+`sandbox-exec` profile, and its permissions record says so (next section).
 
 Consult/review panels retain their existing read-only flags. Antigravity Maker
 settings never reuse the shared read-only panel settings directory. No global
@@ -203,6 +210,158 @@ commands run with the user's permissions. The scope check does not prevent a
 shell command from writing elsewhere or making network calls. Use trusted projects
 and provider sandbox policies appropriate to the task. Paths and post-run checks
 must not be represented as a hard security boundary.
+
+## Cursor roles
+
+Cursor can serve as Maker or Checker on macOS only. Alloy refuses every Cursor
+role, and does not fall back to a disposable copy or to Cursor's own flags, when
+the platform is not macOS, `/usr/bin/sandbox-exec` is missing or not root-owned,
+the profile self-test fails, or the installed Cursor build is not one Alloy has
+measured. `ALLOY_ALLOW_UNSANDBOXED=1` never changes this. Boundary readiness is a
+separate check from a role's read-only flag, so a Maker is wrapped exactly like a
+Checker. `alloy doctor` shows `[no-sbx]` and the reason, and `--check` reports
+Cursor as unavailable.
+
+Cursor requires a one-time `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login`.
+The login lives in `~/.cursor/auth.json` (0600). Every Cursor child receives
+`AGENT_CLI_CREDENTIAL_STORE=file`; under Alloy the Cursor CLI is denied keychain
+access and cannot start `/usr/bin/security`. Alloy never reads the keychain.
+The pinned build writes `auth.json` directly and chmods it to 0600, with no temp
+or atomic-rename files. Only that literal file is write-granted, plus permission
+changes on the existing `~/.cursor` directory (the CLI chmods it to 0700).
+No other home files are writable, and symlinked credential paths are refused.
+
+| Role | Cursor mode | Writable | Process execution |
+| --- | --- | --- | --- |
+| Checker | `--mode ask` | The per-dispatch private runtime and CLI file login | Denied except three literal paths: the Cursor CLI's own bundled Node runtime binary, the build's bundled `rg` and `/usr/bin/sw_vers` |
+| Maker | Cursor's normal agent mode (no `--mode`) | Non-Git contents of the owned worktree, the private runtime and CLI file login | Allowed inside the same write boundary; `/usr/bin/security` denied |
+
+Alloy never runs the `cursor-agent` shell launcher or any wrapper script in front
+of it. The launcher needs a shell and several coreutils, which a Checker's
+sandbox denies. Alloy follows the symlinks behind the configured path to the
+supported build's directory (behind a wrapper script it uses the supported
+build in Cursor's standard install location, without running the wrapper),
+checks that the build's `node` and `index.js` are regular files owned by you and
+not writable by group or others, and starts `<build>/node --use-system-ca
+<build>/index.js ...` directly. A Checker's sandbox allows exactly three
+executables: that `node`, the build's bundled `rg` and
+`/usr/bin/sw_vers`. `/bin/sh` and every other shell, `/usr/bin/open`,
+`/usr/bin/log` and everything else stay denied. Under Alloy, the OS sandbox denies shell execution and file writes outside the task's allowed paths; the model may be offered tools it cannot use.
+`/usr/bin/security` is denied in every role, and Alloy itself never runs it. Alloy checks `node` and `rg` like `index.js`
+(regular files, owned by you, not writable by group or others) and
+`sw_vers` like `sandbox-exec` (regular, non-symlink, root-owned, not writable by
+others) before any Cursor process starts. A Maker's sandbox allows process
+execution generally, so it allows these three too, but denies `/usr/bin/security`. The launcher's `CURSOR_INVOKED_AS` and compile-cache
+settings are reproduced in the child environment, with the compile cache inside
+the private runtime instead of your home cache.
+
+For both roles the worktree's `.git` entry, its gitdir, the shared Git directory,
+the source checkout, sibling worktrees, Cursor's other state and install
+directories and the rest of the filesystem are write-denied; hard links are
+denied; the fixed list of credential paths (and any you add with
+`ALLOY_CURSOR_DENY_READ_PATHS`) cannot be read; worktree setup scripts are skipped;
+and no force, auto-approval, MCP-approval, plan, plugin, session or worktree
+option is ever passed. Alloy checks the complete final command line against a
+closed grammar before starting the sandbox, so a later rewrite cannot add one.
+Each call names one explicit model with a known family.
+
+The permissions record is explicit. For a Cursor Maker it contains:
+
+```json
+{
+  "repository_write": true,
+  "command_execution": "allowed_in_worktree",
+  "enforcement": "macos_sandbox_exec",
+  "os_isolation": true,
+  "git_metadata_isolated": true,
+  "scope_validation": "content_fingerprint_tripwire",
+  "write_allowlist": ["owned_worktree_non_git_content", "private_runtime_state",
+                      "private_runtime_cache", "private_runtime_tmp"],
+  "cursor_mode": "agent_default",
+  "approval_bypass": false,
+  "sensitive_reads_denied": true,
+  "setup_scripts_skipped": true
+}
+```
+
+A Cursor Checker reports `repository_write: false`, `command_execution: "denied"`,
+`cursor_mode: "ask"` and the three private-runtime write entries. These recorded entries describe
+workspace/runtime grants; both roles also receive the file-login refresh and
+directory chmod allowances described above.
+
+**Family by model.** Independence is judged on the family derived from the model
+ID, not from the CLI name. With an OpenAI host, `cursor-large-claude-opus-5-5`
+(Anthropic) can be the Maker and `cursor-large-composer-2-5` (family `cursor`)
+can be the Checker. With an Anthropic host, a Cursor-served Claude model can be
+neither. A Cursor-served GPT model can never check an OpenAI Maker. Cursor
+Composer is its own family, independent of OpenAI, Anthropic, Google and xAI.
+`auto` and unknown model IDs are never dispatched.
+
+**Detection, not prevention.** The sandbox is the boundary. In addition, after the
+Cursor process group is dead, Alloy compares byte-level fingerprints of the
+worktree (tracked, untracked and ignored files, with their modes and symlink
+targets) and of the Git internals that change behavior, and checks canary files
+outside the workspace. For a Maker, ordinary files may differ only under
+`--allow-path`, including ignored files, which the normal scope check omits;
+Git internals and canaries may never differ. For a Checker nothing may differ.
+The check runs before the test gates or the review verdict is used. Any change, or
+any path that cannot be read or hashed, stops the task with the worktree retained
+and review skipped, and the task is then kept for inspection and cannot be resumed
+in place. These checks cannot prove the whole filesystem was unchanged.
+
+Every Git command Alloy itself runs (cleanliness, scope, worktree setup, add,
+commit, fingerprints) disables hooks and `core.fsmonitor`, ignores system
+configuration, detaches stdin and bounds output and time. The Checker packet is
+redacted before it is saved and before it is staged for Cursor. Cursor's own
+login is a file that Cursor reads and refreshes itself; Alloy never reads the keychain.
+Reads of the repository and the provider network stay available, so a Cursor role
+is not an exfiltration boundary; see [SECURITY.md](../SECURITY.md). The sandbox
+covers the Cursor process and what it starts. Your `--test` gate commands are run
+by Alloy with your permissions, outside that sandbox, as for every other provider.
+
+### Cursor release evidence
+
+After the offline suite and skill validation pass, an explicitly authorized
+operator runs both release gates on the release Mac, outside any Maker sandbox.
+Use the supported build and the file login described above. The real-build gate
+uses version and authenticated status calls without provider inference; the ask
+probe makes one provider inference call with composer-2.5 only. Neither belongs
+in the offline test suite. Offline tests and the stand-in CI gate do not supply this live evidence.
+
+Run from the repository root in bash or zsh. Keep logs outside the checkout:
+
+```sh
+set -e
+set -o pipefail
+report_dir="$(mktemp -d "${TMPDIR:-/tmp}/alloy-cursor-release.XXXXXX")"
+ALLOY_CURSOR_SANDBOX_GATE=1 ALLOY_CURSOR_BUILD_GATE=1 \
+  python3 -m unittest discover -s tests -p 'test_cursor_sandbox_release_gate.py' -v \
+  2>&1 | tee "$report_dir/build-gate.log"
+# Continue only after the build gate passes without skips.
+ALLOY_LIVE_CURSOR=1 ALLOY_LIVE_CURSOR_MODEL=composer-2.5 \
+  python3 tests/live/cursor_ask_release.py \
+  2>&1 | tee "$report_dir/ask-gate.log"
+python3 tests/live/cursor_ask_release.py --verify-report "$report_dir" \
+  > "$report_dir/release-report.json"
+```
+
+Attach both logs and `release-report.json` to the release report, along with the
+tested revision, any uncommitted patch and each command's exit status; neither
+gate may be skipped.
+The build log must show
+`test_status_reaches_the_authenticated_state_under_the_production_panel_profile`
+passing, together with the exact three-executable allowlist and shell/security
+denial checks. Include the complete `CURSOR_ASK_RELEASE_RECORD` JSON line from
+the ask log, with `passed: true`, model `composer-2.5`, the supported build and
+every check true. A missing record, failed gate or skipped gate leaves release
+verification incomplete; do not infer a pass from the offline suite.
+
+`--verify-report` runs offline and never starts Cursor. It refuses absent or
+duplicate ask records, incomplete or failed checks, models other than
+composer-2.5, unsupported builds, and missing or skipped real-build results.
+The JSON report includes the complete ask record and SHA-256 hashes of both logs.
+This validates supplied evidence; the operator remains responsible for recording
+both actual runs on the release Mac and identifying the tested revision and patch.
 
 ## Storage and recovery
 
@@ -230,3 +389,14 @@ machine-readable. The host must render every new round in chat, even when usage
 or workers have not changed; tool output alone is insufficient. Normal cache
 TTL and disabled/unavailable tracking behavior are preserved. Buffered hosts
 can read unseen round files while waiting. Waiting polls need no repeated table.
+
+Every Cursor spawn explicitly passes `--sandbox disabled`. Alloy's macOS
+`sandbox-exec` profile is the enforced boundary; Cursor's own sandbox and ask/plan
+modes are not relied on. A fresh 0700 runtime sets `CURSOR_DATA_DIR` and
+`CURSOR_CONFIG_DIR` to its private state subdirectory and is removed after the
+call through the system `rm` command (including any installed guard). `HOME` stays
+unchanged; the CLI reads the literal `~/.cursor/auth.json` without copying or
+symlinking it. Home projects/config, skills manifests, the build's `.running`
+markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
+inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
+writes outside the task's allowed paths; the model may be offered tools it cannot use.

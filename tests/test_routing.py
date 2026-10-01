@@ -8,9 +8,11 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch, Mock
 import urllib.error
@@ -36,7 +38,9 @@ def response(tier='small', confidence=1, risk=0, ambiguous=0):
     return dict(model='jev-test', answers=answers, usage=dict(input_tokens=100, output_tokens=50))
 
 
-class RouterTests(unittest.TestCase):
+class RoutingCase(unittest.TestCase):
+    """Shared scaffolding: a private routing home, the shipped starter config, and no way to
+    reach a real Cursor process (the OS boundary and every metadata call are mocked)."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -44,6 +48,14 @@ class RouterTests(unittest.TestCase):
         self.env.start(); self.addCleanup(self.env.stop)
         self.settings = patch.object(core, '_CONFIG', {})
         self.settings.start(); self.addCleanup(self.settings.stop)
+        # The real gateway would run the macOS sandbox preflight (Lane 6 owns that gate) and
+        # spawn cursor-agent when it is installed. Tests never do: refuse unless a test opts in.
+        refused = core.CursorBoundary(False, 'mocked in tests', '', None)
+        self.boundary = patch.object(core, 'cursor_boundary', return_value=refused)
+        self.boundary.start(); self.addCleanup(self.boundary.stop)
+        self.metadata = patch.object(core, 'cursor_metadata',
+                                     side_effect=core.CursorBoundaryError('mocked in tests'))
+        self.metadata.start(); self.addCleanup(self.metadata.stop)
         for k in list(os.environ):
             if k.startswith('ALLOY_') and k not in ('ALLOY_ROUTING_HOME', 'ALLOY_CONFIG', 'ALLOY_USAGE'):
                 os.environ.pop(k)
@@ -60,6 +72,16 @@ class RouterTests(unittest.TestCase):
         return r.route(core, 'Change the README title to Alloy.', self.args,
             transport=lambda payload: (answer or response(), 5), available=self.available)
 
+    def live(self, **pools):
+        """A fresh usage snapshot: adapter -> (remaining fraction, share of a 7d window still to run)."""
+        now = r.time.time()
+        return dict(enabled=True, ttl_seconds=120, providers={
+            name: dict(status='fresh', observed_at=now, windows=[dict(
+                pool=name, window='7d', remaining_fraction=left, resets_at=now + share * 7 * 86400)])
+            for name, (left, share) in pools.items()})
+
+
+class RouterTests(RoutingCase):
     def test_role_effort_applies_before_evidence_and_preserves_pins(self):
         p = next(p for p in self.config['profiles'] if p['id'] == 'claude-large')
         p['effort_by_mode'] = {'make': 'low', 'review': 'high'}
@@ -134,7 +156,7 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(next(p['model'] for p in r.starter(core)['profiles'] if p['adapter'] == 'grok'), 'grok-4.6')
         data = r.evidence.catalog()
         data['status'] = 'current'
-        profile = dict(model='grok-4.7', family='xai', effort='high')
+        profile = dict(adapter='grok', model='grok-4.7', family='xai', effort='high')
         self.assertEqual(r.evidence.assessment(profile, data)['status'], 'matched')
         profile['model'] = 'grok-4.7-build-fast'
         self.assertEqual(r.evidence.assessment(profile, data)['status'], 'unmatched')
@@ -675,14 +697,6 @@ class RouterTests(unittest.TestCase):
             with self.assertRaises(r.RoutingError):
                 r.validate(self.config)
 
-    def live(self, **pools):
-        """A fresh usage snapshot: adapter -> (remaining fraction, share of a 7d window still to run)."""
-        now = r.time.time()
-        return dict(enabled=True, ttl_seconds=120, providers={
-            name: dict(status='fresh', observed_at=now, windows=[dict(
-                pool=name, window='7d', remaining_fraction=left, resets_at=now + share * 7 * 86400)])
-            for name, (left, share) in pools.items()})
-
     def test_tier_by_mode_lets_a_small_maker_review_large_work(self):
         answers = core.execution.host_assessment(argparse.Namespace(task_tier='large'))
         for p in self.config['profiles']:
@@ -779,6 +793,994 @@ class RouterTests(unittest.TestCase):
         body = Path(manifest['panelists'][0]['result_path']).read_text()
         self.assertIn('"key_present": false', body)
         self.assertIn('gpt-5.6-luna', body)
+
+
+CURSOR_HELP = ('Usage: agent [options] [command] [prompt...]\n  -p, --print  Print responses\n'
+               '  --output-format <format>  text | json\n  --mode <mode>  plan | ask\n'
+               '  --model <model>  Model to use\n  --list-models  List available models and exit\n')
+CURSOR_MODELS = '''Available models
+
+auto - Auto (current, default)
+gpt-5.3-codex-low - Codex 5.3 Low
+composer-2.5 - Composer 2.5
+claude-opus-5-thinking-high - Claude Opus 5 1M Thinking
+gpt-5.6-sol-high - GPT-5.6 Sol 1M High
+gpt-5.6-sol-high-fast - GPT-5.6 Sol 1M High Fast
+cursor-grok-4.5-low - Grok 4.5 Low
+gemini-3.8-flash-high - Gemini 3.8 Flash High
+muse-spark-1.3-minimal - Muse Spark 1.3 1M Minimal
+kimi-k3-low - Kimi K3 Low
+glm-5.2-high - GLM 5.2
+
+Tip: use --model <id> (or /model <id> in interactive mode) to switch.
+'''
+
+
+class CursorRoutingTests(RoutingCase):
+    """Lane 2: Cursor families, independence, profiles, evidence identity, discovery, setup,
+    effort/fast rewriting and dispatch. Mocks only: no Cursor process, sandbox or network."""
+    SHIPPED = {'cursor-large-composer-2-5': ('composer-2.5', 'cursor', 'large'),
+               'cursor-large-gpt-5-6-sol': ('gpt-5.6-sol-high', 'openai', 'large'),
+               'cursor-large-claude-opus-5-5': ('claude-opus-5-5-high', 'anthropic', 'large'),
+               'cursor-medium-gemini-3-8-flash': ('gemini-3.8-flash-high', 'google', 'medium'),
+               'cursor-large-grok-4-7': ('grok-4.7-high', 'xai', 'large')}
+
+    def profile(self, pid):
+        return next(p for p in self.config['profiles'] if p['id'] == pid)
+
+    def only(self, *ids):
+        """Enable exactly these profiles (saved without validation, so tests can bypass it)."""
+        for p in self.config['profiles']:
+            p['enabled'] = p['id'] in ids
+        r.save(r.root() / 'routing.json', self.config)
+
+    def resolve(self, tier='large', **changes):
+        args = copy.copy(self.args)
+        for key, value in changes.items():
+            setattr(args, key, value)
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier=tier))
+        return r.resolve(core, self.config, answers, self.available, args, {})
+
+    def reasons(self, decision):
+        return {row['profile']: row['reason'] for row in decision['rejected']}
+
+    def cards(self, mode='consult'):
+        return r.model_context(core, self.config, self.available, {}, dict(failed_profiles=[]), mode)
+
+    def quiet(self):
+        stack = contextlib.ExitStack()
+        stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+        self.addCleanup(stack.close)
+
+    # -- registry, families, independence ---------------------------------------------------
+    def test_registry_rubric_and_family_parser_mirror_the_gateway(self):
+        self.assertEqual(r.RUBRIC_VERSION, 5)
+        self.assertEqual(list(r.FAMILIES).count('cursor'), 1)
+        self.assertEqual(r.MODEL_KEYS['cursor'], 'ALLOY_CURSOR_MODEL')
+        self.assertEqual(r.EFFORT_KEYS['cursor'], 'ALLOY_CURSOR_EFFORT')
+        table = {'claude-opus-5-5-high': 'anthropic', 'claude-opus-4-8[context=1m,effort=high,fast=false]': 'anthropic',
+                 'gpt-5.6-sol-high': 'openai', 'gpt-5.3-codex-low-fast': 'openai', 'gpt-6.1-sol': 'openai',
+                 'gpt-6.1-sol-high-fast': 'openai', 'gpt-6.1-future-thing': 'openai', 'gpt-5.5-extra-high': 'openai',
+                 'codex': 'openai', 'codex-mini': 'openai',
+                 'gemini-3.8-flash-high': 'google', 'grok-4.7-high': 'xai', 'cursor-grok-4.5-low-fast': 'xai',
+                 'composer-2.5': 'cursor', 'composer-3-fast': 'cursor',
+                 'auto': None, 'auto-fast': None, 'auto[fast=false]': None, '': None, 'muse-spark-1.3-high': None,
+                 'kimi-k3-low': None, 'glm-5.2-max': None, 'made-up-1': None, 'claude': None, 'gpt': None,
+                 'codexa': None, 'gpt-5[a=1': None, 'gpt-5[a=1,a=2]': None, 'gpt-5[a]': None, 'gpt 5': None,
+                 None: None, 5: None}
+        for model, expected in table.items():
+            with self.subTest(model=model):
+                self.assertEqual(r.cursor_model_family(model), expected)
+                if isinstance(model, str):
+                    self.assertEqual(core.cursor_model_family(model), expected)  # the spawn gateway agrees
+        for pid, (model, fam, _tier) in self.SHIPPED.items():
+            self.assertEqual(r.family(self.profile(pid)), fam)
+        # A Cursor profile's family comes from its model, never from its label.
+        self.assertEqual(r.family(dict(adapter='cursor', model='claude-opus-5-5-high', family='cursor')), 'anthropic')
+        self.assertEqual(r.family(dict(adapter='cursor-agent', model='composer-2.5')), 'cursor')
+        self.assertEqual(r.family(dict(adapter='codex', model='gpt-6.1-sol', family='openai')), 'openai')
+
+    def test_shipped_cursor_profiles_are_disabled_subscription_and_pooled(self):
+        shipped = {p['id']: p for p in r.starter(core)['profiles'] if p['adapter'] == 'cursor'}
+        self.assertEqual(set(shipped), set(self.SHIPPED))
+        for pid, (model, fam, tier) in self.SHIPPED.items():
+            p = shipped[pid]
+            with self.subTest(profile=pid):
+                self.assertEqual((p['model'], p['family'], p['tier'], p['effort']), (model, fam, tier, 'high'))
+                self.assertIs(p['enabled'], False)
+                self.assertEqual(p['billing_mode'], 'subscription')
+                self.assertEqual(p['quota_pool'], 'cursor')
+                self.assertEqual(p['evidence'], 'Cursor discovery only; not benchmarked')
+                self.assertNotIn('cursor_fast', p)
+                self.assertNotIn('task_preferences', p)
+                self.assertEqual(r.family(p), p['family'])
+        # Nothing routes to Cursor until it is enabled, whatever the CLI reports.
+        self.assertEqual([c for c in self.cards() if c['profile'] in self.SHIPPED], [])
+        self.assertEqual({self.reasons(self.resolve())[pid] for pid in self.SHIPPED}, {'disabled'})
+
+    def test_gpt_6_1_sol_is_the_preferred_large_codex_profile(self):
+        profiles = {p['id']: p for p in r.starter(core)['profiles']}
+        sol = profiles['codex-large-gpt-6-1-sol']
+        self.assertEqual((sol['adapter'], sol['model'], sol['family'], sol['tier']), ('codex', 'gpt-6.1-sol', 'openai', 'large'))
+        self.assertIs(sol['enabled'], True)
+        self.assertEqual(sol['quota_pool'], 'codex')
+        others = [p for p in profiles.values() if p['adapter'] == 'codex' and p['tier'] == 'large' and p is not sol]
+        self.assertTrue(others and all(sol['cost_rank'] < p['cost_rank'] for p in others))
+        self.assertTrue({'codex-large', 'codex-large-gpt-6-sol', 'codex-large-gpt-6-astra'} <= set(profiles))  # older profiles kept
+        self.assertEqual(profiles['codex-large']['model'], 'gpt-5.6-sol')
+        order = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+        efforts = {mode: r.role_profile(core, sol, mode)['effort'] for mode in r.MODES}
+        self.assertIn(efforts['review'], order[order.index('high'):])
+        self.assertTrue(all(order.index(e) >= order.index('medium') for e in efforts.values()))
+        self.assertEqual(r.cursor_model_family('gpt-6.1-sol'), 'openai')  # a future Cursor 6.1 ID is OpenAI too
+        self.args.panelists = 'codex'
+        self.assertEqual(self.decide(response('large'))['profile'], 'codex-large-gpt-6-1-sol')
+        pin = 'codex-large-gpt-6-1-sol'
+        make = self.resolve(mode='make', host_family='anthropic', profile=pin)
+        self.assertEqual((make['profile'], make['effort'], make['effort_source']), (pin, 'medium', 'profile'))
+        review = self.resolve(mode='review', exclude_family='anthropic', profile=pin)
+        self.assertEqual((review['profile'], review['effort'], review['effort_source']), (pin, 'high', 'mode'))
+        with patch.dict(os.environ, {'ALLOY_CODEX_EFFORT': 'medium'}):  # an explicit pin is the user's to lower
+            self.assertEqual(self.resolve(mode='review', exclude_family='anthropic', profile=pin)['effort'], 'medium')
+
+    def test_anthropic_host_never_selects_cursor_claude_as_maker_or_checker(self):
+        self.only('cursor-large-claude-opus-5-5', 'cursor-large-composer-2-5', 'cursor-large-gpt-5-6-sol')
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+            self.resolve(mode='make', host_family='anthropic', profile='cursor-large-claude-opus-5-5')
+        maker = self.resolve(mode='make', host_family='anthropic')
+        self.assertNotEqual(maker['family'], 'anthropic')
+        self.assertEqual(self.reasons(maker)['cursor-large-claude-opus-5-5'], 'family excluded')
+        # The Checker after an OpenAI Maker under an Anthropic host: only Composer remains.
+        checker = self.resolve(mode='review', exclude_family='anthropic,openai')
+        self.assertEqual((checker['profile'], checker['family']), ('cursor-large-composer-2-5', 'cursor'))
+        self.assertEqual(self.reasons(checker)['cursor-large-claude-opus-5-5'], 'family excluded')
+        self.assertEqual(self.reasons(checker)['cursor-large-gpt-5-6-sol'], 'family excluded')
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+            self.resolve(mode='review', exclude_family='anthropic,openai', profile='cursor-large-claude-opus-5-5')
+
+    def test_openai_maker_never_receives_cursor_gpt_as_checker(self):
+        self.only('codex-large', 'cursor-large-gpt-5-6-sol')
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):  # the only remaining Checker is OpenAI too
+            self.resolve(mode='make', host_family='anthropic')
+        self.only('codex-large', 'cursor-large-gpt-5-6-sol', 'cursor-large-composer-2-5')
+        maker = self.resolve(mode='make', host_family='anthropic', profile='codex-large')
+        self.assertEqual((maker['profile'], maker['family']), ('codex-large', 'openai'))
+        checker = self.resolve(mode='review', exclude_family='anthropic,openai')
+        self.assertEqual(checker['profile'], 'cursor-large-composer-2-5')
+        self.assertEqual(self.reasons(checker)['cursor-large-gpt-5-6-sol'], 'family excluded')
+
+    def test_composer_is_its_own_host_family_and_independent_of_the_other_four(self):
+        parser = argparse.ArgumentParser()
+        r.add_route_options(parser)
+        self.assertEqual(parser.parse_args(['--host-family', 'cursor']).host_family, 'cursor')
+        self.only('cursor-large-composer-2-5', 'cursor-large-gpt-5-6-sol', 'cursor-large-claude-opus-5-5')
+        maker = self.resolve(mode='make', host_family='cursor')
+        self.assertIn(maker['family'], ('openai', 'anthropic'))
+        self.assertEqual(self.reasons(maker)['cursor-large-composer-2-5'], 'family excluded')
+        self.only('cursor-large-composer-2-5')
+        for other in ('openai', 'anthropic', 'google', 'xai'):
+            with self.subTest(other=other):
+                self.assertEqual(self.resolve(host_family=other, exclude_family=other)['family'], 'cursor')
+        with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+            self.resolve(exclude_family='cursor')
+
+    def test_auto_and_unknown_ids_never_route_card_or_dispatch(self):
+        for model in ('auto', 'auto-fast', 'muse-spark-1.3-high', 'kimi-k3-low', 'glm-5.2-max', 'made-up-1'):
+            for label in ('cursor', 'openai', 'anthropic', None):
+                config = copy.deepcopy(self.config)
+                config['profiles'].append(dict(self.profile('cursor-large-composer-2-5'), id='bad', model=model,
+                                               family=label, enabled=True))
+                with self.subTest(model=model, family=label):
+                    with self.assertRaisesRegex(r.RoutingError, 'known family|family'):
+                        r.validate(config)
+            # Validation bypassed (an in-memory or hand-edited config): the boundaries still refuse.
+            self.config['profiles'].append(dict(self.profile('cursor-large-composer-2-5'), id='bad', model=model,
+                                                family='openai', enabled=True))
+            self.only('bad', 'cursor-large-composer-2-5')
+            with self.subTest(model=model, boundary='exposure'):
+                self.assertNotIn('bad', [c['profile'] for c in self.cards()])
+                decision = self.resolve()
+                self.assertEqual(decision['profile'], 'cursor-large-composer-2-5')
+                self.assertIn('no known family', self.reasons(decision)['bad'])
+                self.only('bad')
+                with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+                    self.resolve()
+                self.only('bad', 'codex-large')  # nor can it be the independent Checker a Maker needs
+                with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+                    self.resolve(mode='make', host_family='anthropic')
+            self.config['profiles'].pop()
+            forged = dict(cli='cursor', model=model, effective_model=model + '[fast=false]', family='cursor',
+                          effort=None, cursor_fast=False)
+            with self.subTest(model=model, boundary='dispatch'):
+                with self.assertRaises(r.RoutingError):
+                    r.routed_adapter(core, forged)
+
+    def test_only_composer_may_claim_family_cursor(self):
+        def rejects(**changes):
+            config = copy.deepcopy(self.config)
+            config['profiles'].append(dict(self.profile('cursor-large-composer-2-5'), id='claim', **changes))
+            with self.assertRaises(r.RoutingError):
+                r.validate(config)
+        rejects(model='gpt-5.6-sol-high', family='cursor')      # a GPT model cannot be labelled cursor
+        rejects(model='claude-opus-5-5-high', family='cursor')  # nor a Claude model
+        rejects(model='composer-2.5', family='openai')          # nor may Composer wear another family
+        rejects(family=None)                                    # the family is explicit and must match
+        for base in ('codex-large', 'claude-large', 'antigravity-large', 'grok-large'):  # no other adapter may claim it
+            config = copy.deepcopy(self.config)
+            next(p for p in config['profiles'] if p['id'] == base)['family'] = 'cursor'
+            with self.subTest(adapter=base):
+                with self.assertRaisesRegex(r.RoutingError, 'reserved'):
+                    r.validate(config)
+                # ... and the exposure boundaries refuse it when validation is bypassed.
+                bad = self.profile(base)
+                bad['family'] = 'cursor'
+                self.only(base)
+                self.assertNotIn(base, [c['profile'] for c in self.cards()])
+                with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+                    self.resolve()
+                bad['family'] = r.FAMILIES[bad['adapter']]
+        ok = copy.deepcopy(self.config)
+        self.assertIs(r.validate(ok), ok)  # the shipped Composer profile is the valid claim
+
+    def test_malformed_bracket_models_raise_routing_error_never_a_crash(self):
+        for model in ('gpt-5[a]', 'gpt-5[a=]', 'gpt-5[=1]', 'gpt-5[a=1,a=2]', 'gpt-5[a=1,,b=2]', 'gpt-5[[a=1]]',
+                      'gpt-5[a=1', 'gpt-5[a=1]x', 'gpt-5[ a = 1 ]', 'gpt-5[fast=maybe]'):
+            config = copy.deepcopy(self.config)
+            config['profiles'].append(dict(self.profile('cursor-large-gpt-5-6-sol'), id='br', model=model,
+                                           cursor_fast=True))
+            with self.subTest(model=model):
+                with self.assertRaises(r.RoutingError):  # a TypeError here would be an error, not a pass
+                    r.validate(config)
+                r.profile_problem(config['profiles'][-1])  # must not raise, whatever it returns
+        # The unpacking guard itself: even if the family parser accepted such an ID, the profile
+        # rules return a problem and the exposure boundary raises RoutingError.
+        broken = dict(self.profile('cursor-large-gpt-5-6-sol'), model='gpt-5[a]')
+        with patch.object(r, 'cursor_model_family', return_value='openai'):
+            self.assertRegex(r.profile_problem(broken), 'bracket')
+            with self.assertRaisesRegex(r.RoutingError, 'bracket'):
+                r.effective_profile(core, broken, 'consult')
+        self.quiet()
+        self.assertEqual(core.main(['models', 'add', '--id', 'br', '--cli', 'cursor', '--model', 'gpt-5[a]',
+                                    '--family', 'openai', '--tier', 'large']), 2)
+
+    def test_canonical_and_legacy_pins_are_rederived_at_every_boundary(self):
+        self.only('cursor-large-composer-2-5', 'cursor-large-gpt-5-6-sol', 'cursor-large-claude-opus-5-5')
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_MODEL': 'gpt-5.6-sol-high'}):  # legacy alone
+            decision = self.resolve()
+            self.assertEqual(decision['profile'], 'cursor-large-gpt-5-6-sol')
+            self.assertEqual(self.reasons(decision)['cursor-large-composer-2-5'], 'model override differs; add a matching profile')
+            self.assertEqual([c['profile'] for c in self.cards()], ['cursor-large-gpt-5-6-sol'])
+        with patch.dict(os.environ, {'ALLOY_CURSOR_MODEL': 'composer-2.5', 'ALLOY_CURSOR_AGENT_MODEL': 'gpt-5.6-sol-high'}):
+            self.assertEqual(self.resolve()['profile'], 'cursor-large-composer-2-5')  # canonical wins
+            self.assertEqual([c['profile'] for c in self.cards()], ['cursor-large-composer-2-5'])
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_MODEL': 'claude-opus-5-5-high'}):
+            with self.assertRaises(r.RoutingError):  # a pin cannot move a Maker into the host's family ...
+                self.resolve(mode='make', host_family='anthropic')
+            with self.assertRaises(r.RoutingError):  # ... or a Checker into the host's or Maker's
+                self.resolve(mode='review', exclude_family='anthropic,openai')
+        for pin in ('auto', 'composer-2.5[effort=low]', 'gpt-5.6-sol', 'unknown-9'):
+            with self.subTest(pin=pin), patch.dict(os.environ, {'ALLOY_CURSOR_MODEL': pin}):
+                self.assertEqual(self.cards(), [])
+                with self.assertRaisesRegex(r.RoutingError, 'No eligible'):
+                    self.resolve()
+        env = {'ALLOY_CURSOR_AGENT_MODEL': 'gpt-5.6-sol-high'}
+        with patch.dict(os.environ, env):
+            self.assertEqual(r.setting_for(core, 'cursor', 'model'), 'gpt-5.6-sol-high')
+            with patch.dict(os.environ, {'ALLOY_CURSOR_MODEL': 'composer-2.5'}):
+                self.assertEqual(r.setting_for(core, 'cursor', 'model'), 'composer-2.5')
+        self.assertIsNone(r.setting_for(core, 'cursor', 'model'))
+        with patch.dict(os.environ, {'ALLOY_CODEX_MODEL': 'x', 'ALLOY_CURSOR_AGENT_MODEL': 'y'}):
+            self.assertEqual(r.setting_for(core, 'codex', 'model'), 'x')  # no legacy key for other adapters
+
+    # -- evidence identity -------------------------------------------------------------------
+    def data(self):
+        data = copy.deepcopy(r.evidence.catalog())
+        data['status'] = 'current'
+        return data
+
+    def test_evidence_rows_declare_native_adapters_and_fast_state(self):
+        data = self.data()
+        native = {'openai': 'codex', 'anthropic': 'claude', 'xai': 'grok', 'google': 'antigravity'}
+        self.assertTrue(data['models'])
+        for row in data['models']:
+            with self.subTest(models=row['models']):
+                self.assertEqual(row['adapters'], [native[row['family']]])
+                self.assertIs(row['fast'], False)
+        self.assertNotIn('cursor', json.dumps([row['adapters'] for row in data['models']]))  # no Cursor benchmark row
+
+    def test_every_shipped_cursor_profile_stays_evidence_unmatched(self):
+        data = self.data()
+        for pid in self.SHIPPED:
+            p = r.effective_profile(core, self.profile(pid), 'consult')
+            with self.subTest(profile=pid):
+                assessed = r.evidence.assessment(r.evidence_view(p), data)
+                self.assertEqual((assessed['status'], assessed['preferred_tasks']), ('unmatched', []))
+        # The normalized identities of three collide with native rows on model, family and effort;
+        # only the adapter keeps them apart.
+        for native, cursor in (('codex-large', 'cursor-large-gpt-5-6-sol'), ('claude-large', 'cursor-large-claude-opus-5-5'),
+                               ('grok-large', 'cursor-large-grok-4-7')):
+            n = r.evidence_view(r.effective_profile(core, dict(self.profile(native), effort='high'), 'consult'))
+            c = r.evidence_view(r.effective_profile(core, self.profile(cursor), 'consult'))
+            with self.subTest(native=native):
+                self.assertEqual((n['model'], n['family'], n['effort']), (c['model'], c['family'], c['effort']))
+                self.assertEqual(r.evidence.assessment(n, data)['status'], 'matched')
+                self.assertEqual(r.evidence.assessment(c, data)['status'], 'unmatched')
+
+    def test_evidence_never_crosses_adapter_effort_or_fast_boundaries(self):
+        data = self.data()
+        status = lambda **p: r.evidence.assessment(dict(dict(adapter='codex', model='gpt-5.6-sol', family='openai',
+                                                            effort='high', fast=False), **p), data)
+        self.assertEqual(status()['status'], 'matched')
+        self.assertTrue(status()['preferred_tasks'])
+        # The Cursor Gemini profile's identity collides with the antigravity row: model text, family, effort.
+        collide = dict(model='gemini-3.8-flash-high', family='google', effort='high')
+        self.assertEqual(status(adapter='antigravity', **collide)['status'], 'matched')
+        for adapter in ('cursor', 'codex', 'claude', 'grok', 'cursor-agent', None):
+            with self.subTest(adapter=adapter):
+                self.assertEqual(status(adapter=adapter, **collide), dict(status='unmatched', preferred_tasks=[], sources=[]))
+        self.assertEqual(status(adapter='cursor')['status'], 'unmatched')
+        for effort in ('low', 'none', 'minimal', None):                # another effort borrows no task preference
+            with self.subTest(effort=effort):
+                self.assertEqual((status(effort=effort)['status'], status(effort=effort)['preferred_tasks']), ('effort-unverified', []))
+        self.assertEqual(status(fast=True)['status'], 'unmatched')     # a fast variant is another identity
+        # A row must state its adapters (as a list) and its fast state, or it covers nothing.
+        for damage in (lambda row: row.pop('adapters'), lambda row: row.update(adapters='codex'),
+                       lambda row: row.update(adapters=[]), lambda row: row.pop('fast'),
+                       lambda row: row.update(fast='false')):
+            broken = self.data()
+            damage(next(row for row in broken['models'] if 'gpt-5.6-sol' in row['models']))
+            self.assertEqual(r.evidence.assessment(dict(adapter='codex', model='gpt-5.6-sol', family='openai', effort='high'),
+                                                   broken)['status'], 'unmatched')
+        # Only an explicit future row can cover Cursor, and then all four parts must agree.
+        future = self.data()
+        future['models'].append(dict(models=['gpt-5.6-sol'], family='openai', adapters=['cursor'], fast=False,
+                                     applicable_efforts=['high'], preferred_tasks=['review'], strengths='s',
+                                     limitations='l', sources=['x'], basis='b', suggested_tier='large'))
+        view = dict(adapter='cursor', model='gpt-5.6-sol', family='openai', effort='high', fast=False)
+        self.assertEqual(r.evidence.assessment(view, future)['status'], 'matched')
+        self.assertEqual(r.evidence.assessment(dict(view, effort='low'), future)['status'], 'effort-unverified')
+        self.assertEqual(r.evidence.assessment(dict(view, fast=True), future)['status'], 'unmatched')
+        self.assertEqual(r.evidence.assessment(dict(view, adapter='codex'), future)['preferred_tasks'],
+                         status()['preferred_tasks'])  # the native row is unchanged
+        self.assertEqual(r.evidence.assessment(dict(view, adapter='grok'), future)['status'], 'unmatched')
+        self.assertEqual(r.evidence.assessment(dict(view, model='gpt-5.6-sol-new'), future)['status'], 'unmatched')
+
+    def test_cursor_evidence_flows_unmatched_through_cards_and_decisions(self):
+        self.config['profiles'].append(dict(self.profile('cursor-large-gpt-5-6-sol'), id='cursor-gpt-bare',
+                                            model='gpt-5.6-sol', effort='high', cost_rank=.5))
+        self.only('cursor-large-gpt-5-6-sol', 'cursor-large-claude-opus-5-5', 'cursor-gpt-bare', 'codex-large')
+        cards = {c['profile']: c for c in self.cards()}
+        self.assertEqual(cards['codex-large']['evidence_status'], 'matched')
+        for pid in ('cursor-large-gpt-5-6-sol', 'cursor-large-claude-opus-5-5', 'cursor-gpt-bare'):
+            self.assertEqual((cards[pid]['evidence_status'], cards[pid]['preferred_tasks']), ('unmatched', []), pid)
+            self.assertEqual(cards[pid]['shared_quota_pool'], 'cursor')
+            self.assertEqual(cards[pid]['billing_mode'], 'subscription')
+        reply = response('large')
+        reply['answers']['kind'].update(choice='debugging', probabilities={k: int(k == 'debugging') for k in r.questions()['kind']['criteria']})
+        decision = r.resolve(core, self.config, reply['answers'], self.available, self.args, {})
+        for row in decision['recommendations']:
+            if row['cli'] == 'cursor':
+                self.assertEqual(row['evidence']['status'], 'unmatched')
+                self.assertFalse(row['task_fit'])
+        self.assertEqual(r.model_fits(dict(answers=dict(fit_0=dict(type='noul', noul=.99))), [cards['cursor-gpt-bare']]), {})
+
+    def test_models_advise_normalizes_the_adapter_before_reading_pins(self):
+        data = self.data()
+        aliased = dict(self.profile('cursor-large-gpt-5-6-sol'), adapter='cursor-agent')  # in-memory, never through load()
+        config = dict(self.config, profiles=[aliased])
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_MODEL': 'composer-2.5'}):  # a legacy pin still applies
+            advice = r.evidence.advise(core, config, data, {})
+        row = advice['profiles'][0]
+        self.assertEqual((row['model_pin'], row['blocked_by_pin']), ('composer-2.5', True))
+        self.assertEqual(row['evidence']['status'], 'unmatched')
+        with patch.dict(os.environ, {'ALLOY_CURSOR_MODEL': 'gpt-5.6-sol-high'}):
+            self.assertFalse(r.evidence.advise(core, config, data, {})['profiles'][0]['blocked_by_pin'])
+        self.assertEqual(r.evidence.advise(core, dict(config, profiles=[dict(aliased, model='auto', family='openai')]),
+                                           data, {})['profiles'][0]['evidence']['status'], 'unroutable')
+
+    def test_models_advise_scopes_configured_and_discovered_rows_to_their_adapter(self):
+        data = self.data()
+        gemini = next(row for row in data['models'] if row['models'] == ['gemini-3.8-flash-high'])
+        config = copy.deepcopy(self.config)
+        config['profiles'] = [p for p in config['profiles'] if p['id'] == 'cursor-medium-gemini-3-8-flash']
+        cursor_only = r.evidence.advise(core, config, data, dict(discovered=dict(cursor=dict(models=['gemini-3.8-flash-high']))))
+        candidate = next(c for c in cursor_only['candidates'] if c['models'] == gemini['models'])
+        self.assertFalse(candidate['discovered'])  # Cursor's listing is not the native antigravity listing
+        self.assertEqual(cursor_only['profiles'][0]['evidence']['status'], 'unmatched')
+        native = r.evidence.advise(core, config, data, dict(discovered=dict(antigravity=dict(models=['gemini-3.8-flash-high']))))
+        self.assertTrue(next(c for c in native['candidates'] if c['models'] == gemini['models'])['discovered'])
+        config['profiles'] = [dict(self.profile('antigravity-large'))]
+        configured = r.evidence.advise(core, config, data, {})
+        self.assertNotIn(gemini['models'], [c['models'] for c in configured['candidates']])
+        self.assertEqual(configured['profiles'][0]['evidence']['status'], 'matched')
+        bad = dict(self.profile('cursor-large-composer-2-5'), id='bad', model='auto', family='openai')
+        config['profiles'] = [bad]
+        self.assertEqual(r.evidence.advise(core, config, data, {})['profiles'][0]['evidence']['status'], 'unroutable')
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_MODEL': 'composer-2.5'}):
+            config['profiles'] = [self.profile('cursor-large-gpt-5-6-sol')]
+            self.assertTrue(r.evidence.advise(core, config, data, {})['profiles'][0]['blocked_by_pin'])  # legacy pin seen
+
+    # -- effort and fast ---------------------------------------------------------------------
+    def effective(self, model='gpt-5.6-sol-high', mode='consult', **fields):
+        p = dict(self.profile('cursor-large-gpt-5-6-sol'), model=model, family=r.cursor_model_family(model), effort=None)
+        p.update(fields)
+        return r.effective_profile(core, p, mode)
+
+    def test_cursor_effort_precedence_has_four_steps(self):
+        base = 'gpt-5.6-sol'
+        with patch.dict(os.environ, {'ALLOY_CURSOR_EFFORT': 'low'}):   # 1: environment pin beats everything below
+            got = self.effective(effort='max', effort_by_mode={'review': 'medium'}, mode='review')
+            self.assertEqual((got['effective_model'], got['effort'], got['effort_source']),
+                             (base + '[effort=low,fast=false]', 'low', 'override'))
+        got = self.effective(effort='medium', effort_by_mode={'review': 'max'}, mode='review')   # 2: role effort
+        self.assertEqual((got['effective_model'], got['effort_source']), (base + '[effort=max,fast=false]', 'mode'))
+        got = self.effective(effort='medium', effort_by_mode={'review': 'max'}, mode='consult')  # 3: profile effort beats the ID's
+        self.assertEqual((got['effective_model'], got['effort_source']), (base + '[effort=medium,fast=false]', 'profile'))
+        got = self.effective()                                          # 4: the model ID's own suffix effort
+        self.assertEqual((got['effective_model'], got['effort'], got['effort_source']),
+                         (base + '[effort=high,fast=false]', 'high', 'model'))
+        got = self.effective('claude-opus-4-8[context=1m,effort=high]')  # 4: a bracket effort, other fields kept
+        self.assertEqual((got['effective_model'], got['effort_source']),
+                         ('claude-opus-4-8[context=1m,effort=high,fast=false]', 'model'))
+        got = self.effective('claude-opus-4-8[context=1m,effort=high]', effort='low')  # a higher step replaces it
+        self.assertEqual(got['effective_model'], 'claude-opus-4-8[context=1m,effort=low,fast=false]')
+        got = self.effective('composer-2.5')                            # 5: no level says anything: no override
+        self.assertEqual((got['effective_model'], got['effort'], got['effort_source']),
+                         ('composer-2.5[fast=false]', None, 'profile'))
+        for mode in ('inherit', 'default'):                              # inherit = the model ID's own default
+            with patch.dict(os.environ, {'ALLOY_CURSOR_EFFORT': mode}):
+                got = self.effective(effort='low')
+                self.assertEqual((got['effective_model'], got['effort_source']), (base + '[effort=high,fast=false]', 'model'))
+
+    def test_cursor_effort_pins_canonical_wins_and_legacy_works(self):
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_EFFORT': 'XHIGH'}):
+            got = self.effective(effort='low')
+            self.assertEqual((got['effort'], got['effort_source'], got['effective_model']),
+                             ('xhigh', 'override', 'gpt-5.6-sol[effort=xhigh,fast=false]'))
+            with patch.dict(os.environ, {'ALLOY_CURSOR_EFFORT': 'minimal'}):
+                self.assertEqual(self.effective(effort='low')['effort'], 'minimal')
+            self.assertEqual([c['effort'] for c in self.cards_for('cursor-large-gpt-5-6-sol')], ['xhigh'])
+        self.assertEqual(self.effective(effort='low')['effort'], 'low')
+
+    def cards_for(self, pid):
+        self.only(pid)
+        return self.cards()
+
+    def test_cursor_compound_and_thinking_ids_keep_their_base(self):
+        got = self.effective('gpt-5.5-extra-high')                      # one indivisible base, not gpt-5.5-extra + high
+        self.assertEqual((got['effective_model'], got['evidence_model'], got['family'], got['effort']),
+                         ('gpt-5.5-extra-high[fast=false]', 'gpt-5.5-extra-high', 'openai', None))
+        self.assertEqual(self.effective('gpt-5.5-extra-high', effort='high')['effective_model'],
+                         'gpt-5.5-extra-high[effort=high,fast=false]')
+        fast = self.effective('gpt-5.5-extra-high-fast', cursor_fast=True)
+        self.assertEqual((fast['effective_model'], fast['evidence_model']), ('gpt-5.5-extra-high[fast=true]', 'gpt-5.5-extra-high'))
+        for model, base, effort, fam in (('claude-opus-5-thinking-high', 'claude-opus-5-thinking', 'high', 'anthropic'),
+                                          ('claude-fable-5-1-thinking-max', 'claude-fable-5-1-thinking', 'max', 'anthropic'),
+                                          ('gpt-5.4-mini-xhigh', 'gpt-5.4-mini', 'xhigh', 'openai'),
+                                          ('gpt-5.6-terra-none', 'gpt-5.6-terra', 'none', 'openai'),
+                                          ('muse-x', None, None, None)):
+            with self.subTest(model=model):
+                if base is None:
+                    with self.assertRaises(r.RoutingError):
+                        self.effective(model)
+                    continue
+                got = self.effective(model)
+                self.assertEqual((got['evidence_model'], got['effort'], got['family']), (base, effort, fam))
+                self.assertEqual(got['effective_model'], '%s[effort=%s,fast=false]' % (base, effort))
+
+    def test_cursor_ultra_and_unknown_efforts_fail_instead_of_downgrading(self):
+        for changes in (dict(effort='ultra'), dict(effort='enormous'), dict(effort_by_mode={'review': 'ultra'})):
+            config = copy.deepcopy(self.config)
+            config['profiles'].append(dict(self.profile('cursor-large-gpt-5-6-sol'), id='u', **changes))
+            with self.subTest(changes=changes), self.assertRaisesRegex(r.RoutingError, 'effort'):
+                r.validate(config)
+        with patch.dict(os.environ, {'ALLOY_CURSOR_EFFORT': 'ultra'}):  # an environment pin cannot smuggle it in
+            with self.assertRaises(r.RoutingError):
+                self.effective()
+            self.only('cursor-large-gpt-5-6-sol', 'codex-large')
+            self.assertEqual([c['profile'] for c in self.cards()], ['codex-large'])
+            decision = self.resolve()
+            self.assertEqual(decision['profile'], 'codex-large')
+            self.assertIn('ultra', self.reasons(decision)['cursor-large-gpt-5-6-sol'])
+        # The non-Cursor efforts stay exactly as they were: ultra is a valid Codex effort.
+        self.profile('codex-large')['effort'] = 'ultra'
+        self.assertIs(r.validate(self.config), self.config)
+
+    def test_cursor_fast_variants_need_an_explicit_profile_opt_in(self):
+        def config_with(**changes):
+            config = copy.deepcopy(self.config)
+            config['profiles'].append(dict(self.profile('cursor-large-gpt-5-6-sol'), id='f', **changes))
+            return config
+        for model in ('gpt-5.6-sol-high-fast', 'gpt-5.6-sol[fast=true]', 'gpt-5.6-sol-high-fast[effort=high]'):
+            with self.subTest(model=model):
+                with self.assertRaisesRegex(r.RoutingError, 'fast'):
+                    r.validate(config_with(model=model))
+                r.validate(config_with(model=model, cursor_fast=True))
+        with self.assertRaisesRegex(r.RoutingError, 'fast'):
+            r.validate(config_with(model='gpt-5.6-sol[fast=maybe]', cursor_fast=True))
+        for junk in ('yes', 1, None, []):
+            with self.subTest(cursor_fast=junk), self.assertRaises(r.RoutingError):
+                r.validate(config_with(cursor_fast=junk))
+        r.validate(config_with(model='gpt-5.6-sol[fast=false]'))       # an explicit false needs no opt-in
+        self.assertEqual(self.effective()['effective_model'], 'gpt-5.6-sol[effort=high,fast=false]')  # default: false
+        on = self.effective(cursor_fast=True)
+        self.assertEqual((on['effective_model'], on['cursor_fast']), ('gpt-5.6-sol[effort=high,fast=true]', True))
+        self.assertEqual(self.effective('gpt-5.6-sol-high-fast', cursor_fast=True)['effective_model'],
+                         'gpt-5.6-sol[effort=high,fast=true]')
+        # The opt-in is per profile: a sibling on the same base ID stays non-fast, and non-Cursor profiles cannot carry it.
+        self.config['profiles'].append(dict(self.profile('cursor-large-gpt-5-6-sol'), id='fast-one', cursor_fast=True))
+        self.only('cursor-large-gpt-5-6-sol', 'fast-one')
+        cards = {c['profile']: c for c in self.cards()}
+        self.assertTrue(cards['fast-one']['effective_model'].endswith('fast=true]'))
+        self.assertTrue(cards['cursor-large-gpt-5-6-sol']['effective_model'].endswith('fast=false]'))
+        decision = self.resolve(profile='fast-one')
+        self.assertIs(decision['cursor_fast'], True)
+        self.assertEqual(decision['effective_model'], 'gpt-5.6-sol[effort=high,fast=true]')
+        self.assertEqual(decision['model'], 'gpt-5.6-sol-high')  # the configured ID is unchanged
+        self.assertFalse(self.resolve(profile='cursor-large-gpt-5-6-sol')['cursor_fast'])
+        codex = copy.deepcopy(self.config)
+        next(p for p in codex['profiles'] if p['id'] == 'codex-large')['cursor_fast'] = True
+        with self.assertRaisesRegex(r.RoutingError, 'cursor_fast'):
+            r.validate(codex)
+
+    def test_profiles_are_never_mutated_by_routing(self):
+        self.only('cursor-large-gpt-5-6-sol', 'cursor-large-claude-opus-5-5', 'codex-large')
+        before = copy.deepcopy(self.config)
+        self.cards()
+        self.resolve()
+        r.evidence.advise(core, self.config, self.data(), {})
+        self.assertEqual(self.config, before)
+
+    # -- dispatch -------------------------------------------------------------------------------
+    def routed(self, pid='cursor-large-gpt-5-6-sol', **changes):
+        p = self.profile(pid)
+        saved = copy.deepcopy(p)
+        try:
+            p.update(changes)
+            self.only(pid)
+            return self.resolve(profile=pid)
+        finally:
+            p.clear()
+            p.update(saved)
+
+    def stage(self):
+        root = os.path.realpath(self.tmp.name)
+        repo = os.path.join(root, 'repo')
+        os.makedirs(repo, exist_ok=True)
+        prompt = os.path.join(root, 'prompt.txt')
+        Path(prompt).write_text('task text')
+        ctx = dict(pdir=os.path.join(root, 'pdir'), repo=repo, cwd=repo)
+        return prompt, ctx
+
+    def test_routed_cursor_adapter_rewrites_one_model_and_never_emits_effort(self):
+        default = core.ADAPTERS['cursor']
+        before = (default.model(), default.effort())
+        for extra, expected in ((dict(), 'gpt-5.6-sol[effort=high,fast=false]'),
+                                (dict(cursor_fast=True), 'gpt-5.6-sol[effort=high,fast=true]'),
+                                (dict(effort='xhigh', effort_by_mode={'consult': 'low'}), 'gpt-5.6-sol[effort=low,fast=false]')):
+            with self.subTest(extra=extra):
+                decision = self.routed(**extra)
+                self.assertEqual(decision['effective_model'], expected)
+                prompt, ctx = self.stage()
+                ad = r.routed_adapter(core, decision)
+                argv = ad.build_args(prompt, os.path.join(self.tmp.name, 'last'), 'consult', ctx)
+                self.assertEqual(argv.count('--model'), 1)
+                self.assertEqual(argv[argv.index('--model') + 1], expected)
+                self.assertEqual(ctx['cursor_expected_model'], expected)  # what the gateway will compare against
+                self.assertEqual(argv[argv.index('--mode') + 1], 'ask')
+                for flag in ('--effort', '--reasoning-effort'):
+                    self.assertNotIn(flag, argv)
+                self.assertFalse([a for a in argv if a.startswith('model_reasoning_effort')])
+                self.assertEqual(ad.effective_model(), expected)
+                shutil.rmtree(ctx['pdir'], ignore_errors=True)
+        self.assertEqual((default.model(), default.effort()), before)  # the shared adapter is never mutated
+        self.assertNotIn('effective_model', vars(default))
+
+    def test_routed_cursor_adapter_refuses_forged_or_unnormalized_decisions(self):
+        good = self.routed()
+        r.routed_adapter(core, good)
+        for label, changes in (('no effective model', dict(effective_model=None)),
+                               ('auto', dict(effective_model='auto[fast=false]', model='auto')),
+                               ('unknown family', dict(effective_model='kimi-k3[fast=false]', model='kimi-k3')),
+                               ('relabelled family', dict(family='cursor')),
+                               ('other family model', dict(model='claude-opus-5-5-high')),
+                               ('fast without opt-in', dict(effective_model='gpt-5.6-sol[effort=high,fast=true]')),
+                               ('effort mismatch', dict(effort='low')),
+                               ('unnormalized', dict(effective_model='gpt-5.6-sol-high')),
+                               ('unsupported effort', dict(effective_model='gpt-5.6-sol[effort=ultra,fast=false]', effort='ultra'))):
+            with self.subTest(label):
+                with self.assertRaises(r.RoutingError):
+                    r.routed_adapter(core, dict(good, **changes))
+
+    def test_routed_effort_flags_are_explicit_per_provider(self):
+        mystery = types.SimpleNamespace(name='mystery', build_args=lambda *a, **k: ['--model', 'm'])
+        with patch.dict(core.ADAPTERS, {'mystery': mystery}):
+            self.assertEqual(r.routed_adapter(core, dict(cli='mystery', model='m', effort=None)).build_args('p', 'l', 'consult'),
+                             ['--model', 'm'])
+            with self.assertRaisesRegex(r.RoutingError, 'No effort mapping'):
+                r.routed_adapter(core, dict(cli='mystery', model='m', effort='high')).build_args('p', 'l', 'consult')
+        for bad in ('nope', None, ''):
+            with self.subTest(cli=bad), self.assertRaisesRegex(r.RoutingError, 'unknown CLI'):
+                r.routed_adapter(core, dict(cli=bad, model='m'))
+        for cli in r.EFFORT_FLAG_ADAPTERS:  # the providers that took --effort still do
+            fake = types.SimpleNamespace(name=cli, build_args=lambda *a, **k: ['--effort', 'old', '--model', 'm'])
+            with patch.dict(core.ADAPTERS, {cli: fake}):
+                argv = r.routed_adapter(core, dict(cli=cli, model='m', effort='high')).build_args('p', 'l', 'consult')
+                self.assertEqual(argv, ['--model', 'm', '--effort', 'high'])
+        self.assertEqual(set(r.EFFORT_FLAG_ADAPTERS) | {'codex', 'cursor'}, set(r.FAMILIES))
+
+    # -- probe, environment, discovery ---------------------------------------------------------
+    def cursor_ready(self, help_text=CURSOR_HELP, version='2026.09.28-64d2043', code=0):
+        ad = core.ADAPTERS['cursor']
+        calls = []
+        def metadata(kind, binary, *a, **k):
+            calls.append((kind, binary))
+            return (0, version) if kind == 'version' else (code, help_text)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        for name, value in (('detect', True), ('resolved_bin', '/opt/mock/cursor-agent'),
+                            ('bin_override', '/opt/mock/cursor-agent'), ('auth_state', 'ready')):
+            stack.enter_context(patch.object(ad, name, return_value=value))
+        stack.enter_context(patch.object(core, 'cursor_boundary', return_value=core.CursorBoundary(True, '', 'v', '/opt/mock/cursor-agent')))
+        stack.enter_context(patch.object(ad.__class__, 'cursor_boundary_ready', True))
+        stack.enter_context(patch.object(core, 'cursor_metadata', side_effect=metadata))
+        spawn = stack.enter_context(patch.object(r.subprocess, 'run', side_effect=AssertionError('direct spawn')))
+        return calls, spawn
+
+    def test_cursor_probe_uses_only_the_sandbox_gateway(self):
+        calls, spawn = self.cursor_ready()
+        result = r.probe(core, 'cursor')
+        self.assertEqual((result['status'], result['compatible'], result['version']), ('ready', True, '2026.09.28-64d2043'))
+        self.assertEqual(calls, [('version', '/opt/mock/cursor-agent'), ('help', '/opt/mock/cursor-agent')])
+        spawn.assert_not_called()
+
+    def test_cursor_probe_fails_closed(self):
+        for flag in r.PROBE_FLAGS['cursor']:
+            with self.subTest(missing=flag):
+                calls, _ = self.cursor_ready(help_text=CURSOR_HELP.replace(flag, '--other'))
+                self.assertFalse(r.probe(core, 'cursor')['compatible'])
+        calls, _ = self.cursor_ready(code=1)
+        self.assertFalse(r.probe(core, 'cursor')['compatible'])
+        ad = core.ADAPTERS['cursor']
+        with patch.object(core, 'cursor_metadata', side_effect=core.CursorBoundaryError('refused')):
+            self.assertEqual(r.probe(core, 'cursor'), dict(status='probe_failed', compatible=False))
+        with patch.object(ad.__class__, 'cursor_boundary_ready', False), patch.object(ad, 'auth_state', return_value='sandbox_unavailable'), \
+             patch.object(core, 'cursor_metadata') as metadata:
+            self.assertEqual(r.probe(core, 'cursor'), dict(status='sandbox_unavailable', compatible=False))
+            metadata.assert_not_called()  # no boundary, no process
+        with patch.object(ad, 'detect', return_value=False):
+            self.assertEqual(r.probe(core, 'cursor'), dict(status='not_installed', compatible=False))
+
+    def test_unknown_adapter_probe_is_incompatible_not_a_key_error(self):
+        self.assertEqual(r.probe(core, 'made-up'), dict(status='unsupported_adapter', compatible=False))
+        with patch.dict(core.ADAPTERS):  # restored on exit
+            del core.ADAPTERS['grok']
+            self.assertEqual(r.probe(core, 'grok'), dict(status='unsupported_adapter', compatible=False))
+
+    def test_inventory_has_cursor_exactly_once_without_live_processes(self):
+        self.cursor_ready()
+        real = r.probe
+        with patch.object(r, 'probe', side_effect=lambda c, n: real(c, n) if n == 'cursor' else dict(status='not_installed', compatible=False)):
+            found = r.inventory(core)
+        self.assertEqual(list(found).count('cursor'), 1)
+        self.assertEqual(list(found), list(r.FAMILIES))
+        self.assertTrue(found['cursor']['compatible'])
+
+    def test_routing_subprocesses_never_receive_cursor_overrides(self):
+        poison = {'CURSOR_API_KEY': 'poison-key', 'CURSOR_API_ENDPOINT': 'https://evil.invalid', 'TYPESAFE_API_KEY': 'k1',
+                  'OPENROUTER_API_KEY': 'k2', 'KEEP_ME': 'yes'}
+        with patch.dict(os.environ, poison):
+            env = r.clean_env()
+            self.assertEqual({k for k in poison if k in env}, {'KEEP_ME'})
+            seen = []
+            ad = core.ADAPTERS['codex']
+            def output(argv, **kwargs):
+                seen.append(kwargs['env'])
+                return Mock(returncode=0, stdout='v1' if '--version' in argv else '--sandbox --model', stderr='')
+            with patch.object(ad, 'resolved_bin', return_value='/usr/local/bin/mock'), patch.object(r.subprocess, 'run', side_effect=output):
+                self.assertTrue(r.probe(core, 'codex')['compatible'])
+            with patch.object(core.ADAPTERS['grok'], 'resolved_bin', return_value='/mock/grok'), \
+                 patch.object(r.subprocess, 'run', side_effect=output):
+                r.refresh(core, dict(grok=dict(status='ready', compatible=True)))
+        self.assertTrue(seen)
+        for env in seen:
+            self.assertFalse({'CURSOR_API_KEY', 'CURSOR_API_ENDPOINT', 'TYPESAFE_API_KEY', 'OPENROUTER_API_KEY'} & set(env))
+
+    def test_cursor_model_list_parser_accepts_only_full_id_label_lines(self):
+        entries = r.parse_cursor_models(CURSOR_MODELS)
+        byid = {e['id']: e for e in entries}
+        self.assertEqual(list(byid), sorted(byid))
+        self.assertEqual({i: (e['family'], e['routable']) for i, e in byid.items()},
+                         {'auto': (None, False), 'composer-2.5': ('cursor', True), 'gpt-5.3-codex-low': ('openai', True),
+                          'claude-opus-5-thinking-high': ('anthropic', True), 'gpt-5.6-sol-high': ('openai', True),
+                          'gpt-5.6-sol-high-fast': ('openai', True), 'cursor-grok-4.5-low': ('xai', True),
+                          'gemini-3.8-flash-high': ('google', True), 'muse-spark-1.3-minimal': (None, False),
+                          'kimi-k3-low': (None, False), 'glm-5.2-high': (None, False)})
+        # The family comes from the ID, never from the human label; junk and the trailing tip are ignored.
+        junk = 'Available models\nkimi-k3-low - GPT 5 label\ngpt-5.6-sol-high - Claude Sonnet\nnot a model line\n' \
+               ' indented-id - label\nid-only\nBad!Id - x\nTip: use --model <id> - to switch\ncomposer-2.5 - C\ncomposer-2.5 - again\n'
+        self.assertEqual({e['id']: (e['family'], e['routable']) for e in r.parse_cursor_models(junk)},
+                         {'kimi-k3-low': (None, False), 'gpt-5.6-sol-high': ('openai', True), 'composer-2.5': ('cursor', True)})
+        for text in ('', 'gpt-5.6-sol-high - GPT\n', 'Available models\n\nTip: nothing\n', 'Available models\nnot a model\n'):
+            self.assertIsNone(r.parse_cursor_models(text))
+
+    def refresh_cursor(self, result, previous=None):
+        if previous is not None:
+            r.save(r.root() / 'models-cache.json', dict(discovered=previous))
+        available = dict(self.available, grok=dict(status='not_installed', compatible=False),
+                         antigravity=dict(status='not_installed', compatible=False))
+        with patch.object(core.ADAPTERS['cursor'], 'resolved_bin', return_value='/opt/mock/cursor-agent'), \
+             patch.object(core, 'cursor_metadata', side_effect=result) as metadata, \
+             patch.object(r.subprocess, 'run', side_effect=AssertionError('direct spawn')):
+            cache = r.refresh(core, available)
+        return cache, metadata
+
+    def test_cursor_discovery_records_routability_and_touches_no_profile(self):
+        before = (r.root() / 'routing.json').read_text()
+        cache, metadata = self.refresh_cursor(lambda *a, **k: (0, CURSOR_MODELS))
+        metadata.assert_called_once_with('models', '/opt/mock/cursor-agent')
+        found = cache['discovered']['cursor']
+        self.assertFalse(found['authoritative'])
+        self.assertEqual(found['models'], sorted(e['id'] for e in found['entries'] if e['routable']))
+        self.assertNotIn('auto', found['models'])
+        self.assertIn(dict(id='auto', family=None, routable=False), found['entries'])
+        self.assertIn(dict(id='kimi-k3-low', family=None, routable=False), found['entries'])
+        self.assertNotIn('cursor', cache['errors'])
+        self.assertEqual((r.root() / 'routing.json').read_text(), before)  # discovery never creates or enables a profile
+        self.assertEqual(json.loads((r.root() / 'models-cache.json').read_text())['discovered']['cursor']['models'], found['models'])
+
+    def test_cursor_discovery_retains_the_cache_on_every_failure(self):
+        previous = dict(cursor=dict(models=['composer-2.5'], entries=[], observed_at=1), grok=dict(models=['grok-old'], observed_at=1))
+        for label, result in (('non-zero exit', lambda *a, **k: (1, CURSOR_MODELS)),
+                              ('unrecognized', lambda *a, **k: (0, 'weird output\n')),
+                              ('no valid line', lambda *a, **k: (0, 'Available models\nnot a model\n')),
+                              ('boundary refused', core.CursorBoundaryError('no OS boundary'))):
+            with self.subTest(label):
+                cache, _ = self.refresh_cursor(result, previous)
+                self.assertEqual(cache['discovered'], previous)
+                self.assertIn('cursor', cache['errors'])
+        cache, metadata = self.refresh_cursor(lambda *a, **k: (0, CURSOR_MODELS), None)
+        self.assertNotEqual(cache['discovered']['cursor'], previous['cursor'])
+        self.assertEqual(cache['discovered']['grok'], previous['grok'])
+        unready = dict(self.available, cursor=dict(status='sandbox_unavailable', compatible=False),
+                       grok=dict(status='not_installed'), antigravity=dict(status='not_installed'))
+        with patch.object(core, 'cursor_metadata') as metadata:
+            r.refresh(core, unready)
+            metadata.assert_not_called()  # an unready Cursor is not even listed
+
+    # -- setup, models, aliases ----------------------------------------------------------------
+    def setup_args(self, **changes):
+        return argparse.Namespace(**dict(dict(non_interactive=True, skip_live_test=True, billing=[]), **changes))
+
+    def run_setup(self, **changes):
+        self.quiet()
+        with patch.object(r, 'inventory', return_value=self.available):
+            return r.setup(core, self.setup_args(**changes))
+
+    def cursor_state(self):
+        return {p['id']: p['enabled'] for p in r.load()['profiles'] if p['adapter'] == 'cursor'}
+
+    def test_setup_leaves_cursor_disabled_until_explicitly_enabled(self):
+        self.run_setup()
+        self.assertEqual(set(self.cursor_state().values()), {False})
+        self.run_setup(refresh_defaults=True)
+        self.assertEqual(set(self.cursor_state().values()), {False})
+        self.run_setup(enable_cursor=True)
+        self.assertEqual(self.cursor_state(), {pid: True for pid in self.SHIPPED})
+        before = r.load()
+        self.run_setup(enable_cursor=True)
+        self.assertEqual(r.load(), before)  # idempotent
+        self.assertTrue(all(p['enabled'] for p in before['profiles'] if p['adapter'] == 'cursor'))
+        r.save(r.root() / 'routing.json', r.starter(core))  # the same opt-in through the real command line
+        self.assertEqual(set(self.cursor_state().values()), {False})
+        with patch.object(r, 'inventory', return_value=self.available):
+            self.assertEqual(core.main(['setup', '--non-interactive', '--skip-live-test']), 0)
+            self.assertEqual(set(self.cursor_state().values()), {False})
+            self.assertEqual(core.main(['setup', '--non-interactive', '--skip-live-test', '--enable-cursor']), 0)
+        self.assertEqual(self.cursor_state(), {pid: True for pid in self.SHIPPED})
+
+    def test_enable_cursor_adds_missing_profiles_and_preserves_everything_else(self):
+        old = [p for p in self.config['profiles'] if p['adapter'] != 'cursor']
+        old[0].update(model='gpt-custom', billing_mode='subscription', enabled=False, cost_rank=17)
+        custom = dict(self.profile('cursor-large-composer-2-5'), id='mine', model='composer-3', enabled=False, cost_rank=9)
+        self.config['profiles'] = old + [custom]
+        r.save(r.root() / 'routing.json', self.config)
+        self.run_setup(enable_cursor=True)
+        got = {p['id']: p for p in r.load()['profiles']}
+        self.assertEqual({pid for pid, p in got.items() if p['adapter'] == 'cursor' and p['enabled']}, set(self.SHIPPED))
+        self.assertFalse(got['mine']['enabled'])  # only the shipped profiles are switched on
+        self.assertEqual(got['mine'], custom)
+        self.assertEqual(got[old[0]['id']], old[0])  # non-Cursor profiles, billing and models untouched
+        self.assertEqual([p['id'] for p in r.load()['profiles']][:len(old)], [p['id'] for p in old])
+
+    def test_enable_cursor_enables_only_shipped_profiles_not_lookalikes(self):
+        lookalike = dict(self.profile('cursor-large-composer-2-5'), id='my-composer', enabled=False, cost_rank=9)
+        collide = dict(self.profile('cursor-large-claude-opus-5-5'), model='claude-opus-5-5-low', enabled=False, cost_rank=8)
+        shipped = dict(self.profile('cursor-large-gpt-5-6-sol'), enabled=False)
+        self.config['profiles'] = ([p for p in self.config['profiles'] if p['adapter'] != 'cursor']
+                                   + [lookalike, collide, shipped])
+        # `my-composer` shares a shipped model but is the user's own; `cursor-large-claude-opus-5-5`
+        # is a shipped ID with a different model, so it is not the shipped profile either.
+        r.save(r.root() / 'routing.json', self.config)
+        self.run_setup(enable_cursor=True)
+        got = {p['id']: p for p in r.load()['profiles']}
+        self.assertEqual(got['my-composer'], lookalike)
+        self.assertEqual(got['cursor-large-claude-opus-5-5'], collide)
+        self.assertTrue(got['cursor-large-gpt-5-6-sol']['enabled'])  # the exact shipped profile
+        # The user's own composer-2.5 profile already covers that model, so no shipped duplicate is added;
+        # no profile covers claude-opus-5-5-high, so the shipped one is added (its ID is taken) and enabled.
+        self.assertNotIn('cursor-large-composer-2-5', got)
+        self.assertTrue(got['cursor-large-claude-opus-5-5-2']['enabled'])
+        self.assertEqual(got['cursor-large-claude-opus-5-5-2']['model'], 'claude-opus-5-5-high')
+        for pid in ('cursor-medium-gemini-3-8-flash', 'cursor-large-grok-4-7'):
+            self.assertTrue(got[pid]['enabled'])
+        self.assertEqual({pid for pid, p in got.items() if p['adapter'] == 'cursor' and not p['enabled']},
+                         {'my-composer', 'cursor-large-claude-opus-5-5'})
+        before = r.load()
+        self.run_setup(enable_cursor=True)
+        self.assertEqual(r.load(), before)  # still idempotent
+
+    def test_refresh_defaults_adds_cursor_disabled_and_keeps_enabled_state_pins_and_billing(self):
+        mine = self.profile('cursor-large-composer-2-5')
+        mine.update(enabled=True, billing_mode='metered', cost_rank=11, model='composer-2.5')
+        self.config['profiles'] = [p for p in self.config['profiles'] if p['adapter'] != 'cursor' or p is mine]
+        r.save(r.root() / 'routing.json', self.config)
+        with patch.dict(os.environ, {'ALLOY_CURSOR_AGENT_MODEL': 'composer-2.5'}):
+            self.run_setup(refresh_defaults=True)
+        got = {p['id']: p for p in r.load()['profiles'] if p['adapter'] == 'cursor'}
+        self.assertEqual(got['cursor-large-composer-2-5'], mine)  # enabled, metered, rank untouched
+        self.assertEqual({pid for pid, p in got.items() if p['enabled']}, {'cursor-large-composer-2-5'})
+        self.assertEqual(set(got), set(self.SHIPPED))
+
+    def test_reset_defaults_keeps_a_cursor_billing_choice(self):
+        for p in self.config['profiles']:
+            if p['adapter'] == 'cursor':
+                p.update(billing_mode='metered', enabled=True)
+        r.save(r.root() / 'routing.json', self.config)
+        self.run_setup(reset_defaults=True)
+        cursor = [p for p in r.load()['profiles'] if p['adapter'] == 'cursor']
+        self.assertEqual({p['billing_mode'] for p in cursor}, {'metered'})
+        self.assertEqual({p['enabled'] for p in cursor}, {False})  # shipped defaults come back disabled
+
+    def test_guided_setup_asks_about_cursor_and_defaults_to_no(self):
+        asked = []
+        def answer(reply):
+            def fake(prompt=''):
+                asked.append(prompt)
+                return reply if 'Cursor' in prompt else ''
+            return fake
+        for reply, expected in (('', False), ('n', False), ('y', True), ('YES', True)):
+            r.save(r.root() / 'routing.json', r.starter(core))
+            asked.clear()
+            with self.subTest(reply=reply), patch.object(r, 'inventory', return_value=self.available), \
+                 patch.object(r.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=answer(reply)), \
+                 patch.object(r.getpass, 'getpass'):
+                self.quiet()
+                r.setup(core, self.setup_args(non_interactive=False, keyless=True))
+                self.assertEqual(len([q for q in asked if 'Cursor' in q]), 1)
+                self.assertEqual(set(self.cursor_state().values()), {expected})
+        # Not detected (or unusable) means no question and nothing enabled.
+        for status in ('not_installed', 'sandbox_unavailable', 'probe_failed'):
+            r.save(r.root() / 'routing.json', r.starter(core))
+            asked.clear()
+            unready = dict(self.available, cursor=dict(status=status, compatible=False))
+            with self.subTest(status=status), patch.object(r, 'inventory', return_value=unready), \
+                 patch.object(r.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=answer('y')), \
+                 patch.object(r.getpass, 'getpass'):
+                self.quiet()
+                r.setup(core, self.setup_args(non_interactive=False, keyless=True))
+                self.assertFalse([q for q in asked if 'Cursor' in q])
+                self.assertEqual(set(self.cursor_state().values()), {False})
+
+    def test_models_enable_disable_is_the_granular_alternative(self):
+        self.quiet()
+        self.assertEqual(core.main(['models', 'enable', '--id', 'cursor-large-composer-2-5']), 0)
+        self.assertEqual({k for k, v in self.cursor_state().items() if v}, {'cursor-large-composer-2-5'})
+        self.assertEqual(core.main(['models', 'disable', '--id', 'cursor-large-composer-2-5']), 0)
+        self.assertEqual(set(self.cursor_state().values()), {False})
+
+    def test_models_add_takes_cursor_fast_and_the_legacy_adapter_name(self):
+        self.quiet()
+        add = ['models', 'add', '--id', 'cf', '--model', 'gpt-5.6-sol-high', '--family', 'openai', '--tier', 'large']
+        self.assertEqual(core.main(add + ['--cli', 'cursor']), 0)
+        self.assertNotIn('cursor_fast', next(p for p in r.load()['profiles'] if p['id'] == 'cf'))  # default: off
+        self.assertEqual(core.main(add + ['--cli', 'cursor', '--cursor-fast']), 0)
+        fast = lambda: next(p for p in r.load()['profiles'] if p['id'] == 'cf').get('cursor_fast')
+        self.assertIs(fast(), True)
+        self.assertEqual(core.main(['models', 'add', '--id', 'cf', '--cost-rank', '3']), 0)
+        self.assertIs(fast(), True)  # an unrelated update keeps the opt-in
+        self.assertEqual(core.main(['models', 'add', '--id', 'cf', '--no-cursor-fast']), 0)
+        self.assertIs(fast(), False)
+        # The legacy adapter name is accepted and persisted canonically.
+        self.assertEqual(core.main(['models', 'add', '--id', 'legacy', '--cli', 'cursor-agent', '--model', 'composer-2.5',
+                                    '--family', 'cursor', '--tier', 'large']), 0)
+        self.assertEqual(next(p for p in r.load()['profiles'] if p['id'] == 'legacy')['adapter'], 'cursor')
+        self.assertNotIn('cursor-agent', (r.root() / 'routing.json').read_text())
+        # ... including when models_command is called directly with the alias (no argparse in between).
+        direct = argparse.Namespace(action='add', id='direct', cli='cursor-agent', model='composer-2.5', family='cursor',
+                                    tier='large')
+        self.assertEqual(r.models_command(core, direct), 0)
+        self.assertEqual(next(p for p in r.load()['profiles'] if p['id'] == 'direct')['adapter'], 'cursor')
+        # Rejections: fast without a Cursor profile, `auto`, and a family that does not match.
+        self.assertEqual(core.main(['models', 'add', '--id', 'nf', '--cli', 'codex', '--model', 'gpt-5.6-sol',
+                                    '--family', 'openai', '--tier', 'large', '--cursor-fast']), 2)
+        self.assertEqual(core.main(['models', 'add', '--id', 'auto1', '--cli', 'cursor', '--model', 'auto',
+                                    '--family', 'openai', '--tier', 'large']), 2)
+        self.assertEqual(core.main(['models', 'add', '--id', 'wrong', '--cli', 'cursor', '--model', 'gpt-5.6-sol-high',
+                                    '--family', 'anthropic', '--tier', 'large']), 2)
+        self.assertEqual(core.main(['models', 'add', '--id', 'lie', '--cli', 'codex', '--model', 'gpt-5.6-sol',
+                                    '--family', 'cursor', '--tier', 'large']), 2)
+        self.assertEqual({p['id'] for p in r.load()['profiles']} & {'nf', 'auto1', 'wrong', 'lie'}, set())
+
+    def test_alias_is_normalized_at_the_boundaries_and_validate_stays_pure(self):
+        self.profile('cursor-large-composer-2-5')['adapter'] = 'cursor-agent'
+        aliased = copy.deepcopy(self.config)
+        with self.assertRaisesRegex(r.RoutingError, 'unknown adapter'):
+            r.validate(aliased)  # validate() neither accepts the alias nor rewrites it
+        self.assertEqual(next(p for p in aliased['profiles'] if p['id'] == 'cursor-large-composer-2-5')['adapter'], 'cursor-agent')
+        r.save(r.root() / 'routing.json', self.config)
+        loaded = r.load()  # load() normalizes before validating
+        self.assertEqual(next(p for p in loaded['profiles'] if p['id'] == 'cursor-large-composer-2-5')['adapter'], 'cursor')
+        self.assertEqual(r.normalize_adapter(' cursor-agent '), 'cursor')
+        self.assertEqual(r.normalize_adapter('codex'), 'codex')
+        self.assertIsNone(r.normalize_adapter(None))
+        self.assertIs(r.normalize({'profiles': 'not a list'})['profiles'], 'not a list')
+        self.run_setup()  # the next explicit save persists the canonical name and no alias anywhere
+        self.assertNotIn('cursor-agent', (r.root() / 'routing.json').read_text())
+        self.assertNotIn('cursor-agent', json.dumps(r.starter(core)))
+        with patch.object(r, 'inventory', return_value=self.available), contextlib.redirect_stderr(io.StringIO()):
+            r.setup(core, self.setup_args(billing=['cursor-agent=metered']))
+        self.assertEqual({p['billing_mode'] for p in r.load()['profiles'] if p['adapter'] == 'cursor'}, {'metered'})
+        self.assertNotIn('cursor-agent', (r.root() / 'routing.json').read_text())
+
+    def test_panelists_alias_selects_the_one_canonical_adapter(self):
+        self.only('cursor-large-composer-2-5', 'codex-large')
+        for value in ('cursor-agent', 'cursor', ' cursor-agent , cursor ', 'cursor-agent,cursor-agent'):
+            with self.subTest(panelists=value):
+                decision = self.resolve(panelists=value)
+                self.assertEqual((decision['cli'], decision['profile']), ('cursor', 'cursor-large-composer-2-5'))
+                self.assertEqual(self.reasons(decision)['codex-large'], 'outside explicit panelists')
+        with patch.dict(os.environ, {'ALLOY_PANELISTS': 'cursor-agent'}):
+            self.assertEqual(self.resolve()['cli'], 'cursor')
+        self.assertEqual(self.resolve(panelists='codex')['cli'], 'codex')
+
+    def test_unnormalized_alias_profiles_dispatch_only_under_the_canonical_name(self):
+        # Even an in-memory profile that still says cursor-agent yields the canonical name in decisions.
+        self.profile('cursor-large-composer-2-5')['adapter'] = 'cursor-agent'
+        self.only('cursor-large-composer-2-5')
+        decision = self.resolve()
+        self.assertEqual(decision['cli'], 'cursor')
+        self.assertEqual([c['profile'] for c in self.cards()], ['cursor-large-composer-2-5'])
+
+    # -- pacing --------------------------------------------------------------------------------
+    def paced(self, pid, host):
+        self.only(pid)
+        self.config['policy']['quota_pacing'] = True
+        snap = self.live(cursor=(.3, .05))  # a fresh Cursor window: 30% left, 5% of the window still to run
+        answers = core.execution.host_assessment(argparse.Namespace(task_tier='large'))
+        args = copy.copy(self.args)
+        args.host_family = host
+        return r.resolve(core, self.config, answers, self.available, args, snap)
+
+    def test_quota_pacing_uses_the_effective_family_of_cursor_profiles(self):
+        snap = self.live(cursor=(.3, .05))
+        self.assertIsNotNone(r.usage.pacing(self.profile('cursor-large-claude-opus-5-5'), snap))  # the window is usable ...
+        self.assertIsNone(r.usage.pacing(self.profile('cursor-large-claude-opus-5-5'), {}))       # ... unknown usage is not
+        discounted = lambda d: d['effective_cost_rank'] < d['cost_rank']
+        pressure = (.05 / .3)
+        # Cursor-to-Claude IS the host's Anthropic family: the conservative rule, no outside-family discount.
+        d = self.paced('cursor-large-claude-opus-5-5', 'anthropic')
+        self.assertFalse(discounted(d))
+        self.assertAlmostEqual(d['effective_cost_rank'], 3 / .3)
+        d = self.paced('cursor-large-claude-opus-5-5', 'openai')
+        self.assertAlmostEqual(d['effective_cost_rank'], 3 * pressure, places=4)
+        # Cursor-to-GPT follows the same rule against an OpenAI host, and Composer against a Cursor host.
+        self.assertFalse(discounted(self.paced('cursor-large-gpt-5-6-sol', 'openai')))
+        self.assertTrue(discounted(self.paced('cursor-large-gpt-5-6-sol', 'anthropic')))
+        self.assertFalse(discounted(self.paced('cursor-large-composer-2-5', 'cursor')))
+        self.assertTrue(discounted(self.paced('cursor-large-composer-2-5', 'anthropic')))
+        self.assertTrue(discounted(self.paced('cursor-large-composer-2-5', None)))
 
 
 class InstallerTests(unittest.TestCase):

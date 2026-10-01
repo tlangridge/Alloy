@@ -29,5 +29,11 @@ Run the Alloy usage command and render its Markdown output in chat.
    dispatched** below the meter.
    If `--if-changed` returns nothing, say the usage snapshot is unchanged.
 
-This command reads cached or live provider billing data without model inference.
+This command reads cached or live provider billing data without model inference,
+except that a user who has set `usage.claude_probe: true` allows one small Claude
+call per cache lifetime. Alloy never reads the macOS keychain, so Claude may show
+unknown unless a credentials file, the opt-in status-line hook (`alloy usage
+--record-claude-statusline`) or that probe is set up, and Cursor shows unknown
+unless the user sets its two pools (`cursor:models`, `cursor:other`) by hand.
+Report unknown as unknown; never fill it in from the keychain.
 Do not dispatch a panel, invoke Jev, change subscriptions, or redeem reset credits.

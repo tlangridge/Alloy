@@ -42,17 +42,26 @@ disabled with ALLOY_NO_UPDATE_CHECK=1.
 from __future__ import annotations
 
 import argparse
+import atexit
+import collections
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import types
 import uuid
+from collections import namedtuple
+from contextlib import ExitStack, redirect_stdout
 
 # Resolve the companion module even when invoked through an installed symlink.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -74,8 +83,12 @@ if __name__ == '__main__':
 import alloy_routing as routing
 import alloy_execution as execution
 from datetime import datetime, timezone
+try:
+    import pwd
+except ImportError:  # pragma: no cover - non-POSIX
+    pwd = None
 
-ALLOY_VERSION = "0.10.0"
+ALLOY_VERSION = "0.11.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -272,7 +285,19 @@ SECRET_PATTERNS = [
     ("npm_token", re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b")),
     ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b")),
-    ("bearer", re.compile(r"(?i)\bAuthorization:\s*Bearer\s+[A-Za-z0-9._\-]+")),
+    # Header values are opaque. Cover every Authorization scheme (and proxy
+    # form), plus cookie headers; name-shaped custom headers such as X-Api-Key
+    # and X-Auth-Token are handled by ASSIGNED_SECRET_RE below.
+    ("authorization_header", re.compile(
+        r"(?i)\b(?:Proxy-)?Authorization\s*:\s*[^\r\n]+")),
+    ("cookie_header", re.compile(
+        r"(?i)\b(?:Set-)?Cookie\s*:\s*[^\r\n]+")),
+    # Custom authentication headers may carry a scheme word before the actual
+    # value (`X-Auth-Token: Bearer ...`, `X-Api-Key: Token ...`). Match the
+    # complete header so the assignment backstop cannot redact only the scheme.
+    ("custom_secret_header", re.compile(
+        r"(?i)\bX-(?:[A-Za-z0-9]+-)*(?:Api-Key|Auth-Token|Key|Token|Secret|Password)"
+        r"(?:-[A-Za-z0-9]+)*\s*:\s*[^\r\n]+")),
     # Whole PEM block (BEGIN..END), or BEGIN..end-of-text if truncated.
     ("private_key", re.compile(
         r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"
@@ -286,8 +311,15 @@ SECRET_PATTERNS = [
 # (4) matching closing quote -- so the replacement preserves the operator and
 # quotes and the redacted line stays valid syntax for the host to read.
 ASSIGNED_SECRET_RE = re.compile(
-    r"(?i)(\b[A-Z0-9_]*(?:API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_]*"
+    r"(?i)(\b[A-Z0-9_-]*(?:API[-_]?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_-]*"
     r"\s*[:=]\s*)(['\"]?)([^\s'\"]{6,})(\2)"
+)
+# Fallback for malformed/raw JSON text. Valid JSON is structurally redacted
+# before persistence, but an escaped quoted assignment must still fail safe when
+# parsing fails: API_KEY=\"value\".
+ESCAPED_ASSIGNED_SECRET_RE = re.compile(
+    r"(?i)(\b[A-Z0-9_-]*(?:API[-_]?KEY|SECRET|TOKEN|PASSWORD|PASSWD)[A-Z0-9_-]*"
+    r'\s*[:=]\s*)(\\")([^"\\\s]{6,})(\\")'
 )
 
 
@@ -296,6 +328,11 @@ def redact_secrets(text: str) -> "tuple[str, int]":
 
     # Run the assignment backstop FIRST so it cannot re-match (and double-count)
     # the [REDACTED:...] placeholders the value patterns below insert.
+    def _sub_escaped_assigned(m: "re.Match[str]") -> str:
+        nonlocal count
+        count += 1
+        return f"{m.group(1)}{m.group(2)}[REDACTED]{m.group(4)}"
+
     def _sub_assigned(m: "re.Match[str]") -> str:
         nonlocal count
         if "[REDACTED" in m.group(3):
@@ -303,6 +340,7 @@ def redact_secrets(text: str) -> "tuple[str, int]":
         count += 1
         return f"{m.group(1)}{m.group(2)}[REDACTED]{m.group(4)}"
 
+    text = ESCAPED_ASSIGNED_SECRET_RE.sub(_sub_escaped_assigned, text)
     text = ASSIGNED_SECRET_RE.sub(_sub_assigned, text)
 
     for name, pat in SECRET_PATTERNS:
@@ -313,6 +351,39 @@ def redact_secrets(text: str) -> "tuple[str, int]":
 
         text = pat.sub(_sub, text)
     return text, count
+
+
+def redact_tree(obj):
+    """redact_secrets over every string leaf of a JSON-shaped value (keys untouched),
+    so a whole status payload -- each `command` element included -- is scrubbed
+    without ever producing invalid JSON. Returns (redacted copy, redaction count)."""
+    if isinstance(obj, str):
+        return redact_secrets(obj)
+    if isinstance(obj, dict):
+        out, total = {}, 0
+        for key, value in obj.items():
+            out[key], n = redact_tree(value)
+            total += n
+        return out, total
+    if isinstance(obj, (list, tuple)):
+        items = [redact_tree(v) for v in obj]
+        return [v for v, _ in items], sum(n for _, n in items)
+    return obj, 0
+
+
+def redact_json_text(text: str) -> "tuple[str, int]":
+    """Redact every string leaf in one JSON value before re-serializing it.
+    Malformed output still receives the text scrubber, including escaped
+    assignment handling, so raw JSON syntax never creates a redaction bypass."""
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return redact_secrets(text)
+    redacted, count = redact_tree(value)
+    if not count:
+        return text, 0
+    body = json.dumps(redacted, ensure_ascii=False, separators=(",", ":"))
+    return body + ("\n" if text.endswith("\n") else ""), count
 
 
 def cap_chars(text: str, max_chars: int) -> "tuple[str, bool]":
@@ -380,6 +451,11 @@ def setting_int(key: str, default: int) -> int:
 #   parse()        -> clean answer text from (stdout, stderr, last_message)
 #   capabilities() -> {read_only, supports_json, default_model, ...}
 #   prepare_env()  -> optional env overrides for the child (e.g. an isolated HOME)
+# Optional runner hooks (defaults change nothing): stdin_from_prompt, capture_in_memory,
+# open_scope()/wrap_argv()/before_spawn()/after_exit() (a per-dispatch resource, the
+# final spawn gateway and a post-run tripwire), output_error(), provider_meta(),
+# read_stdout() (which part of a large stdout sidecar the engine parses) and
+# observe_output() (a side channel over the finished stdout, e.g. Claude quota).
 # See docs/adding-a-panelist.md for the full contract and a template.
 # --------------------------------------------------------------------------- #
 class Adapter:
@@ -389,10 +465,24 @@ class Adapter:
     experimental = False
     install_hint = ""
     auth_hint = ""
+    # Runner hooks. Defaults keep every existing adapter's behaviour unchanged.
+    stdin_from_prompt = True        # False: stdin is DEVNULL (the prompt is a staged file)
+    capture_in_memory = False       # True: drain pipes into bounded memory, never into sidecars
+    kill_group_on_exit = False      # True: always reap the whole process group before returning
+    requires_os_boundary = False    # True: refused unless cursor_boundary_ready, whatever else is set
+    bin_env_keys: "tuple[str, ...]" = ()
 
     # -- detection / auth ---------------------------------------------------- #
+    def bin_override(self) -> "str | None":
+        keys = self.bin_env_keys or ("ALLOY_BIN_" + self.name.upper().replace("-", "_"),)
+        for key in keys:
+            value = setting(key)
+            if value:
+                return value
+        return None
+
     def resolved_bin(self) -> "str | None":
-        override = setting("ALLOY_BIN_" + self.name.upper().replace("-", "_"))
+        override = self.bin_override()
         if override:
             override = os.path.expanduser(override)
             if os.sep in override:        # a path: make absolute (child runs in a different cwd)
@@ -410,6 +500,17 @@ class Adapter:
 
     def is_authed(self) -> bool:  # best-effort heuristic, overridden per adapter
         return True
+
+    def auth_status(self, state: str) -> "str | None":
+        """What `doctor` reports about login, honestly: 'authenticated' (evidence
+        found), 'not_authenticated', 'unknown' (the state cannot be known without
+        reading something Alloy never reads), or None when there is nothing to say."""
+        return {"ready": "authenticated", "installed_not_authed": "not_authenticated"}.get(state)
+
+    def auth_note(self) -> str:
+        """Why `doctor` shows auth `unknown`. Neutral by default; an adapter that returns
+        `unknown` says its own reason (see AntigravityAdapter)."""
+        return "Alloy could not verify this CLI's login."
 
     def cli_version(self) -> str:
         b = self.resolved_bin()
@@ -467,6 +568,54 @@ class Adapter:
             "experimental": self.experimental,
             "default_model": self.model(),
         }
+
+    # -- dispatch hooks (no-ops unless an adapter needs them) ----------------- #
+    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool,
+                   run_root: "str | None" = None):
+        """Per-dispatch resources (returned object is close()d after the group is dead)."""
+        return None
+
+    def wrap_argv(self, argv: "list[str]", ctx: dict) -> "list[str]":
+        """Final spawn gateway: called with the fully rewritten argv."""
+        return argv
+
+    def before_spawn(self, ctx: dict) -> None:
+        return None
+
+    def after_exit(self, ctx: dict) -> "str | None":
+        """Tripwire verdict after the process group is dead; a string fails the call."""
+        return None
+
+    def output_error(self, stdout: str, stderr: str) -> "str | None":
+        """A provider-reported failure that an exit status of zero would hide."""
+        return None
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        """Sanitize captured stdout for persistence. Structured adapters override
+        this so escaped JSON syntax cannot hide string-leaf secrets."""
+        return redact_secrets(stdout)
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        """The finished run's stdout as the engine parses, redacts and persists it.
+        Default: the first `cap` bytes of the sidecar file. An adapter whose CLI
+        streams far more than its answer overrides this so the answer, which
+        arrives last, is never cut off by the cap."""
+        return read_text(path, cap)
+
+    def observe_output(self, stdout: str) -> None:
+        """Called once per finished dispatch with the redacted text read_stdout() returned
+        (what is persisted as stdout.txt). Instrumentation only: an exception here never
+        fails a run."""
+        return None
+
+    def provider_meta(self, stdout: str) -> dict:
+        return {}
+
+    def permission_overrides(self, write: bool) -> dict:
+        return {}
+
+    def doctor_extra(self, state: str) -> dict:
+        return {"os_boundary": None, "auth_detail": None, "reason": None, "warnings": []}
 
 
 class CodexAdapter(Adapter):
@@ -601,22 +750,27 @@ class AntigravityAdapter(Adapter):
     #      caches land in the disposable run dir instead of ~/.gemini. agy ignores
     #      the process cwd entirely (it writes into its own scratch dir), which is
     #      why confining HOME -- not cwd -- is what actually contains it.
-    #   3. Repo access via explicit `--add-dir <repo>` plus
-    #      allowNonWorkspaceAccess:false, so reads are scoped to the repo (and the
-    #      prompt file) rather than to all of $HOME.
+    #   3. Access via explicit `--add-dir` roots plus
+    #      allowNonWorkspaceAccess:false, so reads are scoped to the repo, the
+    #      prompt file, and (for Checkers) the private gate-log directory rather
+    #      than to all of $HOME or either temporary-directory root.
     # The auth files are symlinked (never copied) into the isolated HOME, so no
     # token is duplicated onto disk. On macOS a keychain search-list plist is
     # GENERATED in the isolated HOME too (see _keychain_plist) -- agy stores
     # its OAuth token in the login keychain, and without that config its token
     # save falls through to the System keychain and raises an admin-auth
-    # Keychain dialog on every refresh. Never pass
-    # --dangerously-skip-permissions: it disables layer 1 outright.
+    # Keychain dialog on every refresh. That plist only configures agy's own
+    # keychain use: Alloy never reads the keychain or runs `security` itself,
+    # so it cannot verify a keychain-only login (see _auth_evidence; `doctor`
+    # reports auth `unknown` and the first dispatch reports `auth` if wrong).
+    # Never pass --dangerously-skip-permissions: it disables layer 1 outright.
     #
     # On an older agy (< 1.1.0) none of this holds, so the adapter reports
     # read_only=False + experimental=True and the engine refuses it unless the
     # user sets ALLOY_ALLOW_UNSANDBOXED=1 -- the pre-0.1.8 behaviour.
     name = "antigravity"
     bin = "agy"
+    stdin_from_prompt = False   # agy treats a file on stdin as a denied read_file target
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
@@ -627,7 +781,7 @@ class AntigravityAdapter(Adapter):
     default_model = "gemini-3.6-flash-high"
 
     # Read tools get an allow-rule; everything else fails closed. Bare tool names
-    # (no "(target)" suffix) mean "any target" -- with allowNonWorkspaceAccess
+    # (no "(target)" suffix) mean "any target" on agy 1.1 -- with allowNonWorkspaceAccess
     # false the reachable targets are the --add-dir workspace roots.
     READ_TOOLS = (
         "read_file", "view_file", "view_file_outline", "view_code_item",
@@ -642,10 +796,9 @@ class AntigravityAdapter(Adapter):
     # Only denied when the user turns web research off (ALLOY_WEB=0). Hosted
     # search is read-only and on by default, matching the other panelists.
     WEB_TOOLS = ("search_web", "read_url_content", "browser_navigate")
-    # agy >= 1.2 only accepts grants of the form action(target) and ignores the
-    # bare names above with a warning (reads of --add-dir workspaces are allowed
-    # by default there). These keep the same posture in the new grammar; each
-    # release ignores the other's entries.
+    # agy 1.2.12 ignores bare names and needs read_file(/abs/dir) for each
+    # --add-dir root. Keep both grammars; each release ignores the other's
+    # entries. These denials keep the same posture in the new grammar.
     WRITE_GRANTS = ("command(*)", "write_file(*)")
     WEB_GRANTS = ("read_url(*)", "execute_url(*)")
 
@@ -676,7 +829,15 @@ class AntigravityAdapter(Adapter):
     def experimental(self) -> bool:   # type: ignore[override]
         return not self._enforced()
 
-    def is_authed(self) -> bool:
+    def _auth_evidence(self) -> "bool | None":
+        """Login evidence without touching the macOS keychain (operator policy: Alloy
+        never reads it, never runs `security`).
+        True   an API key is set, or agy's own token/credential file exists.
+        False  no evidence and the platform keeps no login anywhere else.
+        None   unknown: on macOS a fresh agy login lives ONLY in the login keychain
+               (the token file is a fallback agy writes when a keyring save fails), so
+               a healthy install can have no auth file at all. Alloy cannot tell that
+               apart from a signed-out one, and says so instead of guessing."""
         if (setting("ANTIGRAVITY_API_KEY") or setting("GEMINI_API_KEY")
                 or setting("GOOGLE_API_KEY")):
             return True
@@ -689,29 +850,23 @@ class AntigravityAdapter(Adapter):
         if os.path.isfile(os.path.join(gdir, "antigravity-cli",
                                        "antigravity-oauth-token")):
             return True
-        # macOS: a fresh agy login stores the token in the login keychain
-        # (service "gemini", account "antigravity"); the token *file* above is
-        # a fallback agy writes only when a keyring save fails, so a healthy
-        # fresh install may have no auth file at all. Metadata-only existence
-        # check: no -w, so the secret is never read and no ACL dialog can
-        # appear. (Existence can't prove the secret is *readable*; a stale
-        # item costs one failed dispatch reported honestly as `auth`.) Cached
-        # per instance -- a wedged securityd would otherwise cost 5s per call.
-        if sys.platform == "darwin":
-            cached = getattr(self, "_kc_authed", None)
-            if cached is not None:
-                return cached
-            try:
-                ok = subprocess.run(
-                    ["/usr/bin/security", "find-generic-password",
-                     "-s", "gemini", "-a", "antigravity"],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=5, env=routing.clean_env()).returncode == 0
-            except (OSError, subprocess.TimeoutExpired):
-                ok = False
-            self._kc_authed = ok
-            return ok
-        return False
+        return None if sys.platform == "darwin" else False
+
+    def is_authed(self) -> bool:
+        # An UNKNOWN login counts as usable, so agy stays routable and dispatchable:
+        # routing and execute gate on auth_state() == "ready". A signed-out agy is
+        # then reported honestly by the first real dispatch (status `auth`, see
+        # _AUTH_FAIL_RE), and `doctor` shows auth `unknown` meanwhile (auth_status).
+        return self._auth_evidence() is not False
+
+    def auth_status(self, state: str) -> "str | None":
+        if state == "ready" and self._auth_evidence() is None:
+            return "unknown"
+        return super().auth_status(state)
+
+    def auth_note(self) -> str:
+        return ("Alloy never reads the macOS keychain, where agy keeps its login, so it "
+                "cannot verify it.")
 
     def model(self) -> "str | None":
         return setting("ALLOY_ANTIGRAVITY_MODEL", self.default_model)
@@ -725,8 +880,8 @@ class AntigravityAdapter(Adapter):
         os.path.join("antigravity-cli", "antigravity-oauth-token"),
     )
 
-    # macOS only: agy also keeps its OAuth token in the login keychain (it
-    # shells out to /usr/bin/security). Both the keychain search list AND the
+    # macOS only: agy also keeps its OAuth token in the login keychain (agy
+    # itself talks to the keychain; Alloy never does). Both the keychain search list AND the
     # default keychain resolve through $HOME/Library/Preferences/
     # com.apple.security.plist, so inside the isolated HOME only the *System*
     # keychain is in scope -- and agy's token save then needs admin auth,
@@ -777,7 +932,22 @@ class AntigravityAdapter(Adapter):
                 "\t</array>\n"
                 "</dict>\n</plist>\n")
 
-    def _settings(self) -> dict:
+    def _settings(self, ctx: "dict | None" = None) -> dict:
+        dirs = ["read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
+        ver = self._agy_version()
+        # agy 1.2.12 fails closed if allow still lists bare tool names or the
+        # 1.1 deny set: headless read_file is auto-denied even with path grants.
+        # Emit the grammar it rewrites to. 1.1 keeps both grammars.
+        if ver and ver >= (1, 2, 0):
+            deny = list(self.WRITE_GRANTS)
+            if not web_enabled():
+                deny += list(self.WEB_GRANTS)
+            return {
+                "enableTerminalSandbox": True,
+                "showTips": False,
+                "showFeedbackSurvey": False,
+                "permissions": {"allow": dirs, "deny": deny},
+            }
         deny = list(self.WRITE_TOOLS) + list(self.WRITE_GRANTS)
         if not web_enabled():
             deny += list(self.WEB_TOOLS) + list(self.WEB_GRANTS)
@@ -788,7 +958,7 @@ class AntigravityAdapter(Adapter):
             "notifications": False,
             "showTips": False,
             "showFeedbackSurvey": False,
-            "permissions": {"allow": list(self.READ_TOOLS), "deny": deny},
+            "permissions": {"allow": list(self.READ_TOOLS) + dirs, "deny": deny},
         }
 
     def _home(self, ctx: "dict | None") -> "str | None":
@@ -838,7 +1008,7 @@ class AntigravityAdapter(Adapter):
                 except OSError:
                     pass  # agy falls back to file token storage
         write_atomic(os.path.join(cli, "settings.json"),
-                     json.dumps(self._settings(), indent=2))
+                     json.dumps(self._settings(ctx), indent=2))
         return home
 
     def prepare_env(self, ctx: "dict | None" = None) -> dict:
@@ -847,7 +1017,8 @@ class AntigravityAdapter(Adapter):
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
-        ctx = ctx or {}
+        if ctx is None:
+            ctx = {}
         # agy ignores stdin in print mode (1.1.7), so the prompt goes in a file it
         # is pointed at -- never on argv (ARG_MAX, `ps` leakage, quoting). The file
         # lives in its own directory so the --add-dir grant covers the prompt only,
@@ -865,9 +1036,35 @@ class AntigravityAdapter(Adapter):
         # `--mode plan` steers toward analysis over edits. It is an intent hint
         # only (unenforced); the allow-list is what actually stops writes.
         args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
-        for d in (os.path.dirname(staged), ctx.get("repo")):
-            if d:
-                args += ["--add-dir", d]
+        ctx["agy_add_dirs"] = [os.path.abspath(d) for d in
+                               (os.path.dirname(staged), ctx.get("repo")) if d]
+        if mode == "review":
+            # Gate wrappers may print a path for fuller evidence than Alloy's
+            # bounded review packet carries. Keep that evidence in one private,
+            # non-temporary root rather than broadening access to /tmp.
+            logs = gate_log_dir()
+            os.makedirs(logs, exist_ok=True, mode=0o700)
+            _chmod(logs, 0o700)
+            ctx["agy_add_dirs"].append(logs)
+        repo = ctx.get("repo")
+        if repo:
+            # Linked worktrees keep HEAD and shared metadata outside the checkout.
+            try:
+                with open(os.path.join(repo, ".git"), encoding="utf-8") as f:
+                    pointer = f.read().strip()
+                if pointer.startswith("gitdir:"):
+                    target = pointer[len("gitdir:"):].strip()
+                    if target and not any(c in target for c in "\r\n\0"):
+                        gitdir = os.path.abspath(os.path.join(repo, target))
+                        ctx["agy_add_dirs"].append(gitdir)
+                        parent = os.path.dirname(gitdir)
+                        if os.path.basename(parent) == "worktrees":
+                            ctx["agy_add_dirs"].append(os.path.dirname(parent))
+            except (OSError, UnicodeError):
+                pass  # Ordinary checkouts, missing files, and malformed pointers.
+        ctx["agy_add_dirs"] = list(dict.fromkeys(ctx["agy_add_dirs"]))
+        for d in ctx["agy_add_dirs"]:
+            args += ["--add-dir", d]
         # Match agy's own print-mode deadline (default 5m) to alloy's, so the
         # engine's timeout is the one that decides, not a hidden CLI default.
         timeout_s = ctx.get("timeout_s")
@@ -966,30 +1163,2124 @@ class OpenCodeAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
+# --------------------------------------------------------------------------- #
+# Cursor: canonical name, OS write boundary, spawn gateway, tripwires
+# --------------------------------------------------------------------------- #
+# `cursor-agent` has no OS-enforced read-only mode. Its `--mode ask` and
+# `--sandbox` flags are model/tool-mode controls, and the recorded boundary probe
+# showed plan mode and its sandbox flag writing outside the workspace. The write
+# boundary is therefore a macOS `sandbox-exec` profile generated here, and EVERY
+# Cursor process -- auth status, version/help, model discovery, panels, Makers,
+# Checkers -- is spawned only through cursor_command(): it validates the boundary,
+# validates the final argv against a closed per-role grammar, writes the profile
+# and returns the wrapped argv.
+#
+# The `cursor-agent` that a user runs is a shell launcher; Alloy never executes it.
+# A panel/Checker profile denies process execution, and a launcher needs a shell and
+# coreutils. Alloy instead resolves the pinned build's directory and starts that
+# build's own bundled Node runtime directly: `<dir>/node --use-system-ca <dir>/index.js`.
+# A panel or Checker allows exactly three literal executables: node, the build's rg,
+# and /usr/bin/sw_vers. Under Alloy, the OS sandbox denies shell execution and file
+# writes outside the task's allowed paths; the model may be offered tools it cannot use.
+# Every role uses file credentials and denies security execution and keychain access.
+ADAPTER_ALIASES = {"cursor-agent": "cursor"}
+
+
+def normalize_adapter_name(name: str) -> str:
+    """Map a legacy adapter name to its canonical one. Applied at config/input
+    boundaries only; run artifacts always carry the canonical name."""
+    name = (name or "").strip()
+    return ADAPTER_ALIASES.get(name, name)
+
+
+def _first_setting(*keys: str) -> "str | None":
+    """First non-empty setting in order: the canonical key wins over a legacy one."""
+    for key in keys:
+        value = setting(key)
+        if value:
+            return value
+    return None
+
+
+# Module constants (not environment knobs): nothing the environment or a config
+# file can set may relax the boundary. Unit tests patch these to point at a mock.
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"     # never resolved through PATH
+SANDBOX_TRUSTED_UID = 0
+CURSOR_PLATFORM = "darwin"                 # the only supported Cursor execution platform
+CURSOR_SANDBOX_PROFILE_VERSION = 4      # 4: file login only; keychain access denied
+# Ask mode's no-shell behaviour is evidence-backed only for these exact builds.
+# A date floor would silently trust every later or same-day unmeasured build.
+CURSOR_SUPPORTED_VERSIONS = ("2026.09.28-64d2043",)
+CURSOR_VERSION_RE = re.compile(r"\b(\d{4}\.\d{1,2}\.\d{1,2}-[0-9A-Za-z]+)\b")
+CURSOR_BUILD_DIR_RE = re.compile(r"^\d{4}\.\d{1,2}\.\d{1,2}-[0-9A-Za-z]+$")
+# Where a Cursor install keeps its builds (`<versions root>/<build>/{node,index.js,...}`),
+# relative to the login home. Used when the `cursor-agent` on PATH is not itself inside a
+# build directory (a local wrapper or guard script): the wrapper is never executed or followed
+# (only its `#!` marker is read), and only a supported build under this root is used.
+CURSOR_VERSIONS_ROOT = os.path.join(".local", "share", "cursor-agent", "versions")
+# The CLI's own name. The shell launcher exports it as CURSOR_INVOKED_AS (basename of the
+# launcher path, so `agent` or `cursor-agent`); the CLI reads that variable before argv[0].
+# sandbox-exec cannot set argv[0] of what it starts, so the variable is the whole mechanism.
+CURSOR_NAME = "cursor-agent"
+# What the launcher puts between the runtime binary and the entry script (it probes
+# `node --use-system-ca --version` first and falls back without the flag). Fixed here: the
+# preflight proves the pinned build's runtime accepts it.
+CURSOR_NODE_ARGS = ("--use-system-ca",)
+# Besides bundled node and rg, panels/Checkers may execute only the verified, root-owned
+# OS-version tool. File credentials eliminate the CLI's need for /usr/bin/security.
+CURSOR_SYSTEM_EXEC = ("/usr/bin/sw_vers",)
+CURSOR_DEFAULT_MODEL = "composer-2.5"
+CURSOR_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+CURSOR_BOUNDARY_MESSAGE = ("Cursor installed/authenticated, but no supported OS write sandbox "
+                           "is available; Cursor roles are refused.")
+CURSOR_FP_MAX_ENTRIES = 1_000_000
+CURSOR_FP_MAX_BYTES = 16 << 30
+# The only Unix-domain socket a Cursor process may connect to: the resolver.
+CURSOR_ALLOWED_UNIX_SOCKET = "/private/var/run/mDNSResponder"
+# Mach services a Cursor process may look up. Every other lookup is denied: a service
+# that is not listed here cannot be asked to act for the caller outside its sandbox.
+# Seeded from Apple's own baseline for system processes
+# (/System/Library/Sandbox/Profiles/system.sb: the base `(allow mach-lookup ...)` block
+# and the `(system-network)` block) with keychain services excluded (file credentials
+# only). This is NOT a measurement of the installed CLI or of a Maker's
+# toolchains: the preflight proves the CLI still starts under it and that the relays
+# below stay unreachable, and the Lane 6 release gate measures the rest on the real
+# sandbox. An incomplete list makes the boundary unavailable (Cursor refused); it can
+# never make it wider.
+CURSOR_MACH_ALLOW = (
+    # logging, preferences, notifications, directory and trust lookups: system.sb base block
+    "com.apple.analyticsd", "com.apple.analyticsd.messagetracer", "com.apple.appsleep",
+    "com.apple.bsd.dirhelper", "com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon",
+    "com.apple.diagnosticd", "com.apple.dt.automationmode.reader", "com.apple.espd",
+    "com.apple.logd", "com.apple.logd.events", "com.apple.runningboard", "com.apple.secinitd",
+    "com.apple.system.DirectoryService.libinfo_v1", "com.apple.system.logger",
+    "com.apple.system.notification_center", "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership", "com.apple.trustd", "com.apple.trustd.agent",
+    "com.apple.xpc.activity.unmanaged",
+    # DNS, reachability, proxies and TLS-adjacent network services: system.sb `(system-network)`
+    "com.apple.SystemConfiguration.PPPController", "com.apple.SystemConfiguration.SCNetworkReachability",
+    "com.apple.dnssd.service", "com.apple.nehelper", "com.apple.nesessionmanager",
+    "com.apple.networkd", "com.apple.networkscored", "com.apple.symptomsd", "com.apple.usymptomsd",
+    "com.apple.cfnetwork.cfnetworkagent", "com.apple.AppSSO.service-xpc",
+    # SCDynamicStore reads (proxy and DNS configuration)
+    "com.apple.SystemConfiguration.configd",
+)
+# The allowed name the self-test must reach from inside the sandbox (proves the probe client
+# runs under the profile and that the allowlist is not simply "everything denied").
+CURSOR_MACH_PROBE_ALLOWED = "com.apple.system.opendirectoryd.libinfo"
+# Mach services that perform actions for a caller outside its sandbox. None may ever be in
+# CURSOR_MACH_ALLOW; the self-test proves every one of them is unreachable.
+CURSOR_MACH_RELAY_SERVICES = (
+    "com.apple.coreservices.launchservicesd",   # LaunchServices: open documents and applications
+    "com.apple.coreservices.appleevents",       # Apple Event delivery to other applications
+    "com.apple.axserver",                       # accessibility / UI scripting
+    "com.apple.universalaccessd",
+    "com.apple.hiservices-xpcservice",
+    "com.apple.windowserver.active",            # synthetic input and screen capture
+    "com.apple.pasteboard.1",                   # clipboard
+    "com.apple.pboard",
+)
+# The Cursor child environment is an explicit allowlist, never "everything minus known
+# secrets": ambient credentials (AWS_*, GITHUB_TOKEN, OPENAI_API_KEY, ...) and IPC
+# hooks (SSH_AUTH_SOCK, TMUX, STY, DOCKER_HOST, VSCODE_IPC_HOOK*, ...) never reach it.
+CURSOR_ENV_ALLOW = (
+    "PATH", "LANG", "LANGUAGE", "TZ", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",
+    "NO_COLOR", "CI", "DEVELOPER_DIR", "__CF_USER_TEXT_ENCODING",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    # The CLI's name. Always overwritten with CURSOR_NAME by the private runtime, so an
+    # inherited value is never what reaches the child; it is listed because it is a name the
+    # child is meant to see.
+    "CURSOR_INVOKED_AS",
+    "CURSOR_DATA_DIR", "CURSOR_CONFIG_DIR",  # always replaced with private state
+    "AGENT_CLI_CREDENTIAL_STORE",       # always overwritten with file, never inherited
+)
+CURSOR_ENV_ALLOW_PREFIXES = ("LC_",)
+_CURSOR_PROXY_ENV = frozenset(n for n in CURSOR_ENV_ALLOW if n.upper().endswith("_PROXY"))
+_URL_USERINFO_RE = re.compile(r"://[^/?#\s]*@")
+# The one non-shell tool the sandbox self-test may execute: a Unix-socket client.
+CURSOR_SOCKET_PROBE_TOOL = "/usr/bin/nc"
+# The Mach-lookup client the self-test may execute: the running interpreter, resolving names
+# with bootstrap_look_up (no message is ever sent to a service). Its exit status is
+# 64 + the number of names that resolved, and 99 on any error. The offset keeps the codes a
+# crashing or refused launcher produces (1, 126, 127, a signal) from ever reading as a
+# resolved name, so a client that failed to start or to load libSystem can be told apart
+# from a lookup the sandbox denied.
+CURSOR_MACH_EXIT_BASE = 64
+CURSOR_MACH_EXIT_ERROR = 99
+_MACH_PROBE_PY = (
+    "import sys\n"
+    "try:\n"
+    " import ctypes\n"
+    " l=ctypes.CDLL(None)\n"
+    " l.bootstrap_look_up.argtypes=[ctypes.c_uint,ctypes.c_char_p,ctypes.POINTER(ctypes.c_uint)]\n"
+    " l.bootstrap_look_up.restype=ctypes.c_int\n"
+    " b=ctypes.c_uint.in_dll(l,'bootstrap_port')\n"
+    " n=0\n"
+    " for s in sys.argv[1:]:\n"
+    "  p=ctypes.c_uint(0)\n"
+    "  n+=l.bootstrap_look_up(b.value,s.encode(),ctypes.byref(p))==0\n"
+    "except BaseException:\n"
+    " sys.exit(%d)\n"
+    "sys.exit(%d+n)\n") % (CURSOR_MACH_EXIT_ERROR, CURSOR_MACH_EXIT_BASE)
+
+
+class CursorBoundaryError(Exception):
+    """A fail-closed refusal: the boundary, argv, path or fingerprint is not
+    provably safe. The message never carries argv values or output."""
+
+
+# -- bounded subprocess helpers ---------------------------------------------- #
+class _Drain:
+    """Drain one pipe into a bounded in-memory buffer so a chatty child can never
+    deadlock on a full pipe and a runaway one cannot exhaust memory."""
+
+    def __init__(self, stream, cap: int, digest: bool = False):
+        self.stream, self.cap, self.buf, self.total = stream, cap, bytearray(), 0
+        # With `digest`, every byte is hashed as it streams and none is retained, so
+        # the amount of output can never make the result unavailable.
+        self.digest = hashlib.sha256() if digest else None
+        self.thread = threading.Thread(target=self._run, args=(stream,), daemon=True)
+        self.thread.start()
+
+    def _run(self, stream) -> None:
+        try:
+            while True:
+                chunk = stream.read1(65536)
+                if not chunk:
+                    return
+                self.total += len(chunk)
+                if self.digest is not None:
+                    self.digest.update(chunk)
+                room = self.cap - len(self.buf)
+                if room > 0:
+                    self.buf += chunk[:room]
+        except (OSError, ValueError):
+            return
+
+    def finish(self, timeout: float = 5.0) -> bytes:
+        self.thread.join(timeout)
+        if not self.thread.is_alive():      # a writer that escaped the group keeps the pipe open: leave it
+            self.stream.close()
+        return bytes(self.buf)
+
+    @property
+    def overflow(self) -> bool:
+        return self.digest is None and self.total > self.cap
+
+
+def _wait_group_dead(pgid: int, seconds: float = 5.0) -> bool:
+    """True once no process remains in the group (kill escalation happens elsewhere)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _run_bounded(argv: "list[str]", env: dict, cwd: "str | None" = None,
+                 timeout: float = 20.0, cap: int = 1 << 20, hash_stdout: bool = False) -> dict:
+    """Run argv with stdin=DEVNULL in its own process group, bounded output and a
+    deadline. Returns rc (None on timeout), out, err (bytes), overflow, group_dead.
+    With `hash_stdout` stdout is hashed as it streams instead of buffered: `out` is
+    empty, `digest` is its SHA-256 and only stderr is bounded by `cap`."""
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, cwd=cwd, env=env, start_new_session=True)
+    out = _Drain(proc.stdout, 0 if hash_stdout else cap, digest=hash_stdout)
+    err = _Drain(proc.stderr, cap)
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+    finally:
+        _kill_group(proc.pid)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+    dead = _wait_group_dead(proc.pid)
+    out_bytes, err_bytes = out.finish(), err.finish()
+    return {"rc": None if timed_out else proc.returncode, "out": out_bytes, "err": err_bytes,
+            "overflow": out.overflow or err.overflow, "group_dead": dead,
+            "digest": out.digest.hexdigest() if out.digest is not None else None}
+
+
+# -- Git: one hardened helper for every parent-side Git call ---------------- #
+_GIT_STRIPPED_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                     "GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT")
+
+
+def _git_env() -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_STRIPPED_ENV}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    return env
+
+
+_GIT_OUTPUT_CAP = 4_000_000
+
+
+def _git_argv(root: str, args: "tuple[str, ...]") -> "list[str]":
+    return ["git", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args]
+
+
+def _git(root: str, *args: str, timeout: int = 20, cap: "int | None" = None):
+    """`git -C root ...` with hooks and command-valued fsmonitor disabled, system
+    config ignored, stdin detached, bounded output and a deadline. Returns a
+    CompletedProcess (str output) or None when Git could not be run to completion."""
+    argv = _git_argv(root, args)
+    try:
+        ran = _run_bounded(argv, env=_git_env(), timeout=timeout,
+                           cap=_GIT_OUTPUT_CAP if cap is None else cap)
+    except Exception:
+        return None
+    if ran["rc"] is None or ran["overflow"] or not ran["group_dead"]:
+        return None
+    return subprocess.CompletedProcess(argv, ran["rc"], ran["out"].decode("utf-8", "replace"),
+                                       ran["err"].decode("utf-8", "replace"))
+
+
+def _git_digest(root: str, *args: str, timeout: int = 120) -> "tuple[int, str] | None":
+    """The hardened `_git` contract, but stdout is hashed as it streams instead of
+    buffered, so no amount of output can make a tamper check silently unavailable.
+    Returns (returncode, sha256 hex of stdout) or None when Git did not complete."""
+    try:
+        ran = _run_bounded(_git_argv(root, args), env=_git_env(), timeout=timeout,
+                           cap=65536, hash_stdout=True)
+    except Exception:
+        return None
+    if ran["rc"] is None or ran["overflow"] or not ran["group_dead"]:
+        return None
+    return ran["rc"], ran["digest"]
+
+
+def _git_toplevel(path: str) -> "str | None":
+    cp = _git(path, "rev-parse", "--show-toplevel")
+    if cp and cp.returncode == 0:
+        top = cp.stdout.strip()
+        return top or None
+    return None
+
+
+# -- paths -------------------------------------------------------------------- #
+def cursor_login_home() -> str:
+    """The real login home (never $HOME, never the private runtime)."""
+    if pwd is None:
+        raise CursorBoundaryError("the login home is unavailable from the account database")
+    try:
+        value = pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, AttributeError, OSError):
+        raise CursorBoundaryError("the login home is unavailable from the account database")
+    if not isinstance(value, str) or not os.path.isabs(value):
+        raise CursorBoundaryError("the account database returned an invalid login home")
+    home = os.path.realpath(value)
+    if not os.path.isdir(home):
+        raise CursorBoundaryError("the account database login home does not exist")
+    return home
+
+
+def _canon_nofollow(path: str) -> str:
+    """Canonical path that does not follow a FINAL symlink (its parents are resolved)."""
+    path = os.path.abspath(path)
+    head, tail = os.path.split(path)
+    return os.path.join(os.path.realpath(head), tail) if tail else path
+
+
+def _canon_grant(path: str, what: str) -> str:
+    """Canonical path for a WRITE grant: refuse a final symlink outright."""
+    if not path or not os.path.isabs(path):
+        raise CursorBoundaryError("%s is not an absolute path" % what)
+    if os.path.islink(path):
+        raise CursorBoundaryError("%s is a symlink" % what)
+    return os.path.realpath(path)
+
+
+def _related(a: str, b: str) -> bool:
+    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
+
+
+def _sb_path(path: str) -> str:
+    """An SBPL string literal. Anything that could break out of the literal or is
+    not an absolute path makes the profile uncertain, so it is refused."""
+    if (not isinstance(path, str) or not os.path.isabs(path)
+            or any(ord(c) < 32 or ord(c) == 127 for c in path)):
+        raise CursorBoundaryError("uncertain path in sandbox profile")
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _sb_mach_name(name: str) -> str:
+    """A Mach global name for an SBPL string literal; anything else is refused."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        raise CursorBoundaryError("uncertain Mach service name in sandbox profile")
+    return name
+
+
+def _rx_escape(text: str) -> str:
+    if '"' in text or any(ord(c) < 32 or ord(c) == 127 for c in text):
+        raise CursorBoundaryError("uncertain path in sandbox profile")
+    return re.sub(r"([\\.^$*+?()\[\]{}|])", r"\\\1", text)
+
+
+# -- sensitive-read denials ---------------------------------------------------- #
+_CURSOR_HOME_DENIALS = (
+    ".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".docker/config.json", ".kube",
+    ".npmrc", ".pypirc", ".git-credentials", "Library/Keychains",
+    ".cswarm", ".codex/auth.json", ".claude/.credentials.json", ".gemini", ".grok",
+    ".config/op",
+)
+# Only general credential stores are built in. An operator's own paths (a private secrets
+# directory, a staging area in /tmp) are added with ALLOY_CURSOR_DENY_READ_PATHS.
+CursorDenials = namedtuple("CursorDenials", "paths regexes anchors", defaults=((),))
+
+
+def _alloy_secret_paths() -> "list[str]":
+    """Alloy's own secrets: the routing/config root (Jev keys, usage cache) and the
+    future `alloy secrets` store. The run/worktree state is NOT listed: Cursor
+    must read its staged prompt and Maker worktree from there."""
+    paths = [str(routing.root()), os.path.join(os.path.dirname(default_run_root()), "secrets")]
+    cfg = config_path()
+    if os.path.isfile(cfg) and not _related(os.path.realpath(cfg), os.path.realpath(paths[0])):
+        paths.append(cfg)
+    return paths
+
+
+def _parse_extra_denials(raw: "str | None") -> "list[str]":
+    if raw is None:
+        return []
+    out = []
+    for index, item in enumerate(raw.split(","), 1):
+        entry = item.strip()
+        bad = (not entry or not os.path.isabs(entry) or os.path.normpath(entry) != entry
+               or any(ord(c) < 32 or ord(c) == 127 or c in '*?[]{}"' for c in entry))
+        if bad:
+            raise CursorBoundaryError("ALLOY_CURSOR_DENY_READ_PATHS entry %d is empty, relative "
+                                      "or ambiguous" % index)
+        out.append(entry)
+    return out
+
+
+def cursor_denials(home: "str | None" = None, extra: "str | None" = None) -> CursorDenials:
+    """Built-in plus configured read denials. Users may add, never remove."""
+    home = home or cursor_login_home()
+    raw = extra if extra is not None else setting("ALLOY_CURSOR_DENY_READ_PATHS")
+    candidates = [os.path.join(home, rel) for rel in _CURSOR_HOME_DENIALS]
+    candidates += _alloy_secret_paths() + _parse_extra_denials(raw)
+    paths: "list[str]" = []
+    for cand in candidates:
+        canon = _canon_nofollow(cand)
+        # A final symlink is denied under both spellings: the kernel matches the
+        # resolved target, the user meant the link.
+        for spelling in ([canon, os.path.realpath(canon)] if os.path.islink(canon) else [canon]):
+            if spelling not in paths:
+                paths.append(spelling)
+    regexes = [
+        "^" + _rx_escape(home) + "/Library/Group Containers/[^/]*1password[^/]*(/.*)?$",
+        # Common secret-staging places: anything directly under the shared temp roots whose
+        # name contains "secret" (any case), and everything beneath it. A pattern rather
+        # than a path because ALLOY_CURSOR_DENY_READ_PATHS refuses globs. The kernel matches
+        # the resolved path, so /private/tmp is the one that bites on macOS (/tmp is its
+        # symlink); /tmp is listed too so the profile says what it means.
+        "^/private/tmp/[^/]*[Ss][Ee][Cc][Rr][Ee][Tt][^/]*(/.*)?$",
+        "^/tmp/[^/]*[Ss][Ee][Cc][Rr][Ee][Tt][^/]*(/.*)?$",
+    ]
+    # Literal roots beneath which a regex denial may materialize. They are not
+    # themselves denied; they let overlap checks refuse a fingerprint root that
+    # would contain a matching path and therefore make Alloy read through it.
+    anchors = (
+        os.path.join(home, "Library", "Group Containers"),
+        "/private/tmp",
+    )
+    return CursorDenials(tuple(paths), tuple(regexes), anchors)
+
+
+def _denial_covers(den: CursorDenials, path: str) -> bool:
+    for d in den.paths:
+        if path == d or path.startswith(d.rstrip("/") + "/"):
+            return True
+    return any(re.search(rx, path) for rx in den.regexes)
+
+
+def _check_overlap(den: CursorDenials, required: "list[str]") -> None:
+    """A denial overlapping something Cursor must read fails closed.
+
+    Check both directions: a denial may cover a required path, or a required
+    workspace/fingerprint root may contain a denied credential path. The latter
+    prevents Alloy's unsandboxed parent from walking a keychain or other denied
+    tree while constructing the content tripwire.
+    """
+    for path in required:
+        if not path:
+            continue
+        path = os.path.realpath(path)
+        contains_denial = any(d == path or d.startswith(path.rstrip("/") + "/")
+                              for d in den.paths)
+        contains_regex_match = any(a == path or a.startswith(path.rstrip("/") + "/")
+                                   for a in den.anchors)
+        if _denial_covers(den, path) or contains_denial or contains_regex_match:
+            raise CursorBoundaryError("a sensitive-read denial covers a path Cursor requires")
+
+
+# -- SBPL --------------------------------------------------------------------- #
+def cursor_sbpl(role: str, *, exe: str, runtime, denials: CursorDenials,
+                worktree: "str | None" = None, git: "dict | None" = None,
+                extra_exec: "tuple" = ()) -> str:
+    """The sandbox profile for one Cursor process. `panel` (panel, Checker and all
+    metadata/discovery calls) and `maker` differ only in their grants.
+
+    SBPL is last-match-wins, so the shape is: allow everything, deny the delegation
+    routes (Unix sockets, other processes, Mach lookups except an exact allowlist),
+    deny writes and (panel) process execution, add the role's exact grants, then the
+    explicit Git-metadata write denials, the hard-link denial and finally the
+    sensitive-read denials so no grant above can override them. One rule per line."""
+    if role not in ("panel", "maker"):
+        raise CursorBoundaryError("unknown sandbox role")
+    lines = ["(version 1)",
+             ";; alloy cursor sandbox profile v%d role=%s" % (CURSOR_SANDBOX_PROFILE_VERSION, role),
+             "(allow default)",
+             # Prevent a sandboxed process from asking an unsandboxed service to
+             # perform writes on its behalf. Maker process execution does not
+             # relax these delegation boundaries.
+             "(deny job-creation)",
+             "(deny lsopen)",
+             "(deny appleevent-send)",
+             "(deny user-preference-write)",
+             # Local IPC is the other delegation route: tmux, Docker, an ssh agent or an
+             # IDE's command-line hook are unsandboxed servers behind a Unix-domain
+             # socket that will run a command or perform a write for whoever connects.
+             # A path filter on a network operation matches the socket's resolved
+             # path, so every Unix socket is denied for connect and bind except the
+             # resolver socket name resolution needs. TCP/UDP (the provider network)
+             # is untouched: those endpoints are not paths.
+             '(deny network-outbound (subpath "/"))',
+             '(allow network-outbound (literal "%s"))' % CURSOR_ALLOWED_UNIX_SOCKET,
+             '(deny network-bind (subpath "/"))',
+             # Other processes: no process inspection and no task-port read beyond the
+             # caller and its own children.
+             "(deny process-info*)",
+             "(allow process-info-codesignature)",
+             "(allow process-info* (target self) (target children))",
+             "(deny mach-task-read (target others))",
+             # Mach services are the third delegation route: LaunchServices opens an app or
+             # document, Apple Events drive another application, the window server and
+             # accessibility servers synthesize input, and any other unsandboxed daemon
+             # acts for whoever can look it up. So no lookup is allowed by default: deny
+             # them all, then allow exactly CURSOR_MACH_ALLOW (later rule wins).
+             "(deny mach-lookup)",
+             "(allow mach-lookup " + " ".join(
+                 '(global-name "%s")' % _sb_mach_name(name) for name in CURSOR_MACH_ALLOW) + ")",
+             "(deny file-write*)"]
+    if role == "panel":
+        lines.append("(deny process-exec*)")
+        lines.append("(allow process-exec " + " ".join(
+            "(literal %s)" % _sb_path(p) for p in (exe,) + tuple(extra_exec)) + ")")
+    if role == "maker":
+        # Maker commands retain their execution grant, but never keychain access.
+        lines.append('(deny process-exec (literal "/usr/bin/security"))')
+    # The pinned file store writes auth.json directly with mode 0600, then chmods it;
+    # it also chmods the existing .cursor directory to 0700. No temp/rename files.
+    home = cursor_login_home()
+    auth_dir = _canon_grant(os.path.join(home, ".cursor"), "the Cursor credential directory")
+    auth = _canon_grant(os.path.join(auth_dir, "auth.json"), "the Cursor credential file")
+    if os.path.lexists(auth):
+        auth_st = _cursor_trusted_entry(auth, "credential file")
+        if auth_st.st_nlink != 1 or stat.S_IMODE(auth_st.st_mode) != 0o600:
+            raise CursorBoundaryError("the Cursor credential file must be 0600 with no hard links")
+    _check_overlap(denials, [auth])
+    lines.append("(allow file-write* (literal %s))" % _sb_path(auth))
+    lines.append("(allow file-write-mode (literal %s))" % _sb_path(auth_dir))
+    lines.append('(allow file-write-data (literal "/dev/null"))')
+    lines.append("(allow file-write* " + " ".join(
+        "(subpath %s)" % _sb_path(p) for p in (runtime.state, runtime.cache, runtime.tmp)) + ")")
+    if role == "maker":
+        if not worktree:
+            raise CursorBoundaryError("Maker profile requires the owned worktree")
+        lines.append("(allow file-write* (subpath %s))" % _sb_path(worktree))
+    if git:
+        protected = ["(literal %s) (subpath %s)" % (_sb_path(git["dotgit"]), _sb_path(git["dotgit"]))]
+        for key in ("gitdir", "common"):
+            protected.append("(subpath %s)" % _sb_path(git[key]))
+        lines.append("(deny file-write* " + " ".join(protected) + ")")
+    lines.append("(deny file-link)")      # hard links denied in every role, after every grant
+    for path in denials.paths:
+        lines.append("(deny file-read* (literal %s) (subpath %s))" % (_sb_path(path), _sb_path(path)))
+    for rx in denials.regexes:
+        lines.append('(deny file-read* (regex #"%s"))' % rx)
+    return "\n".join(lines) + "\n"
+
+
+# -- models ------------------------------------------------------------------- #
+_CURSOR_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9_=.,-]*\])?$")
+
+
+def cursor_split_model(model: str) -> "tuple[str, dict]":
+    """`claude-opus-4-8[context=1m,effort=high]` -> (base, {"context": "1m", ...})."""
+    m = re.match(r"^([^\[\]]*)(?:\[([^\[\]]*)\])?$", model or "")
+    if not m:
+        return model or "", {}
+    fields = {}
+    bracket = m.group(2)
+    for part in bracket.split(",") if bracket is not None and bracket != "" else ():
+        key, sep, value = part.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key or not value:
+            raise CursorBoundaryError("Cursor model has a malformed bracket control")
+        if key in fields:
+            raise CursorBoundaryError("Cursor model has a duplicate bracket control")
+        fields[key] = value
+    return m.group(1), fields
+
+
+def cursor_model_family(model: "str | None") -> "str | None":
+    """Family of a Cursor model ID after removing bracket overrides and a trailing
+    `-fast`; None for `auto`, an empty ID or any unknown prefix (ineligible)."""
+    try:
+        base, _fields = cursor_split_model(model or "")
+    except CursorBoundaryError:
+        return None
+    base = base.strip()
+    if base.endswith("-fast"):
+        base = base[:-len("-fast")]
+    if not base or base == "auto" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", base):
+        return None
+    if base.startswith("claude-"):
+        return "anthropic"
+    if base.startswith("gpt-") or base == "codex" or base.startswith("codex-"):
+        return "openai"
+    if base.startswith("gemini-"):
+        return "google"
+    if base.startswith(("grok-", "cursor-grok-")):
+        return "xai"
+    if base.startswith("composer-"):
+        return "cursor"
+    return None
+
+
+def cursor_validate_model(model: "str | None") -> str:
+    """The family of a model that may be spawned, or CursorBoundaryError."""
+    if not isinstance(model, str) or not _CURSOR_MODEL_RE.match(model):
+        raise CursorBoundaryError("Cursor model is empty or malformed")
+    cursor_split_model(model)       # rejects malformed or duplicate bracket controls
+    family = cursor_model_family(model)
+    if family is None:
+        raise CursorBoundaryError("Cursor model has no known family (auto and unknown IDs are refused)")
+    return family
+
+
+def cursor_effective_model(model: str, effort: "str | None" = None,
+                           cursor_fast: bool = False) -> str:
+    """Normalize one Cursor model into explicit effort/fast bracket controls.
+
+    A configured effort overrides a bracket or generic trailing effort. The
+    documented `gpt-5.5-extra-high` ID is indivisible and therefore is never
+    shortened to `gpt-5.5-extra`.
+    """
+    cursor_validate_model(model)
+    if not isinstance(cursor_fast, bool):
+        raise CursorBoundaryError("cursor_fast must be boolean")
+    base, fields = cursor_split_model(model)
+    bracket_effort = fields.pop("effort", None)
+    bracket_fast = fields.pop("fast", None)
+    if bracket_effort is not None:
+        bracket_effort = bracket_effort.lower()
+        if bracket_effort not in CURSOR_EFFORTS:
+            raise CursorBoundaryError("unsupported Cursor effort")
+    if bracket_fast is not None and bracket_fast.lower() not in ("true", "false"):
+        raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+
+    base_fast = base.endswith("-fast")
+    if base_fast:
+        if not cursor_fast:
+            raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+        base = base[:-len("-fast")]
+    if not cursor_fast and bracket_fast is not None and bracket_fast.lower() != "false":
+        raise CursorBoundaryError("fast Cursor variants require a profile opt-in")
+
+    suffix_effort = None
+    if base != "gpt-5.5-extra-high":
+        for value in sorted(CURSOR_EFFORTS, key=len, reverse=True):
+            suffix = "-" + value
+            if base.endswith(suffix):
+                base, suffix_effort = base[:-len(suffix)], value
+                break
+    effective_effort = effort.lower() if isinstance(effort, str) else effort
+    if effective_effort is not None and effective_effort not in CURSOR_EFFORTS:
+        raise CursorBoundaryError("unsupported Cursor effort")
+    effective_effort = effective_effort or bracket_effort or suffix_effort
+
+    if effective_effort:
+        fields["effort"] = effective_effort
+    fields["fast"] = "true" if cursor_fast else "false"
+    effective = base + "[" + ",".join("%s=%s" % item for item in fields.items()) + "]"
+    cursor_validate_model(effective)
+    return effective
+
+
+# -- the closed argv grammars --------------------------------------------------- #
+_CURSOR_METADATA = {"status": ["status"], "version": ["--version"],
+                    "help": ["--help"], "models": ["--list-models"]}
+_CURSOR_AUTH_FLAGS = ("--api-key", "--endpoint", "--header")
+_CURSOR_FLAGS = ("-p", "--trust", "--skip-worktree-setup")
+_CURSOR_VALUE_FLAGS = ("--mode", "--output-format", "--workspace", "--model", "--sandbox")
+CURSOR_INSTRUCTION_MAX = 4096
+# The instruction is `Read <json path> in full for your instructions and answer them.`
+# plus exactly one of these two reminders, and nothing else: the gateway rebuilds the
+# expected text and compares for equality, so task text can never ride on argv.
+CURSOR_PANEL_REMINDER = " This is a read-only consult: analyse and explain, never modify anything."
+CURSOR_MAKER_REMINDER = (" Implement it only inside %s; run the specified tests there; "
+                         "do not edit Git metadata or any path outside the worktree.")
+
+
+def cursor_instruction(role: str, staged: str, workspace: str) -> str:
+    reminder = (CURSOR_MAKER_REMINDER % json.dumps(workspace, ensure_ascii=False) if role == "maker"
+                else CURSOR_PANEL_REMINDER)
+    return "Read %s in full for your instructions and answer them.%s" % (
+        json.dumps(staged, ensure_ascii=False), reminder)
+
+
+def _flag_name(tok: str) -> str:
+    """A token reduced to its option name so a refusal never echoes a value."""
+    if tok.startswith("--"):
+        return tok.split("=", 1)[0][:40]
+    return tok[:2]
+
+
+def _cursor_auth_control(tok: str) -> bool:
+    if tok in ("-e", "-H"):
+        return True
+    if any(tok == f or tok.startswith(f + "=") for f in _CURSOR_AUTH_FLAGS):
+        return True
+    return len(tok) > 2 and tok[0] == "-" and tok[1] in "eH"      # attached: -eVALUE, -HVALUE
+
+
+def cursor_validate_argv(role: str, args: "list[str]", *, workspace: "str | None" = None,
+                         staged: "str | None" = None,
+                         expected_model: "str | None" = None) -> None:
+    """Parse a FULL Cursor argv (after the runtime binary and entry script) against the role's closed
+    grammar. There is no substring denylist: anything not recognised is refused,
+    including unknown options, `--flag=value` and attached short forms, duplicate
+    singleton options, a subcommand in an inference call and extra positionals."""
+    args = list(args)
+    if not all(isinstance(a, str) for a in args):
+        raise CursorBoundaryError("non-string Cursor argument")
+    for tok in args:
+        if _cursor_auth_control(tok):
+            raise CursorBoundaryError("authentication, endpoint and header controls are forbidden")
+    if role in _CURSOR_METADATA:
+        if args != _CURSOR_METADATA[role]:
+            raise CursorBoundaryError("metadata call does not match its exact grammar")
+        return
+    if role not in ("panel", "maker"):
+        raise CursorBoundaryError("unknown Cursor role")
+    seen: "dict[str, object]" = {}
+    positional: "list[str]" = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok in _CURSOR_FLAGS:
+            if tok in seen:
+                raise CursorBoundaryError("duplicate option " + tok)
+            seen[tok] = True
+        elif tok in _CURSOR_VALUE_FLAGS:
+            if tok in seen:
+                raise CursorBoundaryError("duplicate option " + tok)
+            if i + 1 >= len(args) or args[i + 1].startswith("-"):
+                raise CursorBoundaryError("option %s has no plain value" % tok)
+            seen[tok] = args[i + 1]
+            i += 1
+        elif tok.startswith("-"):
+            raise CursorBoundaryError("option %s is not permitted in a Cursor %s call" % (_flag_name(tok), role))
+        else:
+            positional.append(tok)
+            if i != len(args) - 1:
+                raise CursorBoundaryError("unexpected positional argument")
+        i += 1
+    for required in _CURSOR_FLAGS + ("--output-format", "--workspace", "--model", "--sandbox"):
+        if required not in seen:
+            raise CursorBoundaryError("missing required option " + required)
+    if seen["--output-format"] != "json":
+        raise CursorBoundaryError("--output-format must be json")
+    if seen["--sandbox"] != "disabled":
+        raise CursorBoundaryError("--sandbox must be disabled")
+    if role == "panel" and seen.get("--mode") != "ask":
+        raise CursorBoundaryError("a panel/Checker call requires exactly --mode ask")
+    if role == "maker" and "--mode" in seen:
+        raise CursorBoundaryError("a Maker call must not set --mode")
+    if len(positional) != 1:
+        raise CursorBoundaryError("exactly one staged-file instruction is required")
+    ws = seen["--workspace"]
+    if (not isinstance(workspace, str) or workspace != os.path.realpath(workspace)
+            or not os.path.isabs(str(ws)) or str(ws) != workspace):
+        raise CursorBoundaryError("--workspace is not the verified workspace")
+    if not expected_model:
+        raise CursorBoundaryError("the expected effective Cursor model is missing")
+    cursor_validate_model(expected_model)
+    if seen["--model"] != expected_model:
+        raise CursorBoundaryError("--model changed after effective-model validation")
+    if not staged:
+        raise CursorBoundaryError("the staged prompt path is missing")
+    text = positional[0]
+    m = re.match(r'^Read ("(?:[^"\\\n]|\\.)*") in full for your instructions and answer them\.', text)
+    try:
+        quoted = json.loads(m.group(1)) if m else None
+    except ValueError:
+        quoted = None
+    if (len(text) > CURSOR_INSTRUCTION_MAX or not isinstance(quoted, str) or not os.path.isabs(quoted)
+            or quoted != staged or text != cursor_instruction(role, staged, workspace)):
+        raise CursorBoundaryError("the instruction is not the bounded staged-file instruction")
+
+
+# -- content fingerprints and canaries ------------------------------------------ #
+CursorFingerprint = namedtuple("CursorFingerprint", "digest entries")
+_GIT_FILES = ("commondir", "config", "config.worktree", "HEAD", "packed-refs",
+              "info/exclude", "info/attributes", "info/sparse-checkout")
+_GIT_TREES = ("hooks", "refs")
+
+
+def _fp_stat_sig(st) -> tuple:
+    """Identity and mutation-sensitive metadata used before/after every read."""
+    return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _fp_count(budget: dict) -> None:
+    budget["entries"] += 1
+    if budget["entries"] > CURSOR_FP_MAX_ENTRIES:
+        raise CursorBoundaryError("fingerprint refused: too many entries")
+
+
+def _fp_entry_at(dir_fd: int, name: str, display: str, budget: dict,
+                 meta: bool = False) -> tuple:
+    """Fingerprint one child relative to an already-open directory. All opens and
+    revalidation stay anchored to that directory FD, so a renamed parent or a
+    symlink substitution cannot redirect a read outside the tree."""
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        mode = stat.S_IMODE(st.st_mode)
+        extra = (st.st_mtime_ns,) if meta else ()
+        _fp_count(budget)
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(name, dir_fd=dir_fd)
+            if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+                raise CursorBoundaryError("fingerprint refused: a path changed while reading")
+            return ("l", mode, target, "") + extra
+        if stat.S_ISDIR(st.st_mode):
+            return ("d", mode, "", "") + extra
+        if not stat.S_ISREG(st.st_mode):
+            if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+                raise CursorBoundaryError("fingerprint refused: a path changed while reading")
+            return ("o", mode, str(stat.S_IFMT(st.st_mode)), "") + extra   # never open a FIFO/device
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        try:
+            fst = os.fstat(fd)
+            if _fp_stat_sig(fst) != _fp_stat_sig(st) or not stat.S_ISREG(fst.st_mode):
+                raise CursorBoundaryError("fingerprint refused: a path changed while reading")
+            digest, total = hashlib.sha256(), 0
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                budget["bytes"] += len(chunk)
+                if budget["bytes"] > CURSOR_FP_MAX_BYTES:
+                    raise CursorBoundaryError("fingerprint refused: too many bytes")
+                digest.update(chunk)
+            after = os.fstat(fd)
+            if total != fst.st_size or _fp_stat_sig(after) != _fp_stat_sig(fst):
+                raise CursorBoundaryError("fingerprint refused: a file changed while reading")
+        finally:
+            os.close(fd)
+        if _fp_stat_sig(os.stat(name, dir_fd=dir_fd, follow_symlinks=False)) != _fp_stat_sig(st):
+            raise CursorBoundaryError("fingerprint refused: a path changed while reading")
+        return ("f", mode, str(total), digest.hexdigest()) + extra
+    except CursorBoundaryError:
+        raise
+    except OSError as exc:
+        raise CursorBoundaryError("fingerprint refused: %s on %s" % (
+            exc.strerror or "error", os.path.basename(display)))
+
+
+def _fp_entry(path: str, budget: dict, meta: bool = False) -> tuple:
+    """Path entry wrapper anchored by a non-following parent directory FD."""
+    path = os.path.abspath(path)
+    parent, name = os.path.split(path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        pfd = os.open(parent, flags)
+        try:
+            before = os.fstat(pfd)
+            child_before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+            entry = _fp_entry_at(pfd, name, path, budget, meta)
+            # The parent anchors a single entry, not a walk of its siblings. Temp
+            # neighbours may appear/disappear without changing this fingerprint.
+            # Still refuse a changed parent identity/mode or a replaced child.
+            identity = lambda st: (st.st_dev, st.st_ino, st.st_mode)
+            if (identity(os.fstat(pfd)) != identity(before)
+                    or identity(os.stat(parent, follow_symlinks=False)) != identity(before)
+                    or _fp_stat_sig(os.stat(name, dir_fd=pfd, follow_symlinks=False))
+                    != _fp_stat_sig(child_before)):
+                raise CursorBoundaryError("fingerprint refused: a directory or entry changed while reading")
+            return entry
+        finally:
+            os.close(pfd)
+    except CursorBoundaryError:
+        raise
+    except OSError as exc:
+        raise CursorBoundaryError("fingerprint refused: %s on %s" % (
+            exc.strerror or "error", os.path.basename(path)))
+
+
+# The walk needs only entry names, and every entry is then examined with fstatat-style
+# calls against the same descriptor. os.listdir(fd) is the documented descriptor form
+# (POSIX, Python 3.3+, listed in os.supports_fd). os.scandir has no dir_fd parameter: its
+# only descriptor form is scandir(fd), which needs 3.7+, so it is deliberately not used.
+_LISTDIR_BY_FD = os.listdir in os.supports_fd
+
+
+def _fp_walk(root: str, prefix: str, out: dict, budget: dict, skip_top: "tuple" = (),
+             meta: bool = False) -> None:
+    """Walk from directory FDs opened with O_DIRECTORY|O_NOFOLLOW. Each directory,
+    including the supplied root, is checked before and after enumeration and
+    after its children for identity, type, mode, size, mtime and ctime changes."""
+    # Where the platform cannot list a directory by descriptor the walk refuses rather
+    # than falling back to a path-based listing that a rename could redirect.
+    if not _LISTDIR_BY_FD:
+        raise CursorBoundaryError("fingerprint refused: directory enumeration by descriptor is unsupported")
+    root = os.path.abspath(root)
+    parent, root_name = os.path.split(root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def walk(fd: int, rel: str, expected) -> None:
+        before = os.fstat(fd)
+        if _fp_stat_sig(before) != _fp_stat_sig(expected) or not stat.S_ISDIR(before.st_mode):
+            raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+        try:
+            names = sorted(os.listdir(fd))
+        except OSError as exc:
+            raise CursorBoundaryError("fingerprint refused: cannot enumerate (%s)" % (
+                exc.strerror or "error"))
+        if _fp_stat_sig(os.fstat(fd)) != _fp_stat_sig(before):
+            raise CursorBoundaryError("fingerprint refused: a directory changed during enumeration")
+        for name in names:
+            child = os.path.join(rel, name) if rel else name
+            if not rel and name in skip_top:
+                continue
+            entry = _fp_entry_at(fd, name, os.path.join(root, child), budget, meta)
+            out[prefix + child] = entry
+            if entry[0] == "d":
+                try:
+                    child_fd = os.open(name, flags, dir_fd=fd)
+                except OSError as exc:
+                    raise CursorBoundaryError("fingerprint refused: cannot open directory (%s)" % (
+                        exc.strerror or "error"))
+                try:
+                    child_st = os.fstat(child_fd)
+                    named_st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if _fp_stat_sig(child_st) != _fp_stat_sig(named_st):
+                        raise CursorBoundaryError("fingerprint refused: a directory changed while opening")
+                    walk(child_fd, child, child_st)
+                    if (_fp_stat_sig(os.fstat(child_fd)) != _fp_stat_sig(child_st)
+                            or _fp_stat_sig(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                            != _fp_stat_sig(child_st)):
+                        raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+                finally:
+                    os.close(child_fd)
+        if _fp_stat_sig(os.fstat(fd)) != _fp_stat_sig(before):
+            raise CursorBoundaryError("fingerprint refused: a directory changed while reading")
+
+    try:
+        parent_fd = os.open(parent, flags)
+        try:
+            root_before = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
+            root_fd = os.open(root_name, flags, dir_fd=parent_fd)
+            try:
+                opened = os.fstat(root_fd)
+                if _fp_stat_sig(opened) != _fp_stat_sig(root_before):
+                    raise CursorBoundaryError("fingerprint refused: the root changed while opening")
+                walk(root_fd, "", opened)
+                if (_fp_stat_sig(os.fstat(root_fd)) != _fp_stat_sig(opened)
+                        or _fp_stat_sig(os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False))
+                        != _fp_stat_sig(opened)):
+                    raise CursorBoundaryError("fingerprint refused: the root changed while reading")
+            finally:
+                os.close(root_fd)
+        finally:
+            os.close(parent_fd)
+    except CursorBoundaryError:
+        raise
+    except (OSError, RecursionError) as exc:
+        detail = exc.strerror if isinstance(exc, OSError) else "directory nesting is too deep"
+        raise CursorBoundaryError("fingerprint refused: cannot enumerate (%s)" % (detail or "error"))
+
+
+def _resolve_git_dir(dotgit: str, top: str) -> "tuple[str, str, bool]":
+    """(gitdir, common, dotgit_is_file) for a `.git` entry that is a directory or a
+    standard `gitdir: <path>` pointer, cross-checked against Git; else refuse."""
+    if os.path.islink(dotgit):
+        raise CursorBoundaryError("the .git entry is a symlink")
+    is_file = os.path.isfile(dotgit)
+    if is_file:
+        try:
+            with open(dotgit, "rb") as f:
+                pointer = f.read(4096).decode("utf-8")
+        except (OSError, UnicodeError):
+            raise CursorBoundaryError("the .git pointer is unreadable")
+        m = re.fullmatch(r"gitdir: ([^\r\n\0]+)\n?", pointer)
+        if not m:
+            raise CursorBoundaryError("nonstandard .git pointer")
+        gitdir = os.path.realpath(os.path.join(top, m.group(1)))
+    elif os.path.isdir(dotgit):
+        gitdir = os.path.realpath(dotgit)
+    else:
+        raise CursorBoundaryError("the .git entry is neither a directory nor a pointer file")
+    if not os.path.isdir(gitdir):
+        raise CursorBoundaryError("the resolved Git directory does not exist")
+    cp_dir = _git(top, "rev-parse", "--absolute-git-dir")
+    cp_com = _git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not cp_dir or not cp_com or cp_dir.returncode or cp_com.returncode:
+        raise CursorBoundaryError("Git locations could not be resolved")
+    if os.path.realpath(cp_dir.stdout.strip()) != gitdir:
+        raise CursorBoundaryError("the .git pointer disagrees with Git")
+    common = os.path.realpath(cp_com.stdout.strip())
+    try:
+        with open(os.path.join(gitdir, "commondir"), "rb") as f:
+            declared = f.read(4096).decode("utf-8").strip()
+    except FileNotFoundError:
+        declared = None
+    except (OSError, UnicodeError):
+        raise CursorBoundaryError("the worktree gitdir has an unreadable commondir")
+    if declared is None:
+        if common != gitdir:            # no commondir: it must be its own common directory
+            raise CursorBoundaryError("commondir is missing but Git reports a separate common directory")
+    elif os.path.realpath(os.path.join(gitdir, declared)) != common:
+        raise CursorBoundaryError("commondir disagrees with Git")
+    return gitdir, common, is_file
+
+
+def cursor_git_locations(path: str) -> "dict | None":
+    """Resolve and verify the Git locations that must be write-denied and hashed
+    (`.git` directory/pointer, worktree gitdir, common dir). None when `path` is
+    not inside a Git repository; ambiguity or a nonstandard layout refuses."""
+    here = os.path.realpath(path)
+    top = None
+    while True:
+        if os.path.lexists(os.path.join(here, ".git")):
+            top = here
+            break
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+    gitdir, common, is_file = _resolve_git_dir(os.path.join(top, ".git"), top)
+    cp = _git(top, "rev-parse", "--show-toplevel")
+    if not cp or cp.returncode or os.path.realpath(cp.stdout.strip()) != top:
+        raise CursorBoundaryError("Git top level could not be verified")
+    return {"top": top, "dotgit": os.path.join(top, ".git"), "dotgit_is_file": is_file,
+            "gitdir": gitdir, "common": common}
+
+
+def cursor_fingerprint(path: str, git: "dict | None" = None,
+                       denials: "CursorDenials | None" = None) -> CursorFingerprint:
+    """Deterministic content fingerprint: every entry of the working tree (tracked,
+    untracked AND ignored; type, mode, symlink target, file bytes) plus the Git
+    internals that can change behaviour. Refuses when anything is uncertain."""
+    root = os.path.realpath(path)
+    _check_overlap(denials or cursor_denials(), [root])
+    git = git if git is not None else cursor_git_locations(root)
+    budget = {"entries": 0, "bytes": 0}
+    entries: "dict[str, tuple]" = {}
+    _fp_walk(root, "tree:", entries, budget, skip_top=(".git",))
+    if git:
+        if git["dotgit_is_file"]:
+            entries["git:pointer"] = _fp_entry(git["dotgit"], budget)
+        done = set()
+        for label in ("gitdir", "common"):
+            base = git[label]
+            if base in done:
+                continue
+            done.add(base)
+            for rel in _GIT_FILES:
+                target = os.path.join(base, rel)
+                key = "git:%s:%s" % (label, rel)
+                entries[key] = _fp_entry(target, budget) if os.path.lexists(target) else ("missing",)
+            for rel in _GIT_TREES:
+                target = os.path.join(base, rel)
+                key = "git:%s:%s" % (label, rel)
+                if not os.path.lexists(target):
+                    entries[key] = ("missing",)
+                    continue
+                entries[key] = _fp_entry(target, budget)
+                if entries[key][0] == "d":
+                    _fp_walk(target, key + "/", entries, budget)
+    blob = "\n".join("%s\0%r" % (k, entries[k]) for k in sorted(entries))
+    return CursorFingerprint(hashlib.sha256(blob.encode("utf-8", "surrogateescape")).hexdigest(), entries)
+
+
+def cursor_fingerprint_changes(before: CursorFingerprint, after: CursorFingerprint) -> "list[str]":
+    """Sorted entry keys that were added, removed or modified."""
+    keys = set(before.entries) | set(after.entries)
+    return sorted(k for k in keys if before.entries.get(k) != after.entries.get(k))
+
+
+class CursorRuntime:
+    """Per-dispatch owner-private writable runtime plus canaries, in the system
+    temporary directory: never below the run dir/root, source checkout, worktree
+    or a Git common dir. State/, cache/ and tmp/ are its writable children;
+    auth.json is the sole home file grant."""
+
+    def __init__(self, root: str, canary_dir: str):
+        self.root = root
+        self.state = os.path.join(root, "runtime", "state")
+        self.cache = os.path.join(root, "runtime", "cache")
+        self.tmp = os.path.join(root, "runtime", "tmp")
+        self.canary = os.path.join(root, "canary")
+        self.canary_outside = canary_dir
+        self.profile = os.path.join(root, "profile.sb")
+        self.canary_before: "dict | None" = None
+
+    def env(self, home: str) -> dict:
+        # HOME stays the real login location (only auth.json may be refreshed);
+        # writable runtime children are inside this runtime. CURSOR_INVOKED_AS is what the shell launcher would have exported.
+        # NODE_COMPILE_CACHE is the launcher's compile-cache choice replicated INSIDE the
+        # private runtime (the launcher's own choice, under the real home, is write-denied);
+        # it is removed with the runtime, so nothing persists and the real cache is untouched.
+        return {"HOME": home, "XDG_STATE_HOME": self.state, "XDG_CACHE_HOME": self.cache, "TMPDIR": self.tmp,
+                "CURSOR_INVOKED_AS": CURSOR_NAME,
+                "CURSOR_DATA_DIR": self.state, "CURSOR_CONFIG_DIR": self.state,
+                "AGENT_CLI_CREDENTIAL_STORE": "file",
+                "NODE_COMPILE_CACHE": os.path.join(self.cache, "cursor-compile-cache")}
+
+    def snapshot(self) -> dict:
+        budget = {"entries": 0, "bytes": 0}
+        out: "dict[str, tuple]" = {}
+        for label, base in (("in", self.canary), ("out", self.canary_outside)):
+            out[label] = _fp_entry(base, budget, meta=True)
+            _fp_walk(base, label + "/", out, budget, meta=True)
+        return out
+
+    def canary_changed(self) -> "list[str]":
+        after = self.snapshot()
+        before = self.canary_before or {}
+        return sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+
+    def close(self, best_effort: bool = False) -> bool:
+        """Remove and verify both private trees. Dispatch cleanup is strict;
+        process-exit cleanup alone is best-effort because it cannot report a
+        failed call to the user."""
+        failed = []
+        for path in (self.root, self.canary_outside):
+            try:
+                if os.path.lexists(path):
+                    removed = subprocess.run(["rm", "-r", "--", path], capture_output=True, text=True)
+                    if removed.returncode:
+                        _LIVE_RUNTIMES.discard(self)
+                        raise CursorBoundaryError("cleanup refused for %s: %s" % (path, redact_secrets(removed.stderr)[0].strip()))
+            except OSError:
+                failed.append(path)
+            if os.path.lexists(path) and path not in failed:
+                failed.append(path)
+        if failed:
+            if best_effort:
+                return False
+            _LIVE_RUNTIMES.add(self)
+            raise CursorBoundaryError("private runtime cleanup could not be verified")
+        _LIVE_RUNTIMES.discard(self)
+        return True
+
+
+# An interrupted run (SIGINT/SIGTERM) still removes its private runtimes at exit.
+_LIVE_RUNTIMES: "set[CursorRuntime]" = set()
+atexit.register(lambda: [rt.close(best_effort=True) for rt in list(_LIVE_RUNTIMES)])
+
+
+def _cursor_containing_repo(path: str) -> "str | None":
+    """Repository containing path, even when the configured path is not created."""
+    probe = os.path.realpath(path)
+    while not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    cp = _git(probe, "rev-parse", "--show-toplevel")
+    if cp is None:
+        raise CursorBoundaryError("a protected path could not be checked against Git")
+    return os.path.realpath(cp.stdout.strip()) if cp.returncode == 0 and cp.stdout.strip() else None
+
+
+def _cursor_runtime_forbidden(*, run_root: "str | None" = None,
+                              pdir: "str | None" = None,
+                              source: "str | None" = None,
+                              worktree: "str | None" = None,
+                              git: "dict | None" = None,
+                              extra: "tuple | list" = ()) -> "list[str]":
+    """Central runtime placement deny set. The configured/default and effective
+    caller run roots, plus every repository containing them, are mandatory;
+    dispatch callers also add explicit artifact/source/worktree/Git locations."""
+    configured_root = os.path.realpath(os.path.abspath(os.path.expanduser(
+        setting("ALLOY_RUN_ROOT") or default_run_root())))
+    run_roots = [configured_root]
+    if run_root:
+        run_roots.append(os.path.realpath(os.path.abspath(os.path.expanduser(run_root))))
+    roots = []
+    for protected_root in dict.fromkeys(run_roots):
+        roots.append(protected_root)
+        containing = _cursor_containing_repo(protected_root)
+        if containing:
+            roots.append(containing)
+    roots.extend(p for p in (pdir, source, worktree) if p)
+    if git:
+        roots.extend(git.get(k) for k in ("top", "dotgit", "gitdir", "common") if git.get(k))
+    roots.extend(p for p in extra if p)
+    return list(dict.fromkeys(os.path.realpath(p) for p in roots))
+
+
+def cursor_make_runtime(forbidden: "tuple | list" = (), *,
+                        run_root: "str | None" = None,
+                        pdir: "str | None" = None,
+                        source: "str | None" = None,
+                        worktree: "str | None" = None,
+                        git: "dict | None" = None) -> CursorRuntime:
+    """Create and verify a runtime, refusing (and removing it) when it sits under,
+    or over, any relevant path or inside any Git repository."""
+    roots = _cursor_runtime_forbidden(run_root=run_root, pdir=pdir, source=source,
+                                      worktree=worktree, git=git, extra=forbidden)
+    base = os.path.realpath(tempfile.gettempdir())
+    if any(_is_within(base, r) for r in roots) or _cursor_containing_repo(base):
+        raise CursorBoundaryError("the private runtime overlaps a repository or run path")
+    # The pinned CLI falls back to shared /tmp/.cursor if its data base exceeds 84 bytes.
+    # Keep state short even on macOS, whose default per-user temp directory is lengthy.
+    if len(os.fsencode(os.path.join(base, "alloy-cursor-XXXXXXXX", "runtime", "state"))) > 84:
+        base = "/private/tmp" if sys.platform == "darwin" else "/tmp"
+    root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-", dir=base))
+    outside = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-canary-"))
+    rt = CursorRuntime(root, outside)
+    try:
+        for d in (rt.state, rt.cache, rt.tmp, os.path.join(rt.canary, "sub")):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        for d in (root, os.path.dirname(rt.state), rt.state, rt.cache, rt.tmp, rt.canary, outside):
+            os.chmod(d, 0o700)
+        for base, name in ((rt.canary, "canary.txt"), (os.path.join(rt.canary, "sub"), "nested.txt"),
+                           (outside, "canary.txt")):
+            with open(os.path.join(base, name), "w", encoding="utf-8") as f:
+                f.write("alloy canary: never written by a Cursor process\n")
+        roots = _cursor_runtime_forbidden(run_root=run_root, pdir=pdir, source=source,
+                                          worktree=worktree, git=git, extra=forbidden)
+        for p in (root, rt.state, rt.cache, rt.tmp, outside):
+            if any(_related(p, r) for r in roots):
+                raise CursorBoundaryError("the private runtime overlaps a repository or run path")
+            cp = _git(p, "rev-parse", "--show-toplevel")
+            if cp is None:
+                raise CursorBoundaryError("the private runtime could not be checked against Git")
+            if cp.returncode == 0:
+                raise CursorBoundaryError("the private runtime is inside a Git repository")
+        rt.canary_before = rt.snapshot()
+        _LIVE_RUNTIMES.add(rt)
+        return rt
+    except BaseException:
+        rt.close()
+        raise
+
+
+# -- boundary readiness and preflight -------------------------------------------- #
+# `exe` is the pinned build's own `node` and `script` its `index.js`; every Cursor argv is
+# `<exe> --use-system-ca <script> <tail>`. `execs` are the other literal executables a
+# panel/Checker profile allows next to `exe` (the build's bundled rg and the OS-version tool of
+# CURSOR_SYSTEM_EXEC), each verified before the boundary is ready.
+CursorBoundary = namedtuple("CursorBoundary", "ready reason version exe script execs", defaults=(None, ()))
+_CURSOR_PREFLIGHT: "dict[tuple, CursorBoundary]" = {}
+
+# Probe run under the production profile with /bin/bash (plus /bin/ln, the Unix-socket
+# client CURSOR_SOCKET_PROBE_TOOL and the Mach-lookup client, the running interpreter) as
+# the only extra executables. /bin/sh is NOT used: on macOS it is a small shim that
+# re-execs the /var/select/sh target, which the panel profile's exec denial would refuse.
+# One line per operation; a mock sandbox-exec recognises the marker on line one.
+_PREFLIGHT_SCRIPT = r'''# ALLOY_PREFLIGHT_PROBE
+T=$1 W=$2 O=$3 D=$4 L=$5 G=$6 C=$7 P=$8 S=$9 N=${10} M=${11} Y=${12} Z=${13} A=${14}
+shift 14
+w() { ( : > "$1" ) 2>/dev/null && echo "$2=allow" || echo "$2=deny"; }
+w "$T/probe" tmp_write
+w "$W/probe" workspace_write
+w "$O/probe" outside_write
+w "$G/probe" gitdir_write
+w "$C/probe" common_write
+w "$P" dotgit_write
+( read _x < "$D" ) 2>/dev/null && echo denied_read=allow || echo denied_read=deny
+( /bin/ln "$L" "$T/link" ) 2>/dev/null && echo link=allow || echo link=deny
+( /usr/bin/true ) 2>/dev/null && echo exec=allow || echo exec=deny
+( "$N" -U -w 1 "$M" </dev/null ) >/dev/null 2>&1 && echo unix_allowed=allow || echo unix_allowed=deny
+( "$N" -U -w 1 "$S" </dev/null ) >/dev/null 2>&1 && echo unix_connect=allow || echo unix_connect=deny
+( "$Y" -I -S -c "$Z" "$A" ) >/dev/null 2>&1; [ $? -eq 65 ] && echo mach_allowed=allow || echo mach_allowed=deny
+( "$Y" -I -S -c "$Z" "$@" ) >/dev/null 2>&1; [ $? -eq 64 ] && echo mach_relay=deny || echo mach_relay=allow
+'''
+# `unix_allowed` is the positive control (the resolver socket the profile permits must
+# connect, which also proves the client tool runs under the profile); `unix_connect` is
+# the parent's fixture socket and must be denied. The parent also counts what its
+# listener actually accepted, so a client that silently failed cannot pass as "denied".
+# `mach_allowed` is the Mach positive control (exit 65: exactly one allowlisted name
+# resolved, so the client runs and the allowlist is not "everything denied"); `mach_relay`
+# passes only on exit 64: the client ran and NONE of CURSOR_MACH_RELAY_SERVICES resolved.
+# Every other status (launcher crash 1, exec denied 126, missing 127, error 99, a signal)
+# reads as a failed control or a leak, never as a denial. The script's 64/65 are
+# CURSOR_MACH_EXIT_BASE (+0 and +1).
+_PREFLIGHT_EXPECTED = {
+    "panel": {"tmp_write": "allow", "workspace_write": "deny", "outside_write": "deny",
+              "gitdir_write": "deny", "common_write": "deny", "dotgit_write": "deny",
+              "denied_read": "deny", "link": "deny", "exec": "deny",
+              "unix_allowed": "allow", "unix_connect": "deny",
+              "mach_allowed": "allow", "mach_relay": "deny"},
+    "maker": {"tmp_write": "allow", "workspace_write": "allow", "outside_write": "deny",
+              "gitdir_write": "deny", "common_write": "deny", "dotgit_write": "deny",
+              "denied_read": "deny", "link": "deny", "exec": "allow",
+              "unix_allowed": "allow", "unix_connect": "deny",
+              "mach_allowed": "allow", "mach_relay": "deny"},
+}
+
+
+class _ProbeSocket:
+    """A listening Unix-domain socket owned by the parent. It exists only so the
+    sandbox self-test can prove a sandboxed client cannot reach an unsandboxed
+    server: `accepted` counts real connections."""
+
+    def __init__(self, path: str):
+        if len(os.fsencode(path)) > 100:
+            raise CursorBoundaryError("the sandbox self-test socket path is too long")
+        self.path, self.accepted = path, 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.srv.bind(path)
+            self.srv.listen(8)
+            self.srv.settimeout(0.2)
+        except OSError:
+            self.srv.close()
+            raise CursorBoundaryError("the sandbox self-test socket could not be created")
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            conn.close()
+            with self._lock:
+                self.accepted += 1
+
+    def take(self, wait: float = 0.0) -> int:
+        """Connections accepted since the last call (optionally after a short settle)."""
+        if wait:
+            time.sleep(wait)
+        with self._lock:
+            count, self.accepted = self.accepted, 0
+        return count
+
+    def control(self) -> None:
+        """An unsandboxed client must reach the listener, or a later 'denied' proves nothing."""
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            client.settimeout(2)
+            client.connect(self.path)
+        except OSError:
+            raise CursorBoundaryError("the sandbox self-test socket is not reachable")
+        finally:
+            client.close()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if self.take():
+                return
+            time.sleep(0.02)
+        raise CursorBoundaryError("the sandbox self-test socket did not accept a control connection")
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self.srv.close()
+        except OSError:
+            pass
+        self.thread.join(2)
+
+
+def _verify_sandbox_exec() -> tuple:
+    try:
+        st = os.lstat(SANDBOX_EXEC)
+    except OSError:
+        raise CursorBoundaryError("sandbox-exec is missing")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise CursorBoundaryError("sandbox-exec is not a regular, non-symlink file")
+    if st.st_uid != SANDBOX_TRUSTED_UID:
+        raise CursorBoundaryError("sandbox-exec is not owned by the trusted user")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise CursorBoundaryError("sandbox-exec is writable by group or other")
+    if not os.access(SANDBOX_EXEC, os.X_OK):
+        raise CursorBoundaryError("sandbox-exec is not executable")
+    return (SANDBOX_EXEC, st.st_ino, st.st_size, st.st_mtime_ns, st.st_uid)
+
+
+def _cursor_probe_interpreters() -> "tuple[str, ...]":
+    """The interpreter the Mach self-test runs (first) and every image its exec chain
+    reaches. On macOS a framework Python's `bin/python3` is a launcher that execs
+    `Python.app/Contents/MacOS/Python`, and `sys.executable` names the launcher, not the
+    image. The panel profile denies every exec it does not list, so a chain with one
+    unlisted link would refuse the client on every real machine (the same trap as the
+    `/bin/sh` shim). The running image is asked of dyld; if it cannot be identified the
+    self-test cannot be trusted and the boundary is refused."""
+    launcher = os.path.realpath(sys.executable) if sys.executable else ""
+    if not launcher or not os.path.isfile(launcher) or not os.access(launcher, os.X_OK):
+        raise CursorBoundaryError("the sandbox self-test needs the running Python interpreter")
+    if sys.platform != "darwin":        # no launcher chain; Cursor itself is refused off macOS
+        return (launcher,)
+    try:
+        import ctypes
+        buf = ctypes.create_string_buffer(4096)
+        size = ctypes.c_uint32(len(buf))
+        rc = ctypes.CDLL(None)._NSGetExecutablePath(buf, ctypes.byref(size))
+        image = os.path.realpath(os.fsdecode(buf.value)) if rc == 0 and buf.value else ""
+    except Exception:
+        image = ""
+    if not image or not os.path.isfile(image) or not os.access(image, os.X_OK):
+        raise CursorBoundaryError("the sandbox self-test could not identify the running Python image")
+    return tuple(dict.fromkeys((launcher, image)))
+
+
+# -- the pinned Cursor build: resolution without executing anything ------------------ #
+# What Alloy starts is not the `cursor-agent` a user runs (a bash launcher that needs
+# `basename`, `dirname`, `realpath` and a shell, all of which a panel/Checker profile denies)
+# but the build's own bundled runtime: `<dir>/node --use-system-ca <dir>/index.js <args>`.
+CursorBuild = namedtuple("CursorBuild", "dir node script build sig rg", defaults=(None,))
+
+
+def _cursor_trusted_entry(path: str, what: str, *, directory: bool = False,
+                          executable: bool = False) -> os.stat_result:
+    """One part of a Cursor build, examined with lstat: it must be a regular file (or a
+    real directory for the build directory itself), never a symlink, owned by the current
+    user and not writable by group or other. Anything else is not something Alloy runs."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        raise CursorBoundaryError("the Cursor build has no %s" % what)
+    right_kind = stat.S_ISDIR(st.st_mode) if directory else stat.S_ISREG(st.st_mode)
+    if stat.S_ISLNK(st.st_mode) or not right_kind:
+        raise CursorBoundaryError("the Cursor build's %s is not a regular %s" % (
+            what, "directory" if directory else "file"))
+    if st.st_uid != os.getuid():
+        raise CursorBoundaryError("the Cursor build's %s is not owned by the current user" % what)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise CursorBoundaryError("the Cursor build's %s is writable by group or other" % what)
+    if executable and not os.access(path, os.X_OK):
+        raise CursorBoundaryError("the Cursor build's %s is not executable" % what)
+    return st
+
+
+def _cursor_is_script(path: str) -> bool:
+    """True for a regular file that starts with `#!`: a wrapper or guard script. Only those
+    two bytes are read; the file is never executed."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode) and os.read(fd, 2) == b"#!"
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def cursor_resolve_build(bin_path: "str | None") -> CursorBuild:
+    """The pinned build directory behind a `cursor-agent` path, verified. Nothing is executed.
+
+    `realpath` follows the whole symlink chain (PATH entry, `agent` / `cursor-agent`
+    symlinks). When the file it lands on sits in a build directory (`<versions>/<build>/`),
+    that directory is the build. When it does not -- a local wrapper or guard script is a
+    regular file with no further link to follow -- the wrapper is not run (nor read beyond
+    its `#!` marker), and the supported build under CURSOR_VERSIONS_ROOT in the login home
+    is used instead. Anything that is neither is refused. Either
+    way the directory name must be a build Alloy has measured, and the directory, `node`,
+    `index.js` and the bundled `rg` must be owned by the current user and not writable by
+    group or other, `node` and `rg` executable, and none of them a symlink."""
+    if not bin_path:
+        raise CursorBoundaryError("the Cursor CLI was not found")
+    real = os.path.realpath(bin_path)
+    if not os.path.exists(real):        # an explicit path that is not there never falls back
+        raise CursorBoundaryError("the Cursor CLI was not found")
+    holder = real if os.path.isdir(real) else os.path.dirname(real)
+    if CURSOR_BUILD_DIR_RE.match(os.path.basename(holder)):
+        candidates = [holder]
+    else:
+        if not _cursor_is_script(real):
+            raise CursorBoundaryError("the Cursor CLI path is neither inside a Cursor build directory "
+                                      "nor a wrapper script")
+        root = os.path.realpath(os.path.join(cursor_login_home(), CURSOR_VERSIONS_ROOT))
+        candidates = [os.path.join(root, name) for name in CURSOR_SUPPORTED_VERSIONS]
+    present = [c for c in candidates if os.path.lexists(c)]
+    if not present:
+        raise CursorBoundaryError("no supported Cursor build directory was found (the build "
+                                  "directory must hold node and index.js)")
+    build_dir = present[0]
+    name = os.path.basename(build_dir)
+    if name not in CURSOR_SUPPORTED_VERSIONS:
+        raise CursorBoundaryError("unsupported Cursor CLI version/build: the build directory is "
+                                  "not a build Alloy has measured")
+    dir_st = _cursor_trusted_entry(build_dir, "directory", directory=True)
+    node, script = os.path.join(build_dir, "node"), os.path.join(build_dir, "index.js")
+    node_st = _cursor_trusted_entry(node, "node runtime", executable=True)
+    script_st = _cursor_trusted_entry(script, "index.js")
+    rg = os.path.join(build_dir, "rg")
+    rg_st = _cursor_trusted_entry(rg, "bundled rg", executable=True)      # verified like node
+    sig = (build_dir, dir_st.st_ino, _fp_stat_sig(node_st), _fp_stat_sig(script_st), _fp_stat_sig(rg_st))
+    return CursorBuild(build_dir, node, script, name, sig, rg)
+
+
+def _cursor_system_execs() -> "tuple[tuple[str, ...], tuple]":
+    """The verified system executables a panel/Checker profile may run: each must be a regular,
+    non-symlink file owned by the trusted (root) user, not writable by group or other, and
+    executable -- the checks sandbox-exec gets. Returns (paths, signature for the cache key)."""
+    paths, sigs = [], []
+    for path in CURSOR_SYSTEM_EXEC:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            raise CursorBoundaryError("%s is missing" % path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise CursorBoundaryError("%s is not a regular, non-symlink file" % path)
+        if st.st_uid != SANDBOX_TRUSTED_UID:
+            raise CursorBoundaryError("%s is not owned by the trusted user" % path)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise CursorBoundaryError("%s is writable by group or other" % path)
+        if not os.access(path, os.X_OK):
+            raise CursorBoundaryError("%s is not executable" % path)
+        paths.append(path)
+        sigs.append((path, st.st_ino, st.st_size, st.st_mtime_ns, st.st_uid))
+    return tuple(paths), tuple(sigs)
+
+
+def cursor_base_env(source: "dict | None" = None) -> dict:
+    """The allowlisted part of an environment. A proxy variable that embeds
+    credentials (`scheme://user:secret@host`) is dropped rather than forwarded."""
+    env = {}
+    for name, value in (os.environ if source is None else source).items():
+        if not isinstance(value, str):
+            continue
+        if not (name in CURSOR_ENV_ALLOW or name.startswith(CURSOR_ENV_ALLOW_PREFIXES)):
+            continue
+        if name in _CURSOR_PROXY_ENV and _URL_USERINFO_RE.search(value):
+            continue
+        env[name] = value
+    return env
+
+
+def cursor_child_env(rt: CursorRuntime, home: "str | None" = None) -> dict:
+    """Child environment for every Cursor process: an explicit allowlist (no router
+    or Cursor API credential, no ambient cloud/VCS token, no IPC hook such as
+    SSH_AUTH_SOCK or TMUX), plus only the exact private runtime children. HOME stays
+    the real login location (only the CLI file login may be refreshed)."""
+    env = cursor_base_env()
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("TERM", "dumb")
+    env.setdefault("CI", "1")
+    env.update(rt.env(home or cursor_login_home()))
+    return env
+
+
+def _write_profile(rt: CursorRuntime, text: str) -> None:
+    fd = os.open(rt.profile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _run_preflight(build: CursorBuild, home: str, den: CursorDenials,
+                   run_root: "str | None" = None, execs: "tuple" = ()) -> CursorBoundary:
+    """Prove, through the production profile generator, that reads/writes/links/
+    process execution, Unix sockets and Mach lookups behave as the roles require AND
+    that the CLI still starts (which is what proves the Mach allowlist is sufficient).
+    The CLI is started exactly as production starts it: the build's own node, directly."""
+    exe, script = build.node, build.script
+    rt = cursor_make_runtime(forbidden=[exe], run_root=run_root)
+    root = rt.root
+    try:
+        wt, gitdir, common = (os.path.join(root, n) for n in ("wt", "gitdir", "common"))
+        denied = os.path.join(rt.canary_outside, "denied")
+        outside = os.path.join(root, "outside")
+        for d in (wt, gitdir, common, denied, outside):
+            os.makedirs(d, mode=0o700)
+        for path, body in ((os.path.join(wt, "tracked.txt"), "x\n"), (os.path.join(wt, ".git"), "gitdir: %s\n" % gitdir),
+                           (os.path.join(denied, "sentinel.txt"), "sentinel\n")):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+        # The fixture denial is a CONFIGURED one, added to the real set.
+        probe_den = CursorDenials(den.paths + (denied,), den.regexes, den.anchors)
+        git = {"top": wt, "dotgit": os.path.join(wt, ".git"), "dotgit_is_file": True,
+               "gitdir": gitdir, "common": common}
+        required = [exe, script, build.dir, root] + list(execs)
+        _check_overlap(den, required)
+        version = ""
+        interpreters = _cursor_probe_interpreters()
+        python = interpreters[0]            # what bash execs; the rest of the chain is allowed too
+        fixture = _ProbeSocket(os.path.join(root, "probe.sock"))
+        try:
+            fixture.control()
+            for role in ("panel", "maker"):
+                _write_profile(rt, cursor_sbpl(role, exe="/bin/bash", runtime=rt, denials=probe_den,
+                                               worktree=wt, git=git,
+                                               extra_exec=("/bin/ln", CURSOR_SOCKET_PROBE_TOOL) + interpreters))
+                ran = _run_bounded(
+                    [SANDBOX_EXEC, "-f", rt.profile, "/bin/bash", "-c", _PREFLIGHT_SCRIPT, "bash",
+                     rt.tmp, wt, outside, os.path.join(denied, "sentinel.txt"), os.path.join(wt, "tracked.txt"),
+                     gitdir, common, os.path.join(wt, ".git"), fixture.path, CURSOR_SOCKET_PROBE_TOOL,
+                     CURSOR_ALLOWED_UNIX_SOCKET, python, _MACH_PROBE_PY, CURSOR_MACH_PROBE_ALLOWED,
+                     *CURSOR_MACH_RELAY_SERVICES],
+                    env=cursor_child_env(rt, home), cwd=rt.tmp, timeout=20, cap=65536)
+                if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"]:
+                    raise CursorBoundaryError("the OS sandbox self-test did not run (%s profile)" % role)
+                got = dict(line.split("=", 1) for line in ran["out"].decode("utf-8", "replace").split()
+                           if line.count("=") == 1)
+                if fixture.take(wait=0.3):      # the listener's own count outranks the client's report
+                    got["unix_connect"] = "allow"
+                if got != _PREFLIGHT_EXPECTED[role]:
+                    bad = sorted(k for k in _PREFLIGHT_EXPECTED[role]
+                                 if got.get(k) != _PREFLIGHT_EXPECTED[role][k])
+                    raise CursorBoundaryError("the OS sandbox self-test failed for the %s profile: %s" % (
+                        role, ", ".join(bad) or "unparseable result"))
+                # Same generator, real CLI, no extra executables: it must still start.
+                version_rt = cursor_make_runtime(forbidden=[exe], run_root=run_root)
+                try:
+                    argv = _cursor_validated_spawn(
+                        "version", ["--version"], exe=exe, script=script, execs=execs, runtime=version_rt,
+                        profile_role=role, denials=probe_den, worktree=wt if role == "maker" else None,
+                        git=git, required=[exe, script, build.dir, root, wt, gitdir, common])
+                    ran = _run_bounded(argv, env=cursor_child_env(version_rt, home), cwd=version_rt.tmp,
+                                       timeout=30, cap=65536)
+                finally:
+                    version_rt.close()
+                text = strip_ansi((ran["out"] + ran["err"]).decode("utf-8", "replace")).strip()
+                m = CURSOR_VERSION_RE.search(text)
+                if ran["rc"] != 0 or ran["overflow"] or not ran["group_dead"] or not m:
+                    raise CursorBoundaryError("the Cursor CLI does not start under the %s profile" % role)
+                if m.group(1) not in CURSOR_SUPPORTED_VERSIONS:
+                    raise CursorBoundaryError("unsupported Cursor CLI version/build")
+                if m.group(1) != build.build:
+                    raise CursorBoundaryError("the Cursor CLI reports a different build than its directory")
+                version = text.splitlines()[0][:80]
+        finally:
+            fixture.close()
+        return CursorBoundary(True, "", version, exe, script, tuple(execs))
+    finally:
+        rt.close()
+
+
+def cursor_boundary(bin_path: "str | None",
+                    run_root: "str | None" = None) -> CursorBoundary:
+    """Whether ANY Cursor process may start. Independent of the role's read_only
+    flag; ALLOY_ALLOW_UNSANDBOXED never affects it. macOS only. Cached per process
+    on everything the verdict depends on."""
+    try:
+        if sys.platform != CURSOR_PLATFORM:
+            raise CursorBoundaryError("unsupported platform (Cursor roles require macOS sandbox-exec)")
+        sandbox_sig = _verify_sandbox_exec()
+        build = cursor_resolve_build(bin_path)
+        system_paths, system_sig = _cursor_system_execs()
+        execs = ((build.rg,) if build.rg else ()) + system_paths
+        home = cursor_login_home()
+        den = cursor_denials(home)
+        effective_root = (os.path.realpath(os.path.abspath(os.path.expanduser(run_root)))
+                          if run_root else None)
+        key = (sandbox_sig, build.sig, system_sig, CURSOR_NODE_ARGS, CURSOR_SANDBOX_PROFILE_VERSION,
+               ALLOY_VERSION, home, den, effective_root)
+        if key not in _CURSOR_PREFLIGHT:
+            try:
+                _CURSOR_PREFLIGHT[key] = _run_preflight(build, home, den, effective_root, execs)
+            except CursorBoundaryError as exc:
+                _CURSOR_PREFLIGHT[key] = CursorBoundary(False, str(exc), "", build.node, build.script, execs)
+            except (OSError, subprocess.SubprocessError) as exc:
+                _CURSOR_PREFLIGHT[key] = CursorBoundary(False, "the OS sandbox self-test could not run (%s)" % (
+                    type(exc).__name__), "", build.node, build.script, execs)
+        return _CURSOR_PREFLIGHT[key]
+    except CursorBoundaryError as exc:
+        return CursorBoundary(False, str(exc), "", None)
+
+
+# -- the spawn gateway ------------------------------------------------------------- #
+def _cursor_staged_file(path: "str | None") -> str:
+    """Canonical regular, non-symlink staged prompt. Merely checking its parent
+    would let an exact-file denial or a final symlink bypass the gateway."""
+    if not isinstance(path, str) or not os.path.isabs(path) or path != os.path.realpath(path):
+        raise CursorBoundaryError("the staged prompt is not canonical")
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            raise CursorBoundaryError("the staged prompt is not a regular non-symlink file")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            fst = os.fstat(fd)
+            if _fp_stat_sig(fst) != _fp_stat_sig(st) or not stat.S_ISREG(fst.st_mode):
+                raise CursorBoundaryError("the staged prompt changed while being validated")
+        finally:
+            os.close(fd)
+    except CursorBoundaryError:
+        raise
+    except OSError:
+        raise CursorBoundaryError("the staged prompt could not be validated")
+    return path
+
+
+def _cursor_stage_prompt(prompt_path: str, pdir: str) -> str:
+    """Create the staged prompt once beneath canonical, non-symlink directories.
+
+    O_EXCL and O_NOFOLLOW ensure an existing file or symlink is refused before
+    any prompt byte is written.
+    """
+    pdir = os.path.realpath(os.path.abspath(pdir))
+    os.makedirs(pdir, mode=0o700, exist_ok=True)
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    pfd = pinfd = srcfd = dstfd = None
+    created = complete = False
+    try:
+        pfd = os.open(pdir, dir_flags)
+        try:
+            os.mkdir("prompt_in", mode=0o700, dir_fd=pfd)
+        except FileExistsError:
+            pass
+        named = os.stat("prompt_in", dir_fd=pfd, follow_symlinks=False)
+        if not stat.S_ISDIR(named.st_mode):
+            raise CursorBoundaryError("the prompt staging directory is not a regular directory")
+        pinfd = os.open("prompt_in", dir_flags, dir_fd=pfd)
+        if _fp_stat_sig(os.fstat(pinfd)) != _fp_stat_sig(named):
+            raise CursorBoundaryError("the prompt staging directory changed while opening")
+        os.fchmod(pinfd, 0o700)
+
+        srcfd = os.open(prompt_path, os.O_RDONLY)
+        source_before = os.fstat(srcfd)
+        dstfd = os.open("prompt.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600, dir_fd=pinfd)
+        created = True
+        total = 0
+        while True:
+            chunk = os.read(srcfd, 1 << 20)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dstfd, view)
+                if written <= 0:
+                    raise OSError("short prompt write")
+                view = view[written:]
+            total += len(chunk)
+        source_after = os.fstat(srcfd)
+        staged_stat = os.fstat(dstfd)
+        if (_fp_stat_sig(source_after) != _fp_stat_sig(source_before)
+                or total != source_before.st_size or staged_stat.st_size != total
+                or not stat.S_ISREG(staged_stat.st_mode)):
+            raise OSError("prompt changed or copied incompletely")
+        os.fchmod(dstfd, 0o600)
+        complete = True
+        return os.path.join(pdir, "prompt_in", "prompt.md")
+    except CursorBoundaryError:
+        raise
+    except OSError:
+        raise CursorBoundaryError("the prompt could not be staged")
+    finally:
+        if created and not complete and pinfd is not None:
+            try:
+                os.unlink("prompt.md", dir_fd=pinfd)
+            except OSError:
+                pass
+        for fd in (dstfd, srcfd, pinfd, pfd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def _cursor_validated_spawn(validation_role: str, tail: "list[str]", *,
+                            exe: str, script: "str | None", runtime: CursorRuntime, profile_role: str,
+                            execs: "tuple | list" = (),
+                            denials: CursorDenials, workspace: "str | None" = None,
+                            staged: "str | None" = None,
+                            expected_model: "str | None" = None,
+                            worktree: "str | None" = None,
+                            git: "dict | None" = None,
+                            required: "tuple | list" = ()) -> "list[str]":
+    """Non-recursive final spawn builder shared by preflight and normal calls.
+
+    The closed grammar validates `tail` only, exactly as before. `exe` is the build's own
+    `node`; with `execs` (the bundled rg and the OS-version tool of CURSOR_SYSTEM_EXEC) it is the
+    profile's complete list of allowed executables. The runtime binary's fixed arguments and
+    the entry script are prepended AFTER validation, so the grammar never has to admit them
+    and no caller can supply or replace them."""
+    if not exe or not script:
+        raise CursorBoundaryError("the Cursor runtime and entry script are unresolved")
+    cursor_validate_argv(validation_role, tail, workspace=workspace, staged=staged,
+                         expected_model=expected_model)
+    _check_overlap(denials, [exe, script, os.path.dirname(script), runtime.root] + list(execs) + list(required))
+    _write_profile(runtime, cursor_sbpl(profile_role, exe=exe, runtime=runtime,
+                                        denials=denials, worktree=worktree, git=git,
+                                        extra_exec=tuple(execs)))
+    fixed = ["--sandbox", "disabled"] if validation_role in _CURSOR_METADATA else []
+    return [SANDBOX_EXEC, "-f", runtime.profile, exe, *CURSOR_NODE_ARGS, script] + list(tail) + fixed
+
+
+def _cursor_require_owned_worktree(ws: str, git: "dict | None", managed_worktree: bool,
+                                   cwd: "str | None") -> None:
+    """A Maker's write grant is its whole workspace, so that workspace must be
+    provably the Alloy-owned linked worktree the run was dispatched into: a managed
+    dispatch, a linked worktree (its `.git` is a pointer to `<common>/worktrees/<id>`,
+    never an ordinary checkout's `.git` directory) and a working directory equal to
+    the workspace, so the grant and the process's own cwd cannot disagree."""
+    if managed_worktree is not True:
+        raise CursorBoundaryError("a Maker runs only in a managed, Alloy-owned worktree")
+    if (not git or git["top"] != ws or not git["dotgit_is_file"]
+            or not os.path.basename(git["gitdir"])
+            or os.path.dirname(git["gitdir"]) != os.path.join(git["common"], "worktrees")):
+        raise CursorBoundaryError("a Maker workspace must be the root of a linked Git worktree "
+                                  "(its .git pointer must resolve to <common>/worktrees/<id>)")
+    if not cwd or os.path.realpath(cwd) != ws:
+        raise CursorBoundaryError("a Maker's working directory must be its workspace")
+
+
+def cursor_command(role: str, tail: "list[str]", *, exe: str, runtime: CursorRuntime,
+                   workspace: "str | None" = None, staged: "str | None" = None,
+                   expected_model: "str | None" = None,
+                   run_root: "str | None" = None, managed_worktree: bool = False,
+                   cwd: "str | None" = None) -> "list[str]":
+    """The ONLY way to obtain a Cursor argv: validates the boundary, validates the
+    final argv (after every rewrite) against the role's closed grammar, creates
+    the owner-private profile and returns
+    `sandbox-exec -f <profile> <build>/node --use-system-ca <build>/index.js ...`.
+    `exe` is whatever `cursor-agent` path the caller has; it is only resolved to the
+    pinned build directory (never executed).
+    Raises CursorBoundaryError when anything is not provably safe. A Maker
+    additionally needs `managed_worktree` and a `cwd` equal to the workspace."""
+    boundary = cursor_boundary(exe, run_root=run_root)
+    if not boundary.ready:
+        raise CursorBoundaryError(boundary.reason)
+    exe, script, execs = boundary.exe, boundary.script, boundary.execs    # the build's node and index.js, never the launcher
+    home = cursor_login_home()
+    den = cursor_denials(home)
+    profile_role = "maker" if role == "maker" else "panel"
+    worktree = git = None
+    required = [exe, script, runtime.root]
+    if role in ("panel", "maker"):
+        ws = _canon_grant(workspace, "the workspace")
+        staged = _cursor_staged_file(staged)
+        git = cursor_git_locations(ws)
+        required += [ws, os.path.dirname(staged), staged]
+        if git:
+            required += [git["gitdir"], git["common"]]
+        if role == "maker":
+            worktree = ws
+            _cursor_require_owned_worktree(ws, git, managed_worktree, cwd)
+    else:
+        ws = None
+    return _cursor_validated_spawn(
+        role, tail, exe=exe, script=script, execs=execs, runtime=runtime, profile_role=profile_role,
+        denials=den, workspace=ws, staged=staged, expected_model=expected_model,
+        worktree=worktree, git=git, required=required)
+
+
+def cursor_metadata(kind: str, bin_path: "str | None", timeout: float = 20.0,
+                    run_root: "str | None" = None) -> "tuple[int | None, str]":
+    """Run `status`, `--version`, `--help` or `--list-models` through the gateway
+    with the private runtime, cleaned env, stdin=DEVNULL and bounded output.
+    Returns (returncode or None on timeout, ANSI-stripped text). Raises
+    CursorBoundaryError when the boundary is not ready."""
+    boundary = cursor_boundary(bin_path, run_root=run_root)
+    if not boundary.ready:
+        raise CursorBoundaryError(boundary.reason)
+    rt = cursor_make_runtime([boundary.exe], run_root=run_root)
+    try:
+        argv = cursor_command(kind, _CURSOR_METADATA[kind], exe=bin_path, runtime=rt,
+                              run_root=run_root)
+        ran = _run_bounded(argv, env=cursor_child_env(rt), cwd=rt.tmp, timeout=timeout, cap=65536)
+        if ran["overflow"] or not ran["group_dead"]:
+            raise CursorBoundaryError("Cursor metadata output was not bounded")
+        return ran["rc"], strip_ansi((ran["out"] + ran["err"]).decode("utf-8", "replace"))
+    finally:
+        rt.close()
+
+
+def mask_account(text: str) -> str:
+    """At most the first character and a masked domain suffix of an account name."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    local, at, domain = text.partition("@")
+    masked = local[:1] + "***"
+    if at:
+        tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+        masked += "@***" + ("." + re.sub(r"[^A-Za-z0-9]", "", tld)[:8] if tld else "")
+    return masked
+
+
+_CURSOR_LOGGED_IN_RE = re.compile(r"^\W*Logged in(?: as\s+(\S+))?\s*$", re.I | re.M)
+_CURSOR_LOGGED_OUT_RE = re.compile(r"not logged in|not authenticated|logged out|please log ?in", re.I)
+
+
 class CursorAgentAdapter(Adapter):
-    # cursor-agent --print runs non-interactively but has NO read-only mode (its
-    # own help: "access to all tools, including write and bash"). Registered for
-    # visibility; refused by default. See docs/adding-a-panelist.md.
-    name = "cursor-agent"
+    # Cursor's CLI as a panelist, Checker and (managed) Maker. Canonical public
+    # name `cursor`; the executable stays `cursor-agent`. Nothing here is trusted
+    # to keep it read-only: --mode ask is defence in depth, and the OS write
+    # boundary (cursor_command) is what a run depends on. The role's `read_only`
+    # is a role flag; `cursor_boundary_ready` is separate and read-only, so the
+    # per-instance Maker subclass that clears `read_only` cannot change it.
+    name = "cursor"
     bin = "cursor-agent"
-    read_only = False
-    experimental = True
+    read_only = True
+    requires_os_boundary = True
+    stdin_from_prompt = False       # the prompt is a staged file; stdin is DEVNULL
+    capture_in_memory = True        # never point the child at the final sidecars
+    kill_group_on_exit = True       # the whole group must be dead before any tripwire
     install_hint = "see https://cursor.com/cli"
-    auth_hint = "cursor-agent login"
+    auth_hint = "AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login"
+    default_model = CURSOR_DEFAULT_MODEL
+    bin_env_keys = ("ALLOY_BIN_CURSOR", "ALLOY_BIN_CURSOR_AGENT")
+
+    def detect(self) -> bool:
+        path = self.resolved_bin()
+        return bool(path and os.path.exists(path))
+
+    # -- boundary ------------------------------------------------------------- #
+    def _boundary(self, run_root: "str | None" = None) -> CursorBoundary:
+        if not self.detect():
+            return CursorBoundary(False, "the Cursor CLI was not found", "", None)
+        return cursor_boundary(self.resolved_bin(), run_root=run_root)
+
+    @property
+    def cursor_boundary_ready(self) -> bool:
+        return self._boundary().ready
+
+    @property
+    def boundary_reason(self) -> str:
+        return self._boundary().reason
+
+    @property
+    def experimental(self) -> bool:   # type: ignore[override]
+        return not self.cursor_boundary_ready
+
+    # -- detection / auth ----------------------------------------------------- #
+    def auth_state(self) -> str:
+        if not self.detect():
+            return "not_installed"
+        if not self.cursor_boundary_ready:
+            return "sandbox_unavailable"
+        return "ready" if self.is_authed() else "installed_not_authed"
+
+    def is_authed(self) -> bool:
+        cached = getattr(self, "_auth_cache", None)
+        if cached is not None:
+            return cached[0]
+        ok, detail, reason = False, None, "auth_unknown"
+        try:
+            rc, text = cursor_metadata("status", self.resolved_bin())
+            m = _CURSOR_LOGGED_IN_RE.search(text)
+            if rc == 0 and m:
+                ok, reason = True, None
+                detail = mask_account(m.group(1) or "") or None
+            elif _CURSOR_LOGGED_OUT_RE.search(text):
+                reason = "not_logged_in"
+        except (CursorBoundaryError, OSError, subprocess.SubprocessError):
+            pass
+        self._auth_cache = (ok, detail, reason)
+        return ok
+
+    def auth_detail(self) -> "str | None":
+        self.is_authed()
+        return self._auth_cache[1]
+
+    def auth_reason(self) -> "str | None":
+        self.is_authed()
+        return self._auth_cache[2]
+
+    def cli_version(self) -> str:
+        return self._boundary().version    # from the sandboxed preflight; never a direct spawn
 
     def model(self) -> "str | None":
-        return setting("ALLOY_CURSOR_AGENT_MODEL")
+        return _first_setting("ALLOY_CURSOR_MODEL", "ALLOY_CURSOR_AGENT_MODEL") or self.default_model
 
+    def effort(self) -> "str | None":
+        value = _first_setting("ALLOY_CURSOR_EFFORT", "ALLOY_CURSOR_AGENT_EFFORT")
+        return None if not value or value.lower() in ("inherit", "default") else value.lower()
+
+    def deprecations(self) -> "list[str]":
+        if not setting("ALLOY_CURSOR_MODEL") and setting("ALLOY_CURSOR_AGENT_MODEL"):
+            return ["ALLOY_CURSOR_AGENT_MODEL is deprecated; use ALLOY_CURSOR_MODEL"]
+        return []
+
+    def effective_model(self) -> str:
+        """The single `--model` string: the pin/default with an optional effort
+        override. Lane 2 owns the routed/profile rewrite; here `auto`, unknown
+        families, `ultra` and any fast variant (no profile can opt in) are refused."""
+        return cursor_effective_model(self.model(), self.effort())
+
+    # -- invocation ------------------------------------------------------------- #
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
-        args = ["--print", "--output-format", "text"]
-        m = self.model()
-        if m:
-            args += ["--model", m]
-        return args
+        ctx = ctx if ctx is not None else {}
+        pdir = os.path.realpath(
+            ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path)))
+        workspace = ctx.get("repo") or ctx.get("cwd")
+        if not workspace:
+            raise CursorBoundaryError("no workspace for the Cursor call")
+        workspace = os.path.realpath(workspace)
+        # The complete prompt is a staged, owner-only file; only a short pointer
+        # reaches argv, so task text can never appear in `ps`, status or ARG_MAX.
+        staged = _cursor_stage_prompt(prompt_path, pdir)
+        ctx["cursor_staged"] = staged
+        maker = not self.read_only
+        instruction = cursor_instruction("maker" if maker else "panel", staged, workspace)
+        if len(instruction) > CURSOR_INSTRUCTION_MAX:
+            raise CursorBoundaryError("the instruction is too long")
+        effective_model = self.effective_model()
+        ctx["cursor_expected_model"] = effective_model
+        return (["-p"] + ([] if maker else ["--mode", "ask"]) +
+                ["--output-format", "json", "--workspace", workspace, "--model", effective_model,
+                 "--trust", "--sandbox", "disabled", "--skip-worktree-setup", instruction])
+
+    def open_scope(self, pdir: str, repo: "str | None", managed_worktree: bool,
+                   run_root: "str | None" = None):
+        """Owner-private runtime + canaries for one dispatch (removed by close())."""
+        if not self.read_only and not managed_worktree:
+            raise CursorBoundaryError("a Maker runs only in a managed, Alloy-owned worktree")
+        git = None
+        if repo:
+            # The content tripwire hashes ignored files too, and Alloy writes its own
+            # status/stdout/result files during the run: a run directory (or root)
+            # inside the workspace would make every call look like tampering by
+            # Cursor, which wrote nothing. Refuse it up front with the real reason.
+            ws = os.path.realpath(repo).rstrip("/") + "/"
+            for path in (pdir, run_root):
+                if path and (os.path.realpath(os.path.abspath(os.path.expanduser(path))) + "/").startswith(ws):
+                    raise CursorBoundaryError(
+                        "the run directory is inside the workspace; pass --run-dir or set "
+                        "ALLOY_RUN_ROOT to a location outside the repository")
+            git = cursor_git_locations(repo)
+        return cursor_make_runtime(
+            forbidden=[skill_root()], run_root=run_root, pdir=pdir,
+            source=None if managed_worktree else repo,
+            worktree=repo if managed_worktree else None, git=git)
+
+    def prepare_env(self, ctx: "dict | None" = None) -> dict:
+        rt = (ctx or {}).get("scope")
+        return rt.env(cursor_login_home()) if rt is not None else {}
+
+    def wrap_argv(self, argv: "list[str]", ctx: dict) -> "list[str]":
+        """The spawn gateway hook: called with the final, fully rewritten argv."""
+        role = "maker" if not self.read_only else "panel"
+        return cursor_command(role, argv[1:], exe=argv[0], runtime=ctx["scope"],
+                              workspace=ctx.get("repo") or ctx.get("cwd"),
+                              staged=ctx.get("cursor_staged"),
+                              expected_model=ctx.get("cursor_expected_model"),
+                              run_root=ctx.get("run_root"),
+                              managed_worktree=bool(ctx.get("managed_worktree")),
+                              cwd=ctx.get("cwd"))
+
+    def before_spawn(self, ctx: dict) -> None:
+        ctx["cursor_fp_before"] = cursor_fingerprint(ctx.get("repo") or ctx["cwd"])
+
+    def after_exit(self, ctx: dict) -> "str | None":
+        """Tripwire, run only after the whole process group is dead. Detection,
+        not prevention: the sandbox profile is the boundary."""
+        try:
+            after = cursor_fingerprint(ctx.get("repo") or ctx["cwd"])
+            changed = cursor_fingerprint_changes(ctx["cursor_fp_before"], after)
+            canary = ctx["scope"].canary_changed()
+        except CursorBoundaryError as exc:
+            return "tripwire uncertain: " + str(exc)
+        ctx["cursor_workspace_changes"] = changed
+        ctx["cursor_canary_changes"] = canary
+        # Managed Makers are expected to edit ordinary worktree content. Expose
+        # exact relative paths so Lane 3 can classify them against allow_paths;
+        # Git internals and outside canaries remain immediate boundary failures.
+        protected = changed
+        if not self.read_only:
+            ctx["cursor_changed_paths"] = [
+                key[len("tree:"):] for key in changed if key.startswith("tree:")
+            ]
+            protected = [key for key in changed if key.startswith("git:")]
+        if protected or canary:
+            return "sandbox tripwire: %d workspace/Git and %d canary entries changed during the run" % (
+                len(protected), len(canary))
+        return None
+
+    def permission_overrides(self, write: bool) -> dict:
+        return dict(os_isolation=True, enforcement="macos_sandbox_exec",
+                    command_execution="allowed_in_worktree" if write else "denied",
+                    scope_validation="content_fingerprint_tripwire", git_metadata_isolated=True,
+                    network="provider_policy")
+
+    def capabilities(self) -> dict:
+        caps = super().capabilities()
+        caps.update(cursor_boundary_ready=self.cursor_boundary_ready)
+        return caps
+
+    def doctor_extra(self, state: str) -> dict:
+        b = self._boundary()
+        return {"os_boundary": b.ready,
+                "auth_detail": self.auth_detail() if state == "ready" else None,
+                "reason": (b.reason if state == "sandbox_unavailable" else
+                           self.auth_reason() if state == "installed_not_authed" else None),
+                "warnings": self.deprecations()}
+
+    # -- output ------------------------------------------------------------------- #
+    @staticmethod
+    def _json(stdout: str) -> "dict | None":
+        return json_object(stdout)
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
-        return strip_ansi(stdout).strip()
+        obj = self._json(stdout)
+        result = obj.get("result") if obj else None
+        return strip_ansi(result).strip() if isinstance(result, str) else ""
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        return redact_json_text(stdout)
+
+    def output_error(self, stdout: str, stderr: str) -> "str | None":
+        if not stdout.strip():
+            return None      # nothing produced: the shared empty/auth classification decides
+        obj = self._json(stdout)
+        if obj is None:
+            return "Cursor output is not one JSON object"
+        if "is_error" in obj and obj["is_error"] is not False:
+            return "Cursor reported is_error"
+        if not isinstance(obj.get("result"), str):
+            return "Cursor JSON has no string result"
+        return None
+
+    def provider_meta(self, stdout: str) -> dict:
+        sid = (self._json(stdout) or {}).get("session_id")
+        if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", sid):
+            return {"provider_session_id": sid}
+        return {}
+
+    def usage(self, stdout_tail: str) -> "dict | None":
+        # The nested `usage` schema is not documented: read only recognised
+        # non-negative integer fields, and report null for any other shape.
+        u = (self._json(stdout_tail) or {}).get("usage")
+        if not isinstance(u, dict):
+            return None
+
+        def field(*names):
+            for n in names:
+                v = u.get(n)
+                if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                    return v
+            return None
+
+        got = [field("inputTokens", "input_tokens"), field("outputTokens", "output_tokens"),
+               field("cacheReadTokens", "cache_read_tokens"), field("cacheWriteTokens", "cache_write_tokens")]
+        if all(v is None for v in got):
+            return None
+        return _usage(got[0], got[2], got[3], got[1], source="cursor-json")
 
 
 class GrokAdapter(Adapter):
@@ -1079,6 +3370,53 @@ class GrokAdapter(Adapter):
         return strip_ansi(stdout).strip()
 
 
+# `claude -p --output-format stream-json --verbose` prints one JSON event per line: the
+# init, every assistant/tool message, `rate_limit_event`s and, last, the `result` (the
+# answer). Alloy keeps only those two event types (read_stdout). Everything else -- tool
+# results carry whole files -- is dropped before anything is parsed or persisted.
+_CLAUDE_MAX_RATE_LINE = 64 * 1024     # a rate_limit_event is tiny; a larger one is not one
+_CLAUDE_MAX_RATE_LINES = 50           # the newest ones carry the latest windows
+
+
+def _claude_event(line: str) -> "dict | None":
+    """One stream-json line as an event (a JSON object with a string `type`), else None."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) and isinstance(obj.get("type"), str) else None
+
+
+def claude_stream_events(text: str) -> "list[dict] | None":
+    """The events of a stream-json run, or None when `text` is not one. A stream's first
+    non-blank line is always an event, so a plain-text answer (older CLI, text mode) that
+    merely contains JSON is never mistaken for a stream. Split on \\n only: Claude's own
+    encoder leaves U+2028 raw inside strings and str.splitlines() would cut there."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines or _claude_event(lines[0]) is None:
+        return None
+    return [e for e in map(_claude_event, lines) if e is not None]
+
+
+def claude_quota_recording_enabled() -> bool:
+    """Whether a Claude dispatch may feed the subscription snapshot. Mirrors the reader's
+    own rules (alloy_usage.fetch_claude): usage off, an API key or a proxy override, or a
+    routing config that disables usage all mean the numbers are not this subscription's."""
+    if (setting("ALLOY_USAGE", "") or "").lower() in ("off", "0", "false"):
+        return False
+    if setting("ANTHROPIC_API_KEY") or setting("ANTHROPIC_BASE_URL"):
+        return False
+    try:
+        config = routing.read_json(routing.root() / "routing.json", {})
+    except Exception:
+        config = {}
+    options = config.get("usage") if isinstance(config, dict) else None
+    return not (isinstance(options, dict) and options.get("enabled") is False)
+
+
 class ClaudeAdapter(Adapter):
     # A FRESH `claude` (Claude Code) instance run headless and read-only
     # (`--permission-mode plan`; `-p` skips the trust dialog). Including it makes
@@ -1107,7 +3445,10 @@ class ClaudeAdapter(Adapter):
                    ctx: "dict | None" = None) -> "list[str]":
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
-        args = ["-p", "--permission-mode", "plan", "--output-format", "text"]
+        # stream-json (which requires --verbose in print mode) instead of `text`, so the
+        # run's own rate_limit_event can feed Claude quota (observe_output). The answer is
+        # the stream's final `result` event -- the same text `text` mode prints (parse).
+        args = ["-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"]
         # Trim optional tools/skills, but retain every settings source: user
         # settings may contain deny rules, hooks and credential configuration.
         # ALLOY_CLAUDE_LEAN=0 restores the full tool/skill context.
@@ -1132,7 +3473,9 @@ class ClaudeAdapter(Adapter):
                 "--permission-mode plan --output-format text < <continue prompt file>")
 
     def usage_args(self, argv: "list[str]") -> "list[str]":
-        return _swap_flag(argv, "--output-format", "json")
+        # ALLOY_CAPTURE_USAGE reads the single JSON result object. With --verbose that
+        # output becomes the whole transcript, so the flag goes when the format swaps.
+        return [a for a in _swap_flag(argv, "--output-format", "json") if a != "--verbose"]
 
     def usage(self, stdout_tail: str) -> "dict | None":
         # Claude reports cache reads/writes apart from input; modelUsage also
@@ -1157,37 +3500,112 @@ class ClaudeAdapter(Adapter):
         obj = json_object(stdout) if capture_usage() else None
         if obj is not None and obj.get("type") == "result" and "result" in obj:
             return strip_ansi(str(obj.get("result") or "")).strip()
-        return strip_ansi(stdout).strip()
+        events = None if capture_usage() else claude_stream_events(stdout)
+        if events is not None:
+            # A stream run: the answer is the last `result` event. No `result` at all
+            # (killed, crashed) is an empty answer, exactly as text mode printed nothing.
+            final = [e for e in events if e.get("type") == "result"]
+            return strip_ansi(str(final[-1].get("result") or "")).strip() if final else ""
+        return strip_ansi(stdout).strip()   # plain text: an older CLI or ALLOY_CAPTURE_USAGE fallback
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        """A stream-json transcript can dwarf the answer (verbose tool results carry whole
+        files) and the answer is its LAST line, so a head cap would silently cut it off.
+        Read the sidecar line by line in bounded memory and keep only the `result` and
+        `rate_limit_event` lines. Anything that is not a stream is read exactly as before."""
+        limit = cap * 4 + 4096      # one JSON-escaped line; longer is skipped, never buffered
+        rates: "collections.deque[str]" = collections.deque(maxlen=_CLAUDE_MAX_RATE_LINES)
+        results: "collections.deque[str]" = collections.deque(maxlen=5)
+        first = True
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    raw = f.readline(limit + 1)
+                    if not raw:
+                        break
+                    oversized = len(raw) > limit and not raw.endswith(b"\n")
+                    while oversized:            # drop the rest of the line without holding it
+                        rest = f.readline(1 << 16)
+                        oversized = bool(rest) and not rest.endswith(b"\n")
+                    if len(raw) > limit and first:
+                        return read_text(path, cap)     # the first line cannot be classified
+                    if len(raw) > limit or not raw.strip():
+                        continue
+                    line = raw.decode("utf-8", errors="replace")
+                    event = _claude_event(line)
+                    if first:
+                        if event is None:
+                            return read_text(path, cap)     # plain text: exactly as before
+                        first = False
+                    kind = event.get("type") if event else None
+                    if kind == "result":
+                        results.append(line if line.endswith("\n") else line + "\n")
+                    elif kind == "rate_limit_event" and len(raw) <= _CLAUDE_MAX_RATE_LINE:
+                        rates.append(line if line.endswith("\n") else line + "\n")
+        except FileNotFoundError:
+            return ""
+        if first:                                   # no event at all (empty or blank): as before
+            return read_text(path, cap)
+        return "".join(rates) + "".join(results)
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        if claude_stream_events(stdout) is None:
+            return redact_secrets(stdout)
+        # One JSON event per line: redact every string leaf of each, so JSON escaping
+        # (\" \n \u...) cannot hide a secret from the text scrubber.
+        out, total = [], 0
+        for line in stdout.split("\n"):
+            red, n = redact_json_text(line) if line.strip() else (line, 0)
+            out.append(red)
+            total += n
+        return "\n".join(out), total
+
+    def observe_output(self, stdout: str) -> None:
+        """Alloy's own Claude dispatches feed Claude quota: hand the stream's
+        rate_limit_events to alloy_usage.record_claude_stream, which keeps the latest
+        five_hour/seven_day windows in the same snapshot the status-line command writes.
+        No extra Claude call, no keychain. That function prints a one-line meter; it is
+        swallowed here because a dispatch owns nothing on stdout (the panel prints its
+        manifest path there). A run that produced no rate_limit_event records nothing."""
+        if "rate_limit_event" not in stdout or not claude_quota_recording_enabled():
+            return
+        with redirect_stdout(io.StringIO()):
+            routing.usage.record_claude_stream(types.SimpleNamespace(routing=routing),
+                                               io.StringIO(stdout))
 
 
 # The default panel is the COMPLETE SET of available models: every verified,
-# read-only, non-experimental adapter (codex, grok, claude, and -- on agy >= 1.1
-# -- antigravity/Gemini) that is installed + authed, including a fresh `claude`
-# instance of the host's own type. `llm` (experimental), the no-read-only adapters
-# (opencode, cursor-agent) and an OLD agy are opt-in only.
+# read-only, non-experimental adapter (codex, grok, claude, cursor -- on macOS with
+# its OS write boundary validated -- and, on agy >= 1.1, antigravity/Gemini) that
+# is installed + authed, including a fresh `claude` instance of the host's own
+# type. `llm` (experimental), the no-read-only adapter (opencode) and an OLD agy
+# are opt-in only. One canonical `cursor` entry: `cursor-agent` is an input alias
+# (ADAPTER_ALIASES), never a second registry row.
 ADAPTERS: "dict[str, Adapter]" = {
     "codex": CodexAdapter(),
     "grok": GrokAdapter(),
     "claude": ClaudeAdapter(),
     "llm": LlmAdapter(),
     "opencode": OpenCodeAdapter(),
-    "cursor-agent": CursorAgentAdapter(),
+    "cursor": CursorAgentAdapter(),
     "antigravity": AntigravityAdapter(),
 }
 
 
-def default_panel_names() -> "list[str]":
+def default_panel_names(run_root: "str | None" = None) -> "list[str]":
     # All verified read-only adapters; cmd_panel further skips any not ready.
-    return [n for n, ad in ADAPTERS.items() if ad.read_only and not ad.experimental]
+    return [n for n, ad in ADAPTERS.items()
+            if ad.read_only and not (
+                not ad._boundary(run_root).ready if ad.requires_os_boundary else ad.experimental)]
 
 
-def selected_panelists() -> "list[str]":
+def selected_panelists(run_root: "str | None" = None) -> "list[str]":
     # Return names verbatim (including typos) so cmd_panel can report an unknown
     # adapter as skipped rather than silently dropping it.
     raw = setting("ALLOY_PANELISTS")
     if raw:
-        return [n.strip() for n in raw.split(",") if n.strip()]
-    return default_panel_names()
+        return list(dict.fromkeys(normalize_adapter_name(n) for n in raw.split(",") if n.strip()))
+    return default_panel_names(run_root)
 
 
 def default_run_root() -> str:
@@ -1197,6 +3615,11 @@ def default_run_root() -> str:
         os.path.expanduser("~"), ".local", "state"
     )
     return os.path.join(base, "alloy", "runs")
+
+
+def gate_log_dir() -> str:
+    """Private root that read-only Checkers may use for full gate evidence."""
+    return os.path.abspath(os.path.expanduser("~/.local/state/alloy/gate-logs"))
 
 
 def allow_unsandboxed() -> bool:
@@ -1231,22 +3654,6 @@ def _retry_statuses() -> "set[str]":
 def skill_root() -> str:
     # The repo / skill directory (parent of bin/), used for the update check.
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def _git(root: str, *args: str, timeout: int = 20):
-    try:
-        return subprocess.run(["git", "-C", root, *args], capture_output=True,
-                              text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-    except Exception:
-        return None
-
-
-def _git_toplevel(path: str) -> "str | None":
-    cp = _git(path, "rev-parse", "--show-toplevel")
-    if cp and cp.returncode == 0:
-        top = cp.stdout.strip()
-        return top or None
-    return None
 
 
 def resolve_repo(args, cwd_now: str) -> "str | None":
@@ -1305,12 +3712,15 @@ def _panelist_cwd(adapter: "Adapter", repo: "str | None", pdir: str) -> "tuple[s
 
 def _repo_fingerprint(repo: str) -> "str | None":
     # A cheap tripwire over the real working tree so a "read-only" run that
-    # somehow WRITES is caught. None when not a git repo (tripwire simply off).
-    cp = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    if cp is None or cp.returncode != 0:
+    # somehow WRITES is caught. The status listing is hashed as it streams: a large
+    # tree can never push it past an output cap and silently turn the check off.
+    # None when it could not be computed (not a git repo, or Git did not complete);
+    # cmd_panel reports that in the manifest instead of skipping it quietly.
+    status = _git_digest(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    if status is None or status[0] != 0:
         return None
     head = _git(repo, "rev-parse", "HEAD")
-    return ((head.stdout if head else "") or "") + "\0" + (cp.stdout or "")
+    return ((head.stdout if head else "") or "") + "\0" + status[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -1350,11 +3760,55 @@ _AUTH_FAIL_RE = re.compile(
 )
 
 
+def _write_status(path: str, status: dict) -> dict:
+    """Persist status.json with EVERY string in the payload (each `command` element
+    included) redacted -- on the first write as on the last, so an unredacted argv
+    or error text is never on disk, even briefly. Returns the redacted copy, which
+    is what the manifest must carry."""
+    red, n = redact_tree(status)
+    if n:
+        red["secrets_redacted"] = (red.get("secrets_redacted") or 0) + n
+    write_atomic(path, json.dumps(red, indent=2))
+    return red
+
+
 def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                  timeout_s: int, max_chars: int, mode: str,
-                 repo: "str | None" = None, managed_worktree: bool = False) -> dict:
+                 repo: "str | None" = None, managed_worktree: bool = False,
+                 run_root: "str | None" = None) -> dict:
     os.makedirs(pdir, exist_ok=True)
     _chmod(pdir, 0o700)
+    # Per-dispatch resources (Cursor: the owner-private runtime and canaries) are
+    # released only after the whole process group is dead, whatever happens.
+    scope, refusal = None, None
+    try:
+        scope = adapter.open_scope(pdir, repo, managed_worktree, run_root)
+    except CursorBoundaryError as exc:
+        refusal = str(exc)
+    try:
+        result = _run_panelist(adapter, prompt_path, pdir, timeout_s, max_chars, mode,
+                               repo, managed_worktree, run_root, scope, refusal)
+    except BaseException:
+        if scope is not None:
+            scope.close()
+        raise
+    if scope is not None:
+        try:
+            scope.close()
+        except CursorBoundaryError as exc:
+            # The process group is already dead when _run_panelist returns.
+            # Cleanup uncertainty is itself a failed dispatch, and the retained
+            # live-runtime entry gives atexit one final best-effort attempt.
+            result["status"] = "error"
+            result["error"] = str(exc)
+            result = _write_status(os.path.join(pdir, "status.json"), result)
+    return result
+
+
+def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
+                  timeout_s: int, max_chars: int, mode: str,
+                  repo: "str | None", managed_worktree: bool,
+                  run_root: "str | None", scope, refusal: "str | None") -> dict:
     # cwd: empty throwaway (no repo) / the real repo (read-only adapter, live) /
     # a disposable copy (write-capable adapter). See _panelist_cwd.
     if managed_worktree:
@@ -1378,25 +3832,45 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     ctx = {"repo": repo, "pdir": pdir, "cwd": cwd, "timeout_s": timeout_s,
            # A caller-chosen session id, so the CLI's saved session is known
            # BEFORE dispatch and can be resumed if alloy has to kill it.
-           "session_id": getattr(adapter, "managed_session_id", None) or str(uuid.uuid4()), "managed_worktree": managed_worktree}
-    argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
+           "session_id": getattr(adapter, "managed_session_id", None) or str(uuid.uuid4()), "managed_worktree": managed_worktree,
+           "scope": scope, "run_root": run_root}
     capture = capture_usage()
-    if capture:
-        argv = [binp] + adapter.usage_args(argv[1:])
+    argv = [binp]
+    if not refusal:
+        try:
+            argv = [binp] + adapter.build_args(prompt_path, last_path, mode, ctx)
+            if capture:
+                argv = [binp] + adapter.usage_args(argv[1:])
+            # The spawn gateway sees the FINAL argv, after every rewrite above.
+            argv = adapter.wrap_argv(argv, ctx)
+        except CursorBoundaryError as exc:
+            refusal, argv = str(exc), [binp]
 
     # quiet down ANSI / interactive behaviour in the child
-    env = dict(os.environ)
-    for _k, _v in _CONFIG.items():   # config-file values (e.g. provider keys) reach the child
-        env.setdefault(_k, _v)
+    if adapter.requires_os_boundary:
+        env = cursor_base_env()          # explicit allowlist: no ambient credential or IPC hook
+    else:
+        env = dict(os.environ)
+        for _k, _v in _CONFIG.items():   # legacy adapters retain their config-file environment
+            env.setdefault(_k, _v)
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
     env.setdefault("CI", "1")
     # Adapter-supplied overrides win over the inherited environment (they exist
     # precisely to redirect a CLI away from the user's real state -- see agy).
-    env.update(adapter.prepare_env(ctx))
-    env.pop("TYPESAFE_API_KEY", None)  # router-only credentials
-    env.pop("OPENROUTER_API_KEY", None)
+    if not refusal:
+        try:
+            env.update(adapter.prepare_env(ctx))
+        except CursorBoundaryError as exc:
+            refusal = str(exc)
+    # Router credentials and both Cursor API overrides never reach any child,
+    # whether they came from the environment or the config file.
+    for _k in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "CURSOR_API_KEY", "CURSOR_API_ENDPOINT"):
+        env.pop(_k, None)
 
+    permissions = dict(getattr(adapter, "execution_permissions", dict(execution.permissions(adapter, not adapter.read_only),
+        repository_scope=repo_access, os_isolation=False, scope_validation="panel_tamper_check")))
+    permissions.update(adapter.permission_overrides(not adapter.read_only))
     status = {
         "name": adapter.name,
         "bin_path": binp,
@@ -1405,8 +3879,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "cli_version": adapter.cli_version(),
         "adapter_version": ALLOY_VERSION,
         "read_only": adapter.read_only,
-        "permissions": getattr(adapter, "execution_permissions", dict(execution.permissions(adapter, not adapter.read_only),
-            repository_scope=repo_access, os_isolation=False, scope_validation="panel_tamper_check")),
+        "permissions": permissions,
         "cwd": cwd,
         "repo_access": repo_access,   # none | real (live repo) | copy (disposable)
         "status": "error",
@@ -1427,19 +3900,51 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     }
     if cwd_note:
         status["cwd_note"] = cwd_note
+    if ctx.get("cursor_expected_model"):
+        # `model` stays the configured pin; this is the exact --model value sent.
+        status["effective_model"] = ctx["cursor_expected_model"]
+    if not refusal:
+        try:
+            adapter.before_spawn(ctx)
+        except CursorBoundaryError as exc:
+            refusal = str(exc)
+    if refusal:
+        # Nothing was spawned: the boundary, argv, path or fingerprint was not
+        # provably safe. Fail closed, visibly.
+        status["error"] = "refused: " + refusal
+        log(f"{adapter.name}: REFUSED ({refusal})")
+        return _write_status(status_path, status)
 
     log(f"{adapter.name}: dispatching ({repo_access} repo, timeout {timeout_s}s)")
     start = time.monotonic()
     proc = None
+    group_dead = True
+    drains = None
     try:
-        with open(prompt_path, "rb") as fin, open(out_path, "wb") as fout, open(
-            err_path, "wb"
-        ) as ferr:
+        with ExitStack() as files:
+            if adapter.capture_in_memory:
+                stdin_f, stdout_f, stderr_f = subprocess.DEVNULL, subprocess.PIPE, subprocess.PIPE
+            else:
+                fin = files.enter_context(open(prompt_path, "rb"))
+                stdout_f = files.enter_context(open(out_path, "wb"))
+                stderr_f = files.enter_context(open(err_path, "wb"))
+                # agy 1.2.12 ignores the -p prompt's contents on stdin, but a file
+                # on stdin is treated as a read_file target that headless mode
+                # auto-denies -- even when that path is already in --add-dir.
+                # DEVNULL is what actually lets the Checker read the worktree.
+                stdin_f = fin if adapter.stdin_from_prompt else subprocess.DEVNULL
             proc = subprocess.Popen(
-                argv, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, env=env,
+                argv, stdin=stdin_f, stdout=stdout_f, stderr=stderr_f, cwd=cwd, env=env,
                 start_new_session=True,
             )
             pgid = proc.pid  # start_new_session makes the child its group leader.
+            if adapter.capture_in_memory:
+                drains = (_Drain(proc.stdout, max_chars * 4), _Drain(proc.stderr, max_chars * 4))
+
+            def produced() -> int:
+                if drains:
+                    return drains[0].total + drains[1].total
+                return _safe_size(out_path) + _safe_size(err_path)
             try:
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.add(pgid)
@@ -1447,7 +3952,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 status["status"] = "running"
                 status["pid"] = proc.pid
                 status["started_utc"] = now_utc_iso()
-                write_atomic(status_path, json.dumps(status, indent=2))
+                _write_status(status_path, status)
                 hb = max(2, setting_int("ALLOY_HEARTBEAT", DEFAULT_HEARTBEAT_S))
                 stall_s = max(0, setting_int("ALLOY_STALL_TIMEOUT", 0))  # 0 = off
                 last_bytes, last_activity = 0, time.monotonic()
@@ -1461,7 +3966,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                     except subprocess.TimeoutExpired:
                         pass
                     now = time.monotonic()
-                    cur = _safe_size(out_path) + _safe_size(err_path)
+                    cur = produced()
                     if cur > last_bytes:
                         last_bytes, last_activity = cur, now
                     if now - start >= timeout_s:
@@ -1495,9 +4000,11 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                         log(f"{adapter.name}: working {int(now - start)}s/{timeout_s}s -- {note}")
                         next_hb = now + hb
             finally:
-                if hasattr(adapter, "execution_permissions") or proc.poll() is None:
+                if hasattr(adapter, "execution_permissions") or adapter.kill_group_on_exit or proc.poll() is None:
                     _kill_group(pgid)
                     proc.wait()
+                if adapter.kill_group_on_exit:
+                    group_dead = _wait_group_dead(pgid)
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.discard(pgid)
         status["exit_code"] = proc.returncode
@@ -1505,34 +4012,40 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         status["status"] = "not_installed"
         status["error"] = f"binary not found: {argv[0]}"
         status["duration_ms"] = int((time.monotonic() - start) * 1000)
-        write_atomic(status_path, json.dumps(status, indent=2))
         log(f"{adapter.name}: NOT INSTALLED")
-        return status
+        return _write_status(status_path, status)
     except Exception as exc:  # pragma: no cover - defensive
         status["status"] = "error"
         status["error"] = repr(exc)
         status["duration_ms"] = int((time.monotonic() - start) * 1000)
-        write_atomic(status_path, json.dumps(status, indent=2))
         log(f"{adapter.name}: ERROR {exc!r}")
-        return status
+        return _write_status(status_path, status)
 
     status["duration_ms"] = int((time.monotonic() - start) * 1000)
-    status["output_bytes"] = _safe_size(out_path) + _safe_size(err_path)
-    if capture:
-        # Before the sidecar is capped and rewritten: usage trails the output.
-        try:
-            status["usage"] = adapter.usage(read_tail(out_path, USAGE_TAIL_BYTES))
-        except Exception:  # pragma: no cover - instrumentation never fails a run
-            status["usage"] = None
-
     read_cap = max_chars * 4  # bytes; UTF-8 is <=4 bytes/char, bounds memory
-    stdout_text = read_text(out_path, read_cap)
-    stderr_text = read_text(err_path, read_cap)
-    last_text = read_text(last_path, read_cap)
+    if drains:
+        # Bounded in-memory capture: nothing raw was ever written to a sidecar.
+        stdout_text = drains[0].finish().decode("utf-8", errors="replace")
+        stderr_text = drains[1].finish().decode("utf-8", errors="replace")
+        last_text = ""
+        status["output_bytes"] = drains[0].total + drains[1].total
+        status["usage"] = adapter.usage(stdout_text)
+        status.update(adapter.provider_meta(stdout_text))
+    else:
+        status["output_bytes"] = _safe_size(out_path) + _safe_size(err_path)
+        if capture:
+            # Before the sidecar is capped and rewritten: usage trails the output.
+            try:
+                status["usage"] = adapter.usage(read_tail(out_path, USAGE_TAIL_BYTES))
+            except Exception:  # pragma: no cover - instrumentation never fails a run
+                status["usage"] = None
+        stdout_text = adapter.read_stdout(out_path, read_cap)
+        stderr_text = read_text(err_path, read_cap)
+        last_text = read_text(last_path, read_cap)
 
-    # Redact the raw sidecar files in place so nothing unredacted is left on
-    # disk for the host (or the user) to read later. This also shrinks them.
-    red_out, c_out = redact_secrets(stdout_text)
+    # Redact before anything is persisted (the raw sidecar files, for adapters that
+    # write them, are redacted in place so nothing unredacted is left on disk).
+    red_out, c_out = adapter.redact_stdout(stdout_text)
     red_err, c_err = redact_secrets(stderr_text)
     red_last, c_last = redact_secrets(last_text)
     write_atomic(out_path, red_out)
@@ -1541,6 +4054,10 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         write_atomic(last_path, red_last)
 
     result = adapter.parse(stdout_text, stderr_text, last_text)
+    try:
+        adapter.observe_output(red_out)          # the redacted text: only what is persisted is handed on
+    except Exception:  # pragma: no cover - instrumentation never fails a run
+        pass
     result, c_res = redact_secrets(result)        # redact BEFORE capping
     result, truncated = cap_chars(result, max_chars)
     write_atomic(result_path, result)
@@ -1549,13 +4066,39 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     status["truncated"] = truncated
     # count redactions across everything persisted, not just result.md
     status["secrets_redacted"] = c_res + c_out + c_err + c_last
+    if status["secrets_redacted"]:
+        status["redaction_marker"] = "[REDACTED]"
 
-    if status["timed_out"]:
+    # Compared only now, with the whole process group dead. Detection, not
+    # prevention: the OS profile is the boundary.
+    tripwire = "the process group did not exit" if not group_dead else adapter.after_exit(ctx)
+    if "cursor_workspace_changes" in ctx:
+        status["workspace_changes"] = ctx["cursor_workspace_changes"]
+        status["canary_changes"] = ctx["cursor_canary_changes"]
+    if "cursor_changed_paths" in ctx:
+        # Lane 3 consumes this per-path handoff before gates/commit and compares
+        # it with the managed task's allow_paths.
+        status["changed_paths"] = ctx["cursor_changed_paths"]
+    provider_error = None if status["timed_out"] or status["stalled"] or status["exit_code"] != 0 \
+        else adapter.output_error(stdout_text, stderr_text)
+
+    if tripwire:
+        status["status"] = "error"
+        status["error"] = tripwire
+    elif status["timed_out"]:
         status["status"] = "timeout"
     elif status["stalled"]:
         status["status"] = "stalled"
     elif status["exit_code"] != 0:
         status["status"] = "error"
+        tail = "\n".join(strip_ansi(red_err).strip().splitlines()[-10:])[-2000:]
+        if adapter.name == "cursor":
+            status["error"] = "Cursor exited %s%s" % (status["exit_code"], ": " + tail if tail else " (no stderr)")
+    elif provider_error:
+        # The provider itself reported failure (or produced no parseable answer):
+        # exit status zero and a non-empty `result` cannot turn that into success.
+        status["status"] = "error"
+        status["error"] = provider_error
     elif result.strip() == "":
         # An empty answer is NOT always "nothing to say": a CLI whose token
         # expired mid-call can exit 0 with empty stdout. Distinguish that
@@ -1581,7 +4124,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         hint = adapter.resume_hint(ctx)
         if hint:
             status["resume_hint"] = hint
-    write_atomic(status_path, json.dumps(status, indent=2))
+    persisted = _write_status(status_path, status)
     dur = status["duration_ms"] / 1000.0
     if status["timed_out"]:
         log(f"{adapter.name}: timeout after {dur:.1f}s "
@@ -1596,7 +4139,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             log(f"{adapter.name}: resume with: {status['resume_hint']}")
     else:
         log(f"{adapter.name}: {status['status']} in {dur:.1f}s (exit {status['exit_code']})")
-    return status
+    return persisted
 
 
 # --------------------------------------------------------------------------- #
@@ -1628,6 +4171,9 @@ def _print_matrix(manifest: dict) -> None:
         if summary.get("repo_tamper"):
             w("[alloy]   !! WARNING: working tree changed during the run -- "
               "review `git status` (a read-only panelist may have written)\n")
+        if summary.get("repo_tamper_check") == "unavailable":
+            w("[alloy]   !! WARNING: the working-tree tamper check was unavailable "
+              "for this run -- nothing was verified\n")
         sys.stderr.flush()
 
 
@@ -1695,10 +4241,15 @@ def cmd_panel(args: argparse.Namespace) -> int:
         log(f"invalid max-chars {max_chars}: must be a positive integer")
         return 2
 
+    run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
+    run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
+
     if args.panelists:
-        names = [n.strip() for n in args.panelists.split(",") if n.strip()]
+        names = [normalize_adapter_name(n) for n in args.panelists.split(",") if n.strip()]
+    elif getattr(args, "route", False):
+        names = []   # the router below picks the one CLI; never probe every adapter (or Cursor's OS boundary) for a list it discards
     else:
-        names = selected_panelists()
+        names = selected_panelists(run_root)
     names = list(dict.fromkeys(names))   # dedupe, preserve order (avoid same-dir races)
     route_decision = None
     subscription_usage = routing.usage.get(sys.modules[__name__])
@@ -1739,20 +4290,26 @@ def cmd_panel(args: argparse.Namespace) -> int:
             continue
         rb = ad.resolved_bin()
         env_key = "ALLOY_BIN_" + n.upper().replace("-", "_")
-        if rb and not setting(env_key) and _is_within(rb, cwd_now):
+        if rb and not ad.bin_override() and _is_within(rb, cwd_now):
             skipped.append({"name": n, "reason": "binary resolved inside the working "
                             f"directory (possible PATH shadowing); set {env_key} to an "
                             "absolute path to allow"})
             continue
-        if not ad.read_only and not allow_unsandboxed():
+        if ad.requires_os_boundary:
+            # Never overridden by ALLOY_ALLOW_UNSANDBOXED: an OS boundary is either
+            # validated or the adapter does not run.
+            boundary = ad._boundary(run_root)
+            if not boundary.ready:
+                skipped.append({"name": n, "reason": "no supported OS write boundary (%s); "
+                                "roles are refused" % boundary.reason})
+                continue
+        elif not ad.read_only and not allow_unsandboxed():
             skipped.append({"name": n, "reason": "no read-only mode (set ALLOY_ALLOW_UNSANDBOXED=1 to permit)"})
             continue
         if route_decision is not None:
             ad = routing.routed_adapter(sys.modules[__name__], route_decision)
         chosen.append(ad)
 
-    run_root = args.run_dir or setting("ALLOY_RUN_ROOT") or default_run_root()
-    run_root = os.path.abspath(os.path.expanduser(run_root))  # child runs in a different cwd
     os.makedirs(run_root, exist_ok=True)
     _chmod(run_root, 0o700)
     # Belt-and-suspenders: even if a user points the run root inside a repo, keep
@@ -1822,7 +4379,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         pdir = os.path.join(run_dir, ad.name)
         try:
             st = run_panelist(ad, prompt_path, pdir, timeout_s,
-                              max_chars, args.mode, repo=repo)
+                              max_chars, args.mode, repo=repo, run_root=run_root)
             # Self-heal a transient first-attempt failure (default: an `auth`
             # token-refresh race) with exactly ONE re-dispatch -- not a loop. The
             # refresh has almost always landed by now, so the retry runs on a
@@ -1832,7 +4389,8 @@ def cmd_panel(args: argparse.Namespace) -> int:
             if st.get("status") in retry_set:
                 log(f"{ad.name}: {st['status']} (likely transient) -- retrying once")
                 st2 = run_panelist(ad, prompt_path, os.path.join(pdir, "_retry"),
-                                   timeout_s, max_chars, args.mode, repo=repo)
+                                   timeout_s, max_chars, args.mode, repo=repo,
+                                   run_root=run_root)
                 st2["retried"] = True
                 st2["first_attempt_status"] = st.get("status")
                 st = st2
@@ -1851,9 +4409,24 @@ def cmd_panel(args: argparse.Namespace) -> int:
     # Tripwire: a read-only panelist ran in the real working tree. If its
     # fingerprint moved, a "read-only" CLI may have written to your repo (or you
     # edited files mid-run). Surface it loudly rather than trusting the sandbox.
-    repo_tamper = False
-    if repo is not None and repo_fp_before is not None:
-        if _repo_fingerprint(repo) != repo_fp_before:
+    # A canary written outside the workspace fails the call on its own, so it counts too:
+    # the run is unsafe to trust whichever tripwire caught it.
+    repo_tamper = any(
+        bool(st.get("workspace_changes")) or bool(st.get("canary_changes"))
+        for name, st in results.items()
+        if name == "cursor"
+    )
+    # The check itself can be unavailable (not a git repo, or Git did not finish).
+    # That is recorded, never silently treated as "nothing changed".
+    repo_check = "no_repo" if repo is None else "checked"
+    if repo is not None:
+        repo_fp_after = _repo_fingerprint(repo)
+        if repo_fp_before is None or repo_fp_after is None:
+            repo_check = "unavailable"
+            log(f"WARNING: the working-tree tamper check for {repo} could not be computed "
+                "(not a Git repository, or Git did not complete); "
+                "manifest summary.repo_tamper_check is 'unavailable'.")
+        elif repo_fp_after != repo_fp_before:
             repo_tamper = True
             log(f"WARNING: working tree at {repo} changed during the run -- a "
                 "read-only panelist may have written to it (or you edited files). "
@@ -1868,6 +4441,7 @@ def cmd_panel(args: argparse.Namespace) -> int:
         "skipped": skipped,
         "repo": repo,
         "repo_tamper": repo_tamper,
+        "repo_tamper_check": repo_check,     # checked | unavailable | no_repo
     }
     manifest_path = os.path.join(run_dir, "manifest.json")
     write_atomic(manifest_path, json.dumps(manifest, indent=2))
@@ -1882,7 +4456,7 @@ def _doctor_rows() -> "list[dict]":
     rows = []
     for name, ad in ADAPTERS.items():
         state = ad.auth_state()
-        rows.append({
+        row = {
             "name": name,
             "status": state,
             "experimental": ad.experimental,
@@ -1892,8 +4466,14 @@ def _doctor_rows() -> "list[dict]":
             "model": ad.model(),
             "install_hint": ad.install_hint,
             "auth_hint": ad.auth_hint,
+            "auth": ad.auth_status(state),
             "default_panel": ad.read_only and not ad.experimental,
-        })
+        }
+        # os_boundary (bool, Cursor only), a masked auth_detail, a specific
+        # fail-closed reason and deprecation warnings; raw CLI output never lands here.
+        row.update(ad.doctor_extra(state))
+        row["auth_note"] = ad.auth_note() if row["auth"] == "unknown" else None
+        rows.append(row)
     return rows
 
 
@@ -1914,6 +4494,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             tag = "[no-ro]"
         elif r["status"] == "installed_not_authed":
             tag = "[auth?]"
+        elif r["status"] == "sandbox_unavailable":
+            tag = "[no-sbx]"
         else:
             tag = "[ --- ]"
         extra = []
@@ -1930,10 +4512,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("          ready; opt in by adding it to ALLOY_PANELISTS")
         elif r["status"] == "ready" and not r["read_only"]:
             print("          installed but has NO read-only mode -> skipped unless ALLOY_ALLOW_UNSANDBOXED=1")
+        elif r["status"] == "sandbox_unavailable":
+            print(f"          {CURSOR_BOUNDARY_MESSAGE}")
+            print(f"          reason: {r['reason']}")
         elif r["status"] == "installed_not_authed":
             print(f"          installed but not authenticated -> {r['auth_hint']}")
         elif r["status"] == "not_installed" and not r["experimental"]:
             print(f"          not installed -> {r['install_hint']}")
+        if r["status"] == "not_installed" and r["os_boundary"] is not None:
+            print(f"          not installed -> {r['install_hint']}")
+        if r.get("auth") == "unknown":
+            note = r.get("auth_note") or "Alloy could not verify this CLI's login."
+            print(f"          auth unknown: {note}")
+            print(f"          If a run fails with status `auth`, sign in -> {r['auth_hint']}")
+        if r.get("auth_detail"):
+            print(f"          logged in as {r['auth_detail']}")
+        for warning in r.get("warnings") or []:
+            print(f"          warning: {warning}")
     print()
     if ready_default == 0:
         print("  No default panelists are ready. Alloy will fall back to a single-model")
@@ -1949,9 +4544,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_estimate(args: argparse.Namespace) -> int:
+    def counts(r: dict) -> bool:
+        if r["os_boundary"] is not None:
+            # An OS-bounded adapter counts only with its separate boundary field and
+            # a known explicit model; ALLOY_ALLOW_UNSANDBOXED never helps it.
+            ad = ADAPTERS.get(r["name"])
+            try:
+                effective = ad.effective_model()
+            except (AttributeError, CursorBoundaryError):
+                return False
+            return bool(r["os_boundary"] and r["read_only"] and ad.model() == r["model"]
+                        and cursor_model_family(effective))
+        return r["read_only"] or allow_unsandboxed()
+
     ready = [r for r in _doctor_rows() if r["status"] == "ready"
-             and r["name"] in selected_panelists()
-             and (r["read_only"] or allow_unsandboxed())]
+             and r["name"] in selected_panelists() and counts(r)]
     rounds = max(1, args.rounds)
     calls = len(ready) * rounds
     print(json.dumps({

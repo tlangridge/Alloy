@@ -58,6 +58,22 @@
       "evidence": "Codex rejects gpt-6-sol under ChatGPT-account sign-in (verified 2026-09-25); enable only with API-key billing"
     },
     {
+      "id": "codex-large-gpt-6-1-sol",
+      "adapter": "codex",
+      "model": "gpt-6.1-sol",
+      "tier": "large",
+      "family": "openai",
+      "effort": "medium",
+      "cost_rank": 1.75,
+      "enabled": true,
+      "billing_mode": "unknown",
+      "quota_pool": "codex",
+      "evidence": "Codex CLI 0.159.0 accepts gpt-6.1-sol under ChatGPT-account sign-in (verified 2026-09-29); stronger and faster than gpt-6-sol and gpt-5.6-sol, so the default effort is one step lower, never below high for review; billing is your account choice (alloy setup --billing codex=subscription); not benchmarked",
+      "effort_by_mode": {
+        "review": "high"
+      }
+    },
+    {
       "id": "codex-large-gpt-6-astra",
       "adapter": "codex",
       "model": "gpt-6-astra",
@@ -192,6 +208,71 @@
       "billing_mode": "unknown",
       "quota_pool": "antigravity",
       "evidence": "editable starter assumption; not benchmarked"
+    },
+    {
+      "id": "cursor-large-composer-2-5",
+      "adapter": "cursor",
+      "model": "composer-2.5",
+      "tier": "large",
+      "family": "cursor",
+      "effort": "high",
+      "cost_rank": 2,
+      "enabled": false,
+      "billing_mode": "subscription",
+      "quota_pool": "cursor",
+      "evidence": "Cursor discovery only; not benchmarked"
+    },
+    {
+      "id": "cursor-large-gpt-5-6-sol",
+      "adapter": "cursor",
+      "model": "gpt-5.6-sol-high",
+      "tier": "large",
+      "family": "openai",
+      "effort": "high",
+      "cost_rank": 2.5,
+      "enabled": false,
+      "billing_mode": "subscription",
+      "quota_pool": "cursor",
+      "evidence": "Cursor discovery only; not benchmarked"
+    },
+    {
+      "id": "cursor-large-claude-opus-5-5",
+      "adapter": "cursor",
+      "model": "claude-opus-5-5-high",
+      "tier": "large",
+      "family": "anthropic",
+      "effort": "high",
+      "cost_rank": 3,
+      "enabled": false,
+      "billing_mode": "subscription",
+      "quota_pool": "cursor",
+      "evidence": "Cursor discovery only; not benchmarked"
+    },
+    {
+      "id": "cursor-medium-gemini-3-8-flash",
+      "adapter": "cursor",
+      "model": "gemini-3.8-flash-high",
+      "tier": "medium",
+      "family": "google",
+      "effort": "high",
+      "cost_rank": 1.25,
+      "enabled": false,
+      "billing_mode": "subscription",
+      "quota_pool": "cursor",
+      "evidence": "Cursor discovery only; not benchmarked"
+    },
+    {
+      "id": "cursor-large-grok-4-7",
+      "adapter": "cursor",
+      "model": "grok-4.7-high",
+      "tier": "large",
+      "family": "xai",
+      "effort": "high",
+      "cost_rank": 3,
+      "enabled": false,
+      "billing_mode": "subscription",
+      "quota_pool": "cursor",
+      "evidence": "Cursor discovery only; not benchmarked"
     }
   ],
   "quota_pools": {},

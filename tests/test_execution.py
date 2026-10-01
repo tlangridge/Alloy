@@ -7,9 +7,12 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +25,7 @@ loader.exec_module(core)
 e = core.execution
 REAL_SELECT, REAL_DISPATCH, REAL_REVALIDATE = e.select, e.dispatch, e.revalidate
 REAL_READINESS = e.readiness
+REAL_PROBE = e.probe
 
 
 class ExecutionTests(unittest.TestCase):
@@ -553,9 +557,10 @@ else:
         config['profiles']=[dict(base,id='maker',adapter='claude',model='test-maker',family='anthropic',tier='large',effort=None,billing_mode='subscription'),
                             dict(base,id='checker',adapter='grok',model='test-checker',family='xai',tier='large',effort=None,billing_mode='subscription')]
         r.save(r.root()/'routing.json',config)
-        env=dict(PATH=os.environ['PATH'], HOME=str(self.base/'home'), ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
+        env=dict(PATH=os.environ['PATH'], HOME=os.environ['HOME'], ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
                  ALLOY_RUN_ROOT=str(self.base/'state/runs'),ALLOY_ROUTING_HOME=str(self.base/'config'),
                  ALLOY_BIN_CLAUDE=str(binary),ALLOY_BIN_GROK=str(binary),ALLOY_BIN_CODEX='/nonexistent',ALLOY_BIN_ANTIGRAVITY='/nonexistent',
+                 ALLOY_BIN_CURSOR='/nonexistent',   # a real Cursor build on this machine must never be reached
                  ANTHROPIC_API_KEY='test-only',XAI_API_KEY='test-only')
         command=[sys.executable,str(ROOT/'bin/alloy')]
         result=subprocess.run(command+['execute','--repo',str(self.repo),'--prompt-file',str(self.prompt),'--host-family','openai',
@@ -639,6 +644,40 @@ else:
         self.assertNotIn('command(*)',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
         self.assertNotIn('command',core.ADAPTERS['antigravity']._settings()['permissions']['allow'])
 
+    def test_antigravity_checker_grants_only_the_private_gate_log_root(self):
+        prompt=self.base/'prompt.txt';prompt.write_text('Review')
+        ctx=dict(repo=str(self.repo),pdir=str(self.base/'agy-review'),timeout_s=10,
+                 managed_worktree=False)
+        ad=e.worker_adapter(core,dict(cli='antigravity',model='test',effort=None),False)
+        gate_logs = str(self.base / 'gate-logs')
+        with patch.object(core.AntigravityAdapter, '_agy_version', return_value=(1,2,13)), \
+                patch.object(core, 'gate_log_dir', return_value=gate_logs), \
+                patch.dict(os.environ, {'ALLOY_ANTIGRAVITY_HOME': str(self.base / 'agy-home')}):
+            args=ad.build_args(str(prompt),str(self.base/'last'),'review',ctx)
+            with patch.object(core.AntigravityAdapter,'_AUTH_LINKS',()), patch.object(core.AntigravityAdapter,'_keychain_plist',return_value=None):
+                env=ad.prepare_env(ctx)
+        add_dirs=[args[i+1] for i,value in enumerate(args[:-1]) if value=='--add-dir']
+        self.assertIn(gate_logs,add_dirs)
+        self.assertEqual(os.stat(gate_logs).st_mode & 0o777,0o700)
+        settings=json.loads((Path(env['HOME'])/'.gemini/antigravity-cli/settings.json').read_text())
+        allow=settings['permissions']['allow']
+        self.assertIn('read_file('+gate_logs+')',allow)
+        self.assertNotIn('read_file(/tmp)',allow)
+        self.assertNotIn('read_file(/private/tmp)',allow)
+        self.assertNotIn('/tmp',add_dirs)
+        self.assertNotIn('/private/tmp',add_dirs)
+
+    def test_antigravity_checker_prompt_confines_absolute_reads(self):
+        self.checker=dict(cli='antigravity',family='google',model='gemini-test',effort=None,profile='checker')
+        self.select.return_value=(self.maker,self.checker)
+        code,task=self.create()
+        self.assertEqual(code,0,task.get('error'))
+        checker_prompt=self.calls[1][1]
+        self.assertIn('The Checker reads files only inside the task worktree '+task['worktree'],checker_prompt)
+        self.assertIn('and the gate-log directory '+core.gate_log_dir(),checker_prompt)
+        self.assertIn('never opens another absolute path',checker_prompt)
+        self.assertIn('use the text of the gate output that is in this prompt',checker_prompt)
+
 
     def test_gate_status_write_failure_reaps_child(self):
         children=[]
@@ -669,3 +708,1457 @@ else:
         self.assertEqual(len(children),1)
         self.assertIsNotNone(children[0].poll())
         self.assertNotIn(children[0].pid,core._LIVE_PGIDS)
+
+
+
+# --------------------------------------------------------------------------- #
+# Cursor managed Maker and Checker
+# --------------------------------------------------------------------------- #
+# Everything below runs against the production modules with the MOCK sandbox-exec
+# (tests/mocks/mock_panelist.py, patched in as core.SANDBOX_EXEC) and a fake cursor-agent
+# written here. The real /usr/bin/sandbox-exec, the real cursor-agent, the network and the
+# macOS keychain are never touched, and HOME is never set or changed. The one test that
+# exercises the real OS profile is the Lane 6 release gate, not this file.
+MOCK = ROOT / 'tests/mocks/mock_panelist.py'
+GOOD_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJmYWtlIjoiZml4dHVyZSJ9.c2lnbmF0dXJlLWZpeHR1cmU'
+# recognised secret shapes -> (text as it appears in a source, the value that must never leave)
+SECRETS = dict(jwt=('token ' + GOOD_JWT, GOOD_JWT),
+               assignment=('API_KEY=hunter2hunter2hunter2', 'hunter2hunter2hunter2'),
+               header=('Authorization: Bearer abc123def456ghi789', 'abc123def456ghi789'))
+FORBIDDEN_FLAGS = ('--force', '-f', '--yolo', '--auto-review', '--approve-mcps', '--resume', '--continue',
+                   '--plugin-dir', '--add-dir', '-w', '--worktree', '--worktree-base', '--plan',
+                   '--endpoint', '--api-key', '--header')
+BUILTIN_DENIALS = ('.ssh', '.aws', '.gnupg', '.config/gh', '.netrc', '.docker/config.json', '.kube', '.npmrc',
+                   '.pypirc', '.git-credentials', 'Library/Keychains', '.cswarm',
+                   '.codex/auth.json', '.claude/.credentials.json', '.gemini', '.grok', '.config/op')
+
+
+def load_mock():
+    spec = importlib.util.spec_from_file_location('mock_panelist_exec', str(MOCK))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MOCKMOD = load_mock()
+
+# The fake `cursor-agent`. What it does is set by a plan file next to it (see plan()); it
+# understands the metadata calls and the print-mode inference call, edits the worktree like a
+# Maker, or answers like a Checker (with the packet receipt), and can simulate every escape the
+# managed tripwires must catch. It runs only behind the mock sandbox-exec.
+FAKE_CURSOR = r'''
+import json, os, re, sys
+from pathlib import Path
+if os.environ.get('FAKE_CURSOR_VIA_NODE') != '1':      # Alloy must start the build's node, never the launcher
+    sys.stderr.write('the launcher was executed directly\n'); raise SystemExit(71)
+me = Path(__file__).resolve()
+side = lambda ext: Path(str(me) + ext)
+plan = json.loads(side('.plan.json').read_text()) if side('.plan.json').exists() else {}
+argv = sys.argv[1:]
+HELP = '--print --output-format --mode --model --list-models --sandbox --workspace --skip-worktree-setup --trust'
+def log(kind):
+    if plan.get('log'):
+        with open(plan['log'], 'a') as f:
+            f.write(json.dumps(dict(kind=kind, argv=argv, cwd=os.getcwd(), env_names=sorted(os.environ))) + '\n')
+if argv == ['--version', '--sandbox', 'disabled']:
+    print('2026.09.28-64d2043'); raise SystemExit(0)
+if argv == ['--help', '--sandbox', 'disabled']:
+    log('help'); print(plan.get('help', HELP)); raise SystemExit(plan.get('help_exit', 0))
+if argv == ['status', '--sandbox', 'disabled']:
+    log('status'); print('\u2713 Logged in as tl***@gmail.com'); raise SystemExit(0)
+role = 'checker' if '--mode' in argv else 'maker'
+m = re.match(r'Read ("(?:[^"\\]|\\.)*") in full', argv[-1])
+staged = Path(json.loads(m.group(1))).read_text()
+log(role)
+for item in plan.get(role + '_writes', []):
+    path = Path(item['path']); path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a' if item.get('append') else 'w') as f:
+        f.write(item['text'])
+for item in plan.get(role + '_git_writes', []):          # cwd is the worktree
+    if item['base'] == 'pointer':
+        target = Path('.git')
+    else:
+        gitdir = Path(Path('.git').read_text().strip().split(': ', 1)[1])
+        base = gitdir if item['base'] == 'gitdir' else (gitdir / (gitdir / 'commondir').read_text().strip()).resolve()
+        target = base / item['rel']
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, 'a') as f:
+        f.write(item['text'])
+if plan.get(role + '_tamper_canary'):
+    with open(os.path.join(os.path.dirname(os.path.dirname(os.environ['TMPDIR'])), 'canary', 'canary.txt'), 'w') as f:
+        f.write('tampered\n')
+if role == 'maker':
+    result = plan.get('maker_result', 'Changed and tested.')
+else:
+    counter = side('.count'); n = int(counter.read_text()) if counter.exists() else 0
+    counter.write_text(str(n + 1))
+    verdicts = plan.get('verdicts') or [dict(verdict='pass', findings=[])]
+    verdict = dict(verdicts[min(n, len(verdicts) - 1)])
+    if not plan.get('no_receipt'):
+        verdict.update(packet_id=re.search(r'"packet_id":"([^"]+)"', staged).group(1),
+                       revision=re.search(r'"revision":"([^"]+)"', staged).group(1), context_complete=True)
+    result = json.dumps(verdict)
+print(json.dumps(dict(type='result', subtype='success', is_error=False, duration_ms=1, result=result,
+                      session_id='fake-session-1', usage=dict(inputTokens=10, outputTokens=5))))
+raise SystemExit(plan.get('exit', 0))
+'''
+HELP_ALL = ('--print --output-format --mode --model --list-models --sandbox --workspace '
+            '--skip-worktree-setup --trust')
+
+# A fixture Cursor install laid out like the real one: <root>/versions/<build>/{cursor-agent, node,
+# index.js}. Alloy resolves the build directory and starts `<build>/node --use-system-ca
+# <build>/index.js <args>` directly, so the fixture `node` is a small Python shim that checks it was
+# started that way, records what it saw (MOCK_NODE_LOG) and runs the fake CLI in-process. The
+# `cursor-agent` launcher is a stub that exits 71 and leaves a marker: Alloy never executes it.
+CURSOR_BUILD = '2026.09.28-64d2043'
+LAUNCHER_STUB = '#!/bin/sh\necho "the bash launcher was executed" >> "@MARKER@"\nexit 71\n'
+NODE_SHIM = r'''#!@PYTHON@
+import json, os, runpy, sys
+here = os.path.dirname(os.path.abspath(__file__))
+log = os.environ.get("MOCK_NODE_LOG")
+if log:
+    with open(log, "a") as handle:
+        handle.write(json.dumps({"argv": sys.argv, "invoked_as": os.environ.get("CURSOR_INVOKED_AS"),
+                                 "compile_cache": os.environ.get("NODE_COMPILE_CACHE"),
+                                 "credential_store": os.environ.get("AGENT_CLI_CREDENTIAL_STORE")}) + "\n")
+if sys.argv[1:3] != ["--use-system-ca", os.path.join(here, "index.js")]:
+    sys.stderr.write("node: unexpected arguments\n")
+    raise SystemExit(9)
+cli = @CLI@
+sys.argv = [cli] + sys.argv[3:]
+if os.environ.get("MOCK_SANDBOX_PREFLIGHT") == "cli_fail" and "--version" in sys.argv:
+    raise SystemExit(7)
+os.environ["FAKE_CURSOR_VIA_NODE"] = "1"
+runpy.run_path(cli, run_name="__main__")
+'''
+
+
+def make_cursor_build(root, cli=None, name=CURSOR_BUILD, launcher_text=None):
+    """Create the fixture install under `root` and return its parts. `cli` is the Python file the
+    fixture `node` runs (default: the launcher file itself, whose text is then `launcher_text`)."""
+    root = Path(root)
+    versions = root / 'versions'
+    build = versions / name
+    build.mkdir(parents=True)
+    for directory in (versions, build):
+        os.chmod(str(directory), 0o700)
+    marker = root / 'launcher-ran'
+    launcher = build / 'cursor-agent'
+    launcher.write_text(launcher_text if launcher_text is not None else LAUNCHER_STUB.replace('@MARKER@', str(marker)))
+    os.chmod(str(launcher), 0o755)
+    if cli is not None and Path(cli).resolve() == MOCK.resolve():
+        # Extend the shared legacy fixture's metadata/env logging without changing other adapters.
+        private_cli = root / "mock-panelist"
+        fixture = MOCK.read_text().replace('if argv == ["--version"]', 'if "--version" in argv')
+        fixture = fixture.replace('"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR")',
+                                  '"HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMPDIR", "CURSOR_DATA_DIR", "CURSOR_CONFIG_DIR")')
+        private_cli.write_text(fixture)
+        cli = private_cli
+    node = build / 'node'
+    node.write_text(NODE_SHIM.replace('@PYTHON@', sys.executable).replace('@CLI@', repr(str(cli or launcher))))
+    os.chmod(str(node), 0o755)
+    index = build / 'index.js'
+    index.write_text('// fixture entry script: nothing ever runs it\n')
+    os.chmod(str(index), 0o644)
+    rg = build / 'rg'                     # the build's bundled ripgrep: a panel/Checker profile may run it
+    rg.write_text('#!/bin/sh\nexit 0\n')
+    os.chmod(str(rg), 0o755)
+    # Stand-in for /usr/bin/sw_vers (the fixture user plays the trusted owner),
+    # so a unit test never depends on, or starts, the real system tools.
+    system = root / 'system'
+    system.mkdir()
+    system_paths = []
+    for name in ('sw_vers',):
+        tool = system / name
+        tool.write_text('#!/bin/sh\nexit 0\n')
+        os.chmod(str(tool), 0o755)
+        system_paths.append(str(tool))
+    return types.SimpleNamespace(root=str(root), versions=str(versions), dir=str(build), launcher=str(launcher),
+                                 node=str(node), index=str(index), rg=str(rg), system=tuple(system_paths),
+                                 marker=str(marker))
+
+
+class CursorManagedBase(unittest.TestCase):
+    """Shared fixture: a real temporary Git repo, the fake cursor-agent behind the mock
+    sandbox-exec, and patched selection/readiness. Subclasses add tests only."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli_dir = os.path.realpath(tempfile.mkdtemp(prefix='alloy-exec-cursor-'))
+        # ALLOY_BIN_CURSOR is the build's `cursor-agent` launcher; here the launcher file is also the
+        # fake CLI (it refuses to run unless the fixture node started it, as Alloy must).
+        cls.install = make_cursor_build(cls.cli_dir + '/install', launcher_text='#!' + sys.executable + '\n' + FAKE_CURSOR)
+        cls.cli = cls.install.launcher
+        os.chmod(str(MOCK), 0o755)
+        # Fixed, so the cached sandbox self-test verdict is shared by every test in the class:
+        # the verdict is keyed on the denial set, and that set includes Alloy's own state paths.
+        cls.routing_home = os.path.join(cls.cli_dir, 'routing')
+        cls.xdg = os.path.join(cls.cli_dir, 'xdg')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.cli_dir, True)
+
+    def patch_core(self, **kw):
+        for key, value in kw.items():
+            patcher = patch.object(core, key, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def patch_e(self, name, *args, **kw):
+        patcher = patch.object(e, name, *args, **kw)
+        started = patcher.start()
+        self.addCleanup(patcher.stop)
+        return started
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(os.path.realpath(self.tmp.name))
+        self.repo = self.base / 'repo'
+        self.init_repo()
+        shutil.rmtree(self.routing_home, True)
+        self.dump, self.sblog, self.clog = (str(self.base / n) for n in ('sb-dump', 'sandbox.log', 'cursor.log'))
+        env = patch.dict(os.environ, {
+            'ALLOY_RUN_ROOT': str(self.base / 'state/runs'), 'ALLOY_ROUTING_HOME': self.routing_home,
+            'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off', 'XDG_STATE_HOME': self.xdg,
+            'ALLOY_BIN_CURSOR': self.cli, 'MOCK_SANDBOX_DUMP': self.dump, 'MOCK_SANDBOX_LOG': self.sblog})
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ('ALLOY_BIN_CURSOR_AGENT', 'ALLOY_CURSOR_MODEL', 'ALLOY_CURSOR_AGENT_MODEL',
+                     'ALLOY_CURSOR_EFFORT', 'ALLOY_CURSOR_AGENT_EFFORT', 'ALLOY_CURSOR_DENY_READ_PATHS',
+                     'CURSOR_API_KEY', 'CURSOR_API_ENDPOINT', 'ALLOY_PANELISTS', 'ALLOY_ALLOW_UNSANDBOXED',
+                     'ALLOY_CAPTURE_USAGE', 'MOCK_SANDBOX_PREFLIGHT', 'MOCK_VERSION'):
+            os.environ.pop(name, None)
+        self.patch_core(_CONFIG={}, SANDBOX_EXEC=str(MOCK), SANDBOX_TRUSTED_UID=os.getuid(),
+                        CURSOR_PLATFORM=sys.platform, CURSOR_ENV_ALLOW_PREFIXES=('LC_', 'MOCK_'),
+                        CURSOR_VERSIONS_ROOT=self.install.versions, CURSOR_SYSTEM_EXEC=self.install.system,
+                        log=lambda msg: None)
+        core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None)
+        self.addCleanup(lambda: core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None))
+        self.addCleanup(lambda: [os.path.exists(f) and os.remove(f) for f in
+                                 (self.cli + '.plan.json', self.cli + '.count')])
+        self.plan()
+        if os.path.exists(self.cli + '.count'):
+            os.remove(self.cli + '.count')
+        # Selection, readiness, probing and revalidation are patched as in ExecutionTests;
+        # tests that exercise one of them restore the real function.
+        self.maker = self.decision('composer-2.5', 'cursor-maker')
+        self.checker = self.decision('claude-opus-5-5-high', 'cursor-checker')
+        self.patch_e('readiness', return_value=dict(ready=True, blockers=[]))
+        self.select = self.patch_e('select', return_value=(self.maker, self.checker))
+        self.patch_e('probe')
+        self.patch_e('revalidate')
+        self.prompt = self.base / 'task.txt'
+        self.prompt.write_text('Change file.txt to new. Test it.')
+        self.args = argparse.Namespace(
+            repo=str(self.repo), prompt_file=str(self.prompt), route=False, maker_profile='cursor-maker',
+            checker_profile='cursor-checker', host_family='openai', allow_path=['file.txt'],
+            test=['exit 0'], max_fix_rounds=2, timeout=30, test_timeout=10, max_estimated_usd=None)
+        self.verdicts = []
+        self.calls = []
+        self.maker_hook = self.checker_hook = None
+        self.maker_extra, self.checker_extra = {}, {}
+        self.patch_e('dispatch', side_effect=self.fake_dispatch)
+
+    # -- fixtures ------------------------------------------------------------------ #
+    def init_repo(self):
+        self.repo.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
+        e.git(self.repo, 'checkout', '-b', 'main')
+        e.git(self.repo, 'config', 'user.name', 'Test')
+        e.git(self.repo, 'config', 'user.email', 'test@example.invalid')
+        (self.repo / 'file.txt').write_text('old\n')
+        (self.repo / '.gitignore').write_text('ignored.txt\nignored-dir/\n')
+        e.git(self.repo, 'add', '.')
+        e.git(self.repo, 'commit', '-qm', 'base')
+
+    def reset(self):
+        """A pristine repo and no retained tasks: a case that tampers with Git internals
+        must not poison the next one (or hit the four-retained-worktree cap)."""
+        shutil.rmtree(self.repo, True)
+        shutil.rmtree(e.home(core), True)
+        self.init_repo()
+        self.calls.clear()
+
+    def decision(self, model, profile):
+        effective = core.cursor_effective_model(model)
+        return dict(cli='cursor', profile=profile, family=core.cursor_model_family(model), model=model,
+                    effective_model=effective, effort=core.cursor_split_model(effective)[1].get('effort'),
+                    cursor_fast=False, billing_mode='subscription')
+
+    def plan(self, **kw):
+        Path(self.cli + '.plan.json').write_text(json.dumps(dict(kw, log=self.clog)))
+
+    def fake_dispatch(self, core_, task, role, prompt, folder):
+        """Stands in for the provider call: edits/answers directly in the worktree (no
+        sandbox, no process), with optional per-role tamper hooks and extra result fields."""
+        self.calls.append((role, prompt))
+        folder.mkdir(parents=True, exist_ok=True)
+        hook = self.maker_hook if role == 'maker' else self.checker_hook
+        if role == 'maker':
+            (Path(task['worktree']) / 'file.txt').write_text('new\n')
+        if hook:
+            hook(task)
+        if role == 'maker':
+            text = 'Updated file and ran checks.'
+        else:
+            verdict = self.verdicts.pop(0) if self.verdicts else dict(verdict='pass', findings=[])
+            receipt = task['rounds'][-1]['packet']
+            verdict.update(packet_id=receipt['id'], revision=receipt['revision'], context_complete=True)
+            text = json.dumps(verdict)
+        result = folder / 'result.md'
+        result.write_text(text)
+        return dict(status='ok', result_path=str(result), **(self.maker_extra if role == 'maker' else self.checker_extra))
+
+    def real_dispatch(self):
+        self.patch_e('dispatch', side_effect=REAL_DISPATCH)
+
+    def create(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = e.create(core, self.args)
+        ids = list((e.home(core) / 'tasks').glob('*/task.json'))
+        return code, e.load(core, ids[-1].parent.name)
+
+    def action(self, task, command, **kw):
+        args = argparse.Namespace(task_id=task['id'], command=command, squash=False, integrated_commit=None, dry_run=False)
+        for k, v in kw.items():
+            setattr(args, k, v)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return e.lifecycle(core, args)
+
+    def linked_worktree(self, name='wt'):
+        path = self.base / name
+        e.git(self.repo, 'worktree', 'add', '-q', '-b', 'branch-' + name, str(path))
+        return str(path)
+
+    # -- observations -------------------------------------------------------------- #
+    def cursor_calls(self, kind=None):
+        path = Path(self.clog)
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+        return [r for r in rows if kind is None or r['kind'] == kind]
+
+    def sandbox_calls(self):
+        path = Path(self.sblog)
+        return [json.loads(line)['cmd'] for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+
+    def inference(self):
+        """[(profile text, sandbox command)] for every print-mode inference call."""
+        return [(Path(self.dump, '%03d.sb' % i).read_text(), cmd)
+                for i, cmd in enumerate(self.sandbox_calls()) if '--skip-worktree-setup' in cmd]
+
+    def git_locations(self, task):
+        return core.cursor_git_locations(task['worktree'])
+
+
+class CursorManagedGitTests(CursorManagedBase):
+    def test_every_parent_git_call_disables_hooks_fsmonitor_and_system_config(self):
+        real, seen = subprocess.Popen, []
+
+        def spy(argv, *args, **kwargs):
+            if isinstance(argv, (list, tuple)) and argv and argv[0] == 'git':
+                seen.append((list(argv), kwargs))
+            return real(argv, *args, **kwargs)
+        with patch.object(subprocess, 'Popen', side_effect=spy):
+            code, task = self.create()
+            self.assertEqual(code, 0, task.get('error'))
+            self.assertEqual(self.action(task, 'integrate'), 0)
+        self.assertGreater(len(seen), 20)
+        subcommands = set()
+        for argv, kwargs in seen:
+            self.assertEqual(argv[:2], ['git', '-C'], argv)
+            self.assertEqual(argv[3:7], ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false'], argv)
+            self.assertEqual(kwargs['env']['GIT_CONFIG_NOSYSTEM'], '1', argv)
+            self.assertEqual(kwargs['env']['GIT_OPTIONAL_LOCKS'], '0', argv)
+            self.assertEqual(kwargs['stdin'], subprocess.DEVNULL, argv)
+            subcommands.add(next(a for a in argv[7:] if not a.startswith('-') and '=' not in a))
+        # clean (status), scope (diff, ls-files), worktree, add and commit are all covered ...
+        self.assertTrue({'status', 'diff', 'ls-files', 'worktree', 'add', 'commit', 'merge'} <= subcommands, subcommands)
+        # ... and so are the tripwire's own Git calls (bin/alloy _git: Git-location resolution)
+        self.assertTrue(any('--absolute-git-dir' in argv for argv, _ in seen))
+
+    def test_hooks_fsmonitor_and_system_config_are_ignored_behaviourally(self):
+        marker = self.base / 'ran'
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\ntouch %s\nexit 1\n' % marker)
+        hook.chmod(0o755)
+        e.git(self.repo, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '--allow-empty', '-qm', 'x')
+        self.assertFalse(marker.exists(), 'a repository hook ran in the parent')
+        monitor = self.base / 'monitor.sh'
+        monitor.write_text('#!/bin/sh\ntouch %s\nprintf "\\0"\n' % marker)
+        monitor.chmod(0o755)
+        e.git(self.repo, 'config', 'core.fsmonitor', str(monitor))
+        e.clean(self.repo)
+        self.assertFalse(marker.exists(), 'a command-valued fsmonitor ran in the parent')
+        self.assertEqual(e.git(self.repo, 'config', '--get', 'core.hooksPath'), '/dev/null')
+        self.assertEqual(e.git(self.repo, 'config', '--get', 'core.fsmonitor'), 'false')
+        system = self.base / 'system.cfg'
+        system.write_text('[alloy]\n\tprobe = fromsystem\n')
+        with patch.dict(os.environ, GIT_CONFIG_SYSTEM=str(system)):
+            plain = subprocess.run(['git', '-C', str(self.repo), 'config', '--get', 'alloy.probe'],
+                                   capture_output=True, text=True)
+            if plain.returncode != 0:
+                self.skipTest('this Git ignores GIT_CONFIG_SYSTEM')
+            self.assertEqual(e.git(self.repo, 'config', '--get', 'alloy.probe', check=False).returncode, 1)
+
+    def test_repository_aliases_cannot_replace_the_builtin_commands_alloy_runs(self):
+        marker = self.base / 'alias-ran'
+        for command in ('status', 'diff', 'ls-files', 'add', 'commit', 'worktree', 'rev-parse', 'symbolic-ref',
+                        'merge-base', 'update-ref', 'merge'):
+            e.git(self.repo, 'config', 'alias.' + command, '!touch ' + str(marker))
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(self.action(task, 'integrate'), 0)
+        self.assertFalse(marker.exists(), 'a repository alias replaced a built-in Git command')
+
+    def test_no_git_path_invokes_an_external_diff_or_textconv_helper(self):
+        marker = self.base / 'helper-ran'
+        helper = self.base / 'helper.sh'
+        helper.write_text('#!/bin/sh\ntouch %s\nexit 0\n' % marker)
+        helper.chmod(0o755)
+        e.git(self.repo, 'config', 'diff.external', str(helper))
+        e.git(self.repo, 'config', 'diff.evil.textconv', str(helper))
+        (self.repo / '.gitattributes').write_text('*.txt diff=evil\n')
+        e.git(self.repo, 'add', '.gitattributes')
+        e.git(self.repo, 'commit', '-qm', 'attributes')
+        with patch.dict(os.environ, GIT_EXTERNAL_DIFF=str(helper)):
+            code, task = self.create()
+            self.assertEqual(code, 0, task.get('error'))
+            self.assertEqual(self.action(task, 'integrate', squash=True), 0)
+        self.assertFalse(marker.exists(), 'an external diff or textconv helper ran')
+
+    def test_git_contract_is_the_same_as_the_bin_alloy_helper(self):
+        self.assertEqual(e.git_argv('/x', 'status'), core._git_argv('/x', ('status',)))
+        poisoned = {name: 'poison' for name in core._GIT_STRIPPED_ENV}
+        with patch.dict(os.environ, dict(poisoned, GIT_CONFIG_NOSYSTEM='0', GIT_OPTIONAL_LOCKS='1')):
+            mine, theirs = e.git_env(), core._git_env()
+        self.assertFalse(set(core._GIT_STRIPPED_ENV) & set(mine))
+        for key in ('GIT_CONFIG_NOSYSTEM', 'GIT_OPTIONAL_LOCKS'):
+            self.assertEqual(mine[key], theirs[key])
+
+    def test_git_output_and_runtime_are_bounded(self):
+        with patch.object(e, 'GIT_STDOUT_CAP', 10):
+            with self.assertRaisesRegex(e.ExecutionError, 'size limit'):
+                e.git(self.repo, 'rev-parse', 'HEAD')
+        import time
+        started = time.monotonic()
+        with self.assertRaisesRegex(e.ExecutionError, 'timed out'):
+            e.run_git(['git', '-c', 'alias.slow=!sleep 30', 'slow'], timeout=0.3)
+        self.assertLess(time.monotonic() - started, 10)
+        # An ordinary failure still reports Git's own message and honours check=False.
+        with self.assertRaisesRegex(e.ExecutionError, 'Git failed'):
+            e.git(self.repo, 'rev-parse', '--verify', 'no-such-ref')
+        self.assertNotEqual(e.git(self.repo, 'rev-parse', '--verify', 'no-such-ref', check=False).returncode, 0)
+
+
+class CursorManagedContractTests(CursorManagedBase):
+    def test_permissions_report_the_real_allowlist(self):
+        ad = core.ADAPTERS['cursor']
+        maker, checker = e.permissions(ad, True), e.permissions(ad, False)
+        for perms in (maker, checker):
+            self.assertEqual(perms['enforcement'], 'macos_sandbox_exec')
+            self.assertTrue(perms['os_isolation'])
+            self.assertTrue(perms['git_metadata_isolated'])
+            self.assertFalse(perms['approval_bypass'])
+            self.assertEqual(perms['scope_validation'], 'content_fingerprint_tripwire')
+        self.assertTrue(maker['repository_write'])
+        self.assertFalse(checker['repository_write'])
+        self.assertEqual(maker['command_execution'], 'allowed_in_worktree')
+        self.assertEqual(checker['command_execution'], 'denied')
+        self.assertEqual(maker['write_allowlist'], ['owned_worktree_non_git_content', 'private_runtime_state',
+                                                    'private_runtime_cache', 'private_runtime_tmp'])
+        self.assertEqual(checker['write_allowlist'], ['private_runtime_state', 'private_runtime_cache',
+                                                      'private_runtime_tmp'])
+        self.assertEqual(maker['cursor_mode'], 'agent_default')
+        self.assertEqual(checker['cursor_mode'], 'ask')
+        # Other providers keep exactly their previous shape.
+        claude = e.permissions(core.ADAPTERS['claude'], True)
+        self.assertFalse(claude['os_isolation'])
+        self.assertNotIn('write_allowlist', claude)
+        self.assertEqual(e.permissions(core.ADAPTERS['codex'], True)['enforcement'], 'codex_workspace_sandbox')
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(task['permissions']['maker'], maker)
+        self.assertEqual(task['permissions']['checker'], checker)
+
+    def build(self, decision, write):
+        wt = self.linked_worktree('wt-' + ('maker' if write else 'checker'))
+        ad = e.worker_adapter(core, decision, write)
+        ctx = dict(repo=wt, pdir=str(self.base / ('pdir-m' if write else 'pdir-c')), cwd=wt, timeout_s=10,
+                   managed_worktree=write)
+        return ad, ad.build_args(str(self.prompt), str(self.base / 'last'), 'make' if write else 'review', ctx), wt
+
+    def test_maker_argv_is_the_closed_non_force_form(self):
+        ad, argv, wt = self.build(self.maker, True)
+        self.assertNotIn('--mode', argv)
+        self.assertEqual(argv[argv.index('--sandbox') + 1], 'disabled')
+        for flag in ('--skip-worktree-setup', '--trust', '-p'):
+            self.assertEqual(argv.count(flag), 1)
+        self.assertEqual(argv[argv.index('--workspace') + 1], wt)
+        self.assertEqual(argv[argv.index('--model') + 1], self.maker['effective_model'])
+        self.assertEqual(argv[argv.index('--output-format') + 1], 'json')
+        self.assertFalse(set(FORBIDDEN_FLAGS) & set(argv))
+        self.assertNotIn('Change file.txt', ' '.join(argv))       # only a pointer to the staged file
+        self.assertFalse(ad.read_only)
+        self.assertTrue(core.ADAPTERS['cursor'].read_only)          # the shared adapter is untouched
+
+    def test_checker_argv_is_ask_mode_and_never_the_maker_form(self):
+        ad, argv, wt = self.build(self.checker, False)
+        self.assertEqual(argv[argv.index('--mode') + 1], 'ask')
+        self.assertEqual(argv.count('--mode'), 1)
+        self.assertEqual(argv[argv.index('--sandbox') + 1], 'disabled')
+        self.assertIn('--skip-worktree-setup', argv)
+        self.assertFalse(set(FORBIDDEN_FLAGS) & set(argv))
+        self.assertTrue(ad.read_only)
+        self.assertEqual(argv[argv.index('--model') + 1], self.checker['effective_model'])
+
+    def test_role_flag_does_not_change_boundary_readiness_or_bypass_wrapping(self):
+        maker = e.worker_adapter(core, self.maker, True)
+        checker = e.worker_adapter(core, self.checker, False)
+        self.assertFalse(maker.read_only)
+        self.assertTrue(checker.read_only)
+        self.assertTrue(maker.cursor_boundary_ready)
+        self.assertTrue(checker.cursor_boundary_ready)
+        with patch.object(core, '_CURSOR_PREFLIGHT', {}), patch.dict(os.environ, MOCK_SANDBOX_PREFLIGHT='write_leak'):
+            for ad in (e.worker_adapter(core, self.maker, True), e.worker_adapter(core, self.checker, False)):
+                self.assertFalse(ad.cursor_boundary_ready)
+                self.assertTrue(ad.requires_os_boundary)
+
+    def run_panelist(self, ad, role, name, wt):
+        return core.run_panelist(ad, str(self.prompt), str(self.base / 'runs' / name), 30, 100000,
+                                 'make' if role == 'maker' else 'review', repo=wt, managed_worktree=role == 'maker')
+
+    def test_unmodified_maker_and_checker_run_through_the_gateway(self):
+        wt = self.linked_worktree()
+        self.plan(no_receipt=True)         # the staged prompt here is not a review packet
+        for role, decision in (('maker', self.maker), ('checker', self.checker)):
+            ad = e.worker_adapter(core, decision, role == 'maker')
+            status = self.run_panelist(ad, role, 'control-' + role, wt)
+            self.assertEqual(status['status'], 'ok', status.get('error'))
+        self.assertEqual(len(self.inference()), 2)
+
+    def assert_refused(self, role, mutate, name):
+        wt = self.linked_worktree(name)
+        ad = e.worker_adapter(core, self.maker if role == 'maker' else self.checker, role == 'maker')
+        build = ad.build_args
+        ad.build_args = lambda *a, **k: mutate(list(build(*a, **k)))
+        before = len(self.inference())
+        status = self.run_panelist(ad, role, name, wt)
+        self.assertEqual(status['status'], 'error', name)
+        self.assertTrue(str(status['error']).startswith('refused'), (name, status['error']))
+        self.assertEqual(len(self.inference()), before, name + ': sandbox-exec must not start')
+
+    def insert(self, *extra):
+        return lambda argv: argv[:-1] + list(extra) + argv[-1:]
+
+    def test_argv_injection_after_every_rewrite_is_refused_before_sandbox_exec(self):
+        maker_cases = dict(
+            yolo=self.insert('--yolo'), force=self.insert('--force'), f=self.insert('-f'),
+            auto_review=self.insert('--auto-review'), approve_mcps=self.insert('--approve-mcps'),
+            resume=self.insert('--resume', 'abc'), cont=self.insert('--continue'),
+            plugin=self.insert('--plugin-dir', 'p'), add_dir=self.insert('--add-dir', 'd'),
+            worktree=self.insert('-w'), worktree_long=self.insert('--worktree', 'n'),
+            worktree_base=self.insert('--worktree-base', 'main'), plan=self.insert('--plan'),
+            mode_ask=self.insert('--mode', 'ask'), mode_plan=self.insert('--mode', 'plan'),
+            sandbox_duplicate=self.insert('--sandbox', 'disabled'), model_duplicate=self.insert('--model', 'composer-2.5'),
+            endpoint=self.insert('--endpoint', 'https://x.invalid'), endpoint_eq=self.insert('--endpoint=https://x.invalid'),
+            attached_e=self.insert('-ehttps://x.invalid'), header=self.insert('--header', 'X: y'),
+            attached_h=self.insert('-HX:y'), api_key=self.insert('--api-key', 'k'),
+            sandbox_enabled=lambda a: [('enabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
+            no_sandbox=lambda a: [x for i, x in enumerate(a) if x != '--sandbox' and a[i - 1] != '--sandbox'],
+            no_setup_skip=lambda a: [x for x in a if x != '--skip-worktree-setup'],
+            subcommand=lambda a: ['worker'] + a, extra_positional=lambda a: a + ['also do this'])
+        for name, mutate in maker_cases.items():
+            with self.subTest(role='maker', case=name):
+                self.assert_refused('maker', mutate, 'maker-' + name)
+        checker_cases = dict(
+            drop_mode=lambda a: [x for i, x in enumerate(a) if x != '--mode' and a[i - 1] != '--mode'],
+            plan_mode=lambda a: [('plan' if a[i - 1] == '--mode' else x) for i, x in enumerate(a)],
+            duplicate_mode=self.insert('--mode', 'ask'), yolo=self.insert('--yolo'), force=self.insert('--force'),
+            plugin=self.insert('--plugin-dir', 'p'), worktree=self.insert('--worktree', 'n'),
+            resume=self.insert('--resume', 'abc'), sandbox_enabled=lambda a: [
+                ('enabled' if a[i - 1] == '--sandbox' else x) for i, x in enumerate(a)],
+            subcommand=lambda a: ['persist'] + a, header=self.insert('-H', 'X: y'))
+        for name, mutate in checker_cases.items():
+            with self.subTest(role='checker', case=name):
+                self.assert_refused('checker', mutate, 'checker-' + name)
+
+    def test_injection_in_dispatch_is_refused_before_the_process_starts(self):
+        _, task = self.create()          # a real, retained worktree (the provider call is stubbed)
+        real_worker = e.worker_adapter
+        cases = dict(
+            maker_yolo=('maker', self.insert('--yolo')), maker_resume=('maker', self.insert('--resume', 'x')),
+            maker_mode=('maker', self.insert('--mode', 'ask')), maker_worktree=('maker', self.insert('-w')),
+            checker_no_mode=('checker', lambda a: [x for i, x in enumerate(a) if x != '--mode' and a[i - 1] != '--mode']),
+            checker_plugin=('checker', self.insert('--plugin-dir', 'p')),
+            checker_force=('checker', self.insert('-f')))
+        for name, (role, mutate) in cases.items():
+            with self.subTest(case=name):
+                def wrapper(core_, decision, write=False, mutate=mutate):
+                    ad = real_worker(core_, decision, write)
+                    build = ad.build_args
+                    ad.build_args = lambda *a, **k: mutate(list(build(*a, **k)))
+                    return ad
+                before = len(self.inference())
+                with patch.object(e, 'worker_adapter', side_effect=wrapper):
+                    result = REAL_DISPATCH(core, task, role, 'prompt', e.taskdir(core, task['id']) / ('inj-' + name))
+                self.assertEqual(result['status'], 'error')
+                self.assertTrue(str(result['error']).startswith('refused'), result['error'])
+                self.assertEqual(len(self.inference()), before)
+
+    def test_unknown_provider_never_inherits_another_providers_maker_permissions(self):
+        with self.assertRaisesRegex(e.ExecutionError, 'No managed write adapter'):
+            e.worker_adapter(core, dict(cli='llm', model='x', effort=None), True)
+        # A member of the writer list without its own branch reaches the final `else`.
+        with patch.object(e, 'MANAGED_WRITERS', e.MANAGED_WRITERS + ('llm',)):
+            ad = e.worker_adapter(core, dict(cli='llm', model='x', effort=None), True)
+            with self.assertRaisesRegex(e.ExecutionError, 'No managed write adapter'):
+                ad.build_args(str(self.prompt), str(self.base / 'last'), 'make', {})
+
+    def test_cursor_sessions_are_fresh_context_and_never_resumed(self):
+        def forbidden(*a, **k):
+            raise AssertionError('worker_session must not spawn the Cursor CLI: %r' % (a,))
+        task = dict(maker=self.maker, checker=self.checker)
+        with patch.object(subprocess, 'run', side_effect=forbidden), patch.object(subprocess, 'Popen', side_effect=forbidden):
+            for role in ('maker', 'checker'):
+                session = e.worker_session(core, task, role)
+                self.assertEqual((session['supported'], session['mode']), (False, 'fresh_context_fallback'))
+            # an edited or stale record cannot turn resume on
+            task['sessions']['maker'] = dict(id='12345678-1234-1234-1234-123456789abc', supported=True,
+                                             started=True, mode='native')
+            session = e.worker_session(core, task, 'maker')
+            self.assertEqual((session['supported'], session['mode']), (False, 'fresh_context_fallback'))
+
+    def test_probe_requires_the_boundary_and_every_help_flag_through_the_gateway(self):
+        REAL_PROBE(core, self.maker, True)
+        REAL_PROBE(core, self.checker, False)
+        self.assertTrue(self.cursor_calls('help'))
+        self.assertTrue(any('--help' in cmd for cmd in self.sandbox_calls()))      # only via sandbox-exec
+        for flag in e.CURSOR_MAKER_FLAGS:
+            with self.subTest(flag=flag):
+                self.plan(help=HELP_ALL.replace(flag, ''))
+                for decision, write in ((self.maker, True), (self.checker, False)):
+                    with self.assertRaisesRegex(e.ExecutionError, 'compatibility check failed'):
+                        REAL_PROBE(core, decision, write)
+        # `--mode` is not satisfied by `--model`; only the Checker needs it
+        self.plan(help=HELP_ALL.replace('--mode ', ''))
+        REAL_PROBE(core, self.maker, True)
+        with self.assertRaisesRegex(e.ExecutionError, 'compatibility check failed'):
+            REAL_PROBE(core, self.checker, False)
+        self.plan(help=HELP_ALL, help_exit=2)
+        with self.assertRaisesRegex(e.ExecutionError, 'compatibility check failed'):
+            REAL_PROBE(core, self.maker, True)
+
+    def test_probe_accepts_the_recorded_real_help_text(self):
+        self.plan(help=(ROOT / 'tests/fixtures/cursor-help.txt').read_text())
+        REAL_PROBE(core, self.maker, True)
+        REAL_PROBE(core, self.checker, False)
+
+    def test_dispatch_rederives_the_decision_and_scrubs_the_checker_prompt(self):
+        _, task = self.create()
+        folder = e.taskdir(core, task['id'])
+        before = len(self.inference())
+        for label, changes in (('auto', dict(model='auto', effective_model='auto')),
+                               ('unknown', dict(model='kimi-k3', effective_model='kimi-k3', family='cursor')),
+                               ('relabelled', dict(family='openai')), ('fast', dict(cursor_fast=True))):
+            with self.subTest(label):
+                tampered = dict(task, checker=dict(task['checker'], **changes))
+                with self.assertRaises((e.ExecutionError, core.routing.RoutingError)):
+                    REAL_DISPATCH(core, tampered, 'checker', 'prompt', folder / ('bad-' + label))
+        self.assertEqual(len(self.inference()), before)
+        # Anything recognisable in the Checker prompt is scrubbed before it is saved or staged,
+        # even outside the packet (a second line of defence after review_packet).
+        self.plan(no_receipt=True)
+        for kind, (text, value) in SECRETS.items():
+            with self.subTest(kind=kind):
+                result = REAL_DISPATCH(core, task, 'checker', 'Review this. ' + text, folder / ('scrub-' + kind))
+                self.assertEqual(result['status'], 'ok', result.get('error'))
+                for path in ('prompt.txt', 'prompt_in/prompt.md'):
+                    body = (folder / ('scrub-' + kind) / path).read_text()
+                    self.assertNotIn(value, body)
+                    self.assertIn('[REDACTED', body)
+        # the Maker prompt is the task itself and is not rewritten
+        result = REAL_DISPATCH(core, task, 'maker', 'Task: ' + SECRETS['jwt'][0], folder / 'maker-unscrubbed')
+        self.assertIn(GOOD_JWT, (folder / 'maker-unscrubbed' / 'prompt.txt').read_text())
+
+    def test_a_boundary_error_raised_inside_a_run_is_needs_attention_not_interrupted(self):
+        self.patch_e('dispatch', side_effect=core.CursorBoundaryError('uncertain path'))
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertEqual(task['state'], 'needs_attention')
+        self.assertIn('uncertain path', task['error'])
+
+    def test_probe_refuses_both_roles_without_a_validated_boundary(self):
+        for env in ({}, {'ALLOY_ALLOW_UNSANDBOXED': '1'}):
+            with patch.object(core, '_CURSOR_PREFLIGHT', {}), patch.dict(os.environ, dict(env, MOCK_SANDBOX_PREFLIGHT='write_leak')):
+                core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None)
+                for decision, write in ((self.maker, True), (self.checker, False)):
+                    with self.assertRaisesRegex(e.ExecutionError, 'sandbox unavailable.*Cursor roles are refused'):
+                        REAL_PROBE(core, decision, write)
+                self.assertEqual(self.cursor_calls(), [])                       # no CLI call of any kind
+        with patch.object(core, 'CURSOR_PLATFORM', 'no-such-platform'), patch.object(core, '_CURSOR_PREFLIGHT', {}):
+            with self.assertRaisesRegex(e.ExecutionError, 'Cursor roles are refused'):
+                REAL_PROBE(core, self.maker, True)
+
+
+class CursorManagedTamperTests(CursorManagedBase):
+    """The provider call is stubbed (fake_dispatch edits the worktree directly), so these
+    prove the managed run's OWN content/Git-internals verification, independent of the runner."""
+
+    def write(self, task, name, text, append=False):
+        with open(Path(task['worktree']) / name, 'a' if append else 'w') as f:
+            f.write(text)
+
+    def git_tamper(self, base, rel):
+        def tamper(task):
+            loc = self.git_locations(task)
+            path = Path(loc[base]) / rel if base != 'pointer' else Path(loc['dotgit'])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'a') as f:
+                f.write('\n# tampered\n')
+        return tamper
+
+    # -- Maker: scope over tracked, untracked AND ignored paths ---------------------- #
+    def test_maker_ignored_file_outside_scope_fails_before_gates_and_review(self):
+        self.maker_hook = lambda task: self.write(task, 'ignored.txt', 'scratch')
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertEqual(task['state'], 'needs_attention')
+        self.assertIn('outside allowed', task['error'])
+        self.assertIn('ignored.txt', task['error'])
+        self.assertEqual([c[0] for c in self.calls], ['maker'])
+        self.assertNotIn('gates', task['rounds'][0])
+        self.assertTrue(Path(task['worktree']).exists())            # retained for inspection
+
+    def test_maker_ignored_file_and_directory_inside_scope_are_allowed(self):
+        self.args.allow_path = ['file.txt', 'ignored.txt', 'ignored-dir', 'src/new.txt']
+
+        def hook(task):
+            self.write(task, 'ignored.txt', 'scratch')
+            os.makedirs(Path(task['worktree']) / 'ignored-dir/deep')
+            self.write(task, 'ignored-dir/deep/x.txt', 'x')
+            os.makedirs(Path(task['worktree']) / 'src')             # `src` is an ancestor of an allowed path
+            self.write(task, 'src/new.txt', 'n')
+        self.maker_hook = hook
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+
+    def test_maker_unrelated_new_directory_or_symlink_or_mode_change_fails(self):
+        cases = dict(
+            empty_directory=lambda task: os.makedirs(Path(task['worktree']) / 'emptydir'),
+            ignored_directory=lambda task: os.makedirs(Path(task['worktree']) / 'ignored-dir'),
+            symlink=lambda task: os.symlink('/etc/passwd', Path(task['worktree']) / 'link'),
+            mode_change=lambda task: os.chmod(Path(task['worktree']) / '.gitignore', 0o755))
+        for name, hook in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                self.maker_hook = hook
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertIn('outside allowed', task['error'])
+                self.assertEqual([c[0] for c in self.calls], ['maker'])
+
+    def test_maker_git_internals_change_fails_before_gates_and_review(self):
+        cases = [('gitdir', 'commondir'), ('gitdir', 'info/attributes'), ('gitdir', 'info/sparse-checkout'),
+                 ('gitdir', 'info/exclude'), ('gitdir', 'config.worktree'), ('gitdir', 'HEAD'),
+                 ('common', 'info/attributes'), ('common', 'config'), ('common', 'hooks/post-checkout'),
+                 ('common', 'packed-refs'), ('common', 'refs/heads/planted'), ('pointer', '.git')]
+        for base, rel in cases:
+            with self.subTest(base=base, rel=rel):
+                self.reset()
+                self.maker_hook = self.git_tamper(base, rel)
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertEqual(task['state'], 'needs_attention')
+                self.assertRegex(task['error'], 'protected Git internals|uncertain')
+                self.assertEqual([c[0] for c in self.calls], ['maker'])
+                self.assertNotIn('gates', task['rounds'][0])
+        # the ordinary (layout-preserving) cases are named precisely, not just "uncertain"
+        self.reset()
+        self.maker_hook = self.git_tamper('common', 'hooks/post-checkout')
+        self.assertIn('protected Git internals', self.create()[1]['error'])
+
+    def test_every_protected_git_internal_class_is_detected_for_both_roles(self):
+        """Direct, per-case check of the two verifiers against every entry the fingerprint
+        covers in BOTH Git locations, so the list cannot drift from bin/alloy's own constants."""
+        rels = list(core._GIT_FILES) + [t + '/planted' for t in core._GIT_TREES]
+        cases = [(base, rel) for base in ('gitdir', 'common') for rel in rels] + [('pointer', '.git')]
+        self.assertGreaterEqual(len(cases), 21)
+
+        def fresh():
+            self.reset()
+            shutil.rmtree(self.base / 'wt', True)
+            wt = self.linked_worktree('wt')
+            return dict(worktree=wt, allow_paths=['file.txt'])
+        task = fresh()
+        before = e.tripwire_manifest(core, task)
+        e.verify_cursor_maker(core, task, {}, before)                        # controls: nothing changed
+        e.verify_cursor_checker(core, task, {}, before)
+        for base, rel in cases:
+            for role, verify in (('maker', e.verify_cursor_maker), ('checker', e.verify_cursor_checker)):
+                with self.subTest(base=base, rel=rel, role=role):
+                    task = fresh()
+                    before = e.tripwire_manifest(core, task)
+                    self.git_tamper(base, rel)(task)
+                    with self.assertRaisesRegex(e.ExecutionError, 'protected Git internals|Checker changed|uncertain'):
+                        verify(core, task, {}, before)
+
+    def test_maker_reported_canary_git_or_out_of_scope_changes_fail_even_with_status_ok(self):
+        cases = [(dict(canary_changes=['out/canary.txt']), 'sandbox canary'),
+                 (dict(workspace_changes=['git:gitdir:HEAD']), 'protected Git internals'),
+                 (dict(changed_paths=['elsewhere.txt']), 'outside allowed')]
+        for extra, message in cases:
+            with self.subTest(extra=extra):
+                self.reset()
+                self.maker_extra = extra
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertIn(message, task['error'])
+                self.assertEqual([c[0] for c in self.calls], ['maker'])
+
+    def test_maker_edit_inside_scope_passes_and_only_cursor_workers_are_fingerprinted(self):
+        with patch.object(core, 'cursor_fingerprint', wraps=core.cursor_fingerprint) as fingerprint:
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(fingerprint.call_count, 4)                  # Maker before/after, Checker before/after
+        # A non-Cursor pair keeps its previous behaviour: no fingerprint, ignored files unchecked.
+        self.reset()
+        self.select.return_value = (dict(cli='claude', family='anthropic', model='sonnet', effort=None, profile='m'),
+                                    dict(cli='grok', family='xai', model='grok-4.6', effort=None, profile='c'))
+        self.maker_hook = lambda task: self.write(task, 'ignored.txt', 'scratch')
+        with patch.object(core, 'cursor_fingerprint', wraps=core.cursor_fingerprint) as fingerprint:
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        fingerprint.assert_not_called()
+
+    # -- Checker: nothing may change --------------------------------------------------- #
+    def test_checker_same_size_ignored_file_edit_fails_before_review(self):
+        self.args.allow_path = ['file.txt', 'ignored.txt']
+        self.maker_hook = lambda task: self.write(task, 'ignored.txt', 'aaaa')
+        self.checker_hook = lambda task: self.write(task, 'ignored.txt', 'bbbb')   # same name, same length
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('Checker changed', task['error'])
+        self.assertNotIn('review', task['rounds'][0])
+        self.assertEqual(e.git(task['worktree'], 'status', '--porcelain'), '')     # status alone cannot see it
+
+    def test_checker_any_worktree_change_or_commit_fails(self):
+        cases = dict(
+            tracked=lambda task: self.write(task, 'file.txt', 'tampered\n'),
+            untracked=lambda task: self.write(task, 'untracked.txt', 'x'),
+            new_ignored=lambda task: self.write(task, 'ignored.txt', 'x'),
+            commit=lambda task: e.git(task['worktree'], '-c', 'user.name=x', '-c', 'user.email=x@example.invalid',
+                                      'commit', '--allow-empty', '-qm', 'sneaky'))
+        for name, hook in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                self.checker_hook = hook
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertIn('Checker changed', task['error'])
+                self.assertNotIn('review', task['rounds'][0])
+
+    def test_checker_git_internals_change_fails_before_review(self):
+        cases = [('gitdir', 'commondir'), ('gitdir', 'info/attributes'), ('gitdir', 'info/sparse-checkout'),
+                 ('gitdir', 'config.worktree'), ('common', 'info/attributes'), ('common', 'config'),
+                 ('common', 'hooks/pre-commit'), ('common', 'refs/heads/planted'), ('common', 'packed-refs'),
+                 ('gitdir', 'HEAD'), ('pointer', '.git')]
+        for base, rel in cases:
+            with self.subTest(base=base, rel=rel):
+                self.reset()
+                self.checker_hook = self.git_tamper(base, rel)
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertRegex(task['error'], 'Checker changed|uncertain')
+                self.assertNotIn('review', task['rounds'][0])
+        self.reset()
+        self.checker_hook = self.git_tamper('gitdir', 'info/attributes')
+        self.assertIn('Checker changed worktree', self.create()[1]['error'])
+
+    def test_checker_reported_canary_or_workspace_change_fails_even_with_status_ok(self):
+        for extra, message in ((dict(canary_changes=['out/canary.txt']), 'protected canary'),
+                               (dict(workspace_changes=['tree:ignored.txt']), 'Checker changed worktree')):
+            with self.subTest(extra=extra):
+                self.reset()
+                self.checker_extra = extra
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertIn(message, task['error'])
+                self.assertNotIn('review', task['rounds'][0])
+
+    def test_cursor_checker_receipt_and_verdict_checks_still_fail_closed(self):
+        original = self.fake_dispatch
+
+        def missing(core_, task, role, prompt, folder):
+            result = original(core_, task, role, prompt, folder)
+            if role == 'checker':
+                Path(result['result_path']).write_text(json.dumps(dict(verdict='pass', findings=[])))
+            return result
+        self.patch_e('dispatch', side_effect=missing)
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('context receipt', task['error'])
+        self.assertTrue(Path(task['worktree']).exists())
+
+    def test_checker_failed_status_is_not_a_pass_and_names_the_reason(self):
+        def failed(core_, task, role, prompt, folder):
+            result = self.fake_dispatch(core_, task, role, prompt, folder)
+            if role == 'checker':
+                result['status'] = 'error'
+                result['error'] = 'refused: no supported boundary'
+            return result
+        self.patch_e('dispatch', side_effect=failed)
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertIn('Checker failed; no pass inferred', task['error'])
+        self.assertIn('refused: no supported boundary', task['error'])
+
+    # -- uncertainty fails closed as needs_attention, never as an interrupted task ------- #
+    def test_a_task_that_failed_a_tamper_check_is_never_resumed_in_place(self):
+        # The check is delta-based: resuming would take the planted state as its baseline.
+        hooks = dict(maker=lambda task: self.write(task, 'ignored.txt', 'scratch'),
+                     checker=self.git_tamper('gitdir', 'info/attributes'))
+        for role, hook in hooks.items():
+            with self.subTest(role=role):
+                self.reset()
+                self.maker_hook = hook if role == 'maker' else None
+                self.checker_hook = hook if role == 'checker' else None
+                code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertTrue(task['tripwire'])
+                self.maker_hook = self.checker_hook = None
+                before = len(self.calls)
+                self.assertEqual(self.action(task, 'resume'), 3)
+                task = e.load(core, task['id'])
+                self.assertEqual(task['state'], 'needs_attention')
+                self.assertIn('tamper check failed', task['error'])
+                self.assertEqual(len(self.calls), before)              # nothing was dispatched
+                self.assertTrue(Path(task['worktree']).exists())
+                with self.assertRaises(e.ExecutionError):
+                    self.action(task, 'cleanup')
+
+    def test_fingerprint_uncertainty_fails_closed_before_dispatch_and_before_acceptance(self):
+        real = core.cursor_fingerprint
+        for fail_at, expected_calls in ((1, []), (2, ['maker']), (3, ['maker']), (4, ['maker', 'checker'])):
+            with self.subTest(fail_at=fail_at):
+                counter = []
+
+                def uncertain(path, *a, **k):
+                    counter.append(path)
+                    if len(counter) == fail_at:
+                        raise core.CursorBoundaryError('fingerprint refused: cannot read a file')
+                    return real(path, *a, **k)
+                self.reset()
+                with patch.object(core, 'cursor_fingerprint', side_effect=uncertain):
+                    code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertEqual(task['state'], 'needs_attention')       # not `interrupted`
+                self.assertIn('uncertain', task['error'])
+                self.assertEqual([c[0] for c in self.calls], expected_calls)
+                self.assertNotIn('review', task['rounds'][0])
+                self.assertTrue(Path(task['worktree']).exists())
+
+
+class CursorManagedPacketTests(CursorManagedBase):
+    def packet(self, task, index, spec='goal', diff='diff', gate_text='ok', command='true'):
+        log = self.base / ('gate-%d.log' % index)
+        log.write_text(gate_text)                     # a raw log: gate() itself would have scrubbed it
+        record = dict(index=index, gates=[dict(command=command, exit_code=0, log=str(log))])
+        encoded, packet_id = e.review_packet(core, task, record, task['tip'], diff, spec)
+        saved = (e.taskdir(core, task['id']) / ('review-%d.json' % index)).read_text()
+        return encoded, saved, packet_id, record
+
+    def test_secrets_in_any_packet_source_never_reach_the_saved_packet(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        index = 10
+        for kind, (text, value) in SECRETS.items():
+            for source in ('spec', 'diff', 'gate_output', 'gate_command'):
+                with self.subTest(kind=kind, source=source):
+                    index += 1
+                    kw = {'spec': dict(spec='fix it: ' + text), 'diff': dict(diff='+ ' + text + '\n'),
+                          'gate_output': dict(gate_text='running\n' + text + '\n'),
+                          'gate_command': dict(command='echo ' + text)}[source]
+                    encoded, saved, packet_id, record = self.packet(task, index, **kw)
+                    self.assertNotIn(value, encoded)
+                    self.assertNotIn(value, saved)
+                    self.assertIn('[REDACTED', encoded)
+                    self.assertEqual(json.loads(encoded), json.loads(saved))     # what is sent is what is saved
+                    self.assertEqual(packet_id, __import__('hashlib').sha256(encoded.encode()).hexdigest())
+                    self.assertEqual(record['packet']['id'], packet_id)
+        # a packet with nothing to hide is unchanged apart from carrying the same fields
+        encoded, saved, packet_id, _ = self.packet(task, 99, spec='plain goal', diff='+ plain\n')
+        self.assertNotIn('REDACTED', encoded)
+        self.assertEqual(set(json.loads(encoded)), {'goal', 'base', 'revision', 'changed_files', 'diff', 'tests',
+                                                    'allowed_paths', 'dependencies'})
+
+    def test_secrets_in_spec_and_diff_never_reach_the_checker_prompt_or_saved_packet(self):
+        for kind, (text, value) in SECRETS.items():
+            with self.subTest(kind=kind):
+                self.prompt.write_text('Change file.txt to new. ' + text)
+                self.maker_hook = lambda task, text=text: (Path(task['worktree']) / 'file.txt').write_text('new ' + text + '\n')
+                self.calls.clear()
+                code, task = self.create()
+                self.assertEqual(code, 0, task.get('error'))
+                checker_prompt = self.calls[1][1]
+                saved = (e.taskdir(core, task['id']) / 'review-0.json').read_text()
+                self.assertNotIn(value, checker_prompt)
+                self.assertNotIn(value, saved)
+                self.assertIn('[REDACTED', checker_prompt)
+                # the receipt still works: the id is the hash of what was actually sent
+                self.assertEqual(task['rounds'][0]['packet']['id'],
+                                 __import__('hashlib').sha256(json.dumps(json.loads(saved), sort_keys=True).encode()).hexdigest())
+
+    def test_a_packet_that_cannot_be_redacted_safely_is_never_sent(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        real = core.redact_secrets
+        with patch.object(core, 'redact_secrets', side_effect=lambda t: ('{"broken', 1) if t.startswith('{') else real(t)):
+            with self.assertRaisesRegex(e.ExecutionError, 'redacted safely'):
+                self.packet(task, 5)
+        self.assertFalse((e.taskdir(core, task['id']) / 'review-5.json').exists())
+
+
+class CursorManagedSelectionTests(CursorManagedBase):
+    def setUp(self):
+        super().setUp()
+        r = self.r = core.routing
+        config = r.enable_cursor(core, r.starter(core))
+        self.codex = next(p for p in config['profiles'] if p['adapter'] == 'codex')
+        self.codex['enabled'] = True
+        r.save(r.root() / 'routing.json', config)
+        self.config = config
+        self.available = {n: dict(status='ready', compatible=True) for n in r.FAMILIES}
+        patcher = patch.object(r, 'inventory', return_value=self.available)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.args.host_family = 'openai'
+
+    def choose(self, maker, checker, host='openai'):
+        self.args.maker_profile, self.args.checker_profile, self.args.host_family = maker, checker, host
+        return REAL_SELECT(core, self.args, 'Task')
+
+    COMPOSER = 'cursor-large-composer-2-5'
+    GPT = 'cursor-large-gpt-5-6-sol'
+    CLAUDE = 'cursor-large-claude-opus-5-5'
+    GEMINI = 'cursor-medium-gemini-3-8-flash'
+    GROK = 'cursor-large-grok-4-7'
+
+    def test_cursor_served_models_take_the_family_of_their_model(self):
+        maker, checker = self.choose(self.COMPOSER, self.CLAUDE, host='openai')
+        self.assertEqual((maker['family'], checker['family']), ('cursor', 'anthropic'))
+        self.assertEqual((maker['cli'], checker['cli']), ('cursor', 'cursor'))
+        self.assertEqual(checker['effective_model'], 'claude-opus-5-5[effort=high,fast=false]')
+
+    def test_composer_is_independent_of_every_native_family(self):
+        for host, checker in (('openai', self.CLAUDE), ('anthropic', self.GPT), ('google', self.CLAUDE),
+                              ('xai', self.GPT)):
+            with self.subTest(host=host):
+                maker, checked = self.choose(self.COMPOSER, checker, host=host)
+                self.assertEqual(maker['family'], 'cursor')
+                self.assertNotIn(checked['family'], (host, 'cursor'))
+        with self.assertRaises(self.r.RoutingError):                # Composer is its own family: a Composer host
+            self.choose(self.COMPOSER, self.CLAUDE, host='cursor')
+
+    def test_an_anthropic_host_never_gets_cursor_claude_as_maker_or_checker(self):
+        with self.assertRaises(self.r.RoutingError):
+            self.choose(self.CLAUDE, self.GPT, host='anthropic')
+        with self.assertRaises(self.r.RoutingError):
+            self.choose(self.COMPOSER, self.CLAUDE, host='anthropic')
+        maker, checker = self.choose(self.COMPOSER, self.GPT, host='anthropic')      # the control
+        self.assertEqual((maker['family'], checker['family']), ('cursor', 'openai'))
+
+    def test_an_openai_maker_never_gets_cursor_gpt_as_checker(self):
+        with self.assertRaises(self.r.RoutingError):
+            self.choose(self.codex['id'], self.GPT, host='google')
+        maker, checker = self.choose(self.codex['id'], self.CLAUDE, host='google')   # the control
+        self.assertEqual((maker['family'], checker['family']), ('openai', 'anthropic'))
+        # the same holds for every family a Cursor profile can serve: a Checker of the Maker's family is refused
+        for profile in (self.GPT, self.CLAUDE, self.GEMINI, self.GROK):
+            with self.subTest(profile=profile):
+                with self.assertRaises(self.r.RoutingError):
+                    self.choose(profile, profile, host='cursor')
+
+    def test_select_rederives_and_refuses_relabelled_or_unroutable_decisions(self):
+        good = self.decision('composer-2.5', 'a')
+        self.assertEqual(e.check_decision(core, good), 'cursor')
+        bad = {
+            'auto': dict(good, model='auto', effective_model='auto', family='cursor'),
+            'unknown prefix': dict(good, model='kimi-k3', effective_model='kimi-k3', family='cursor'),
+            'relabelled': dict(good, family='anthropic'),
+            'gpt as cursor': dict(good, model='gpt-5.6-sol-high', effective_model='gpt-5.6-sol[effort=high,fast=false]',
+                                  family='cursor', effort='high'),
+            'fast without opt-in': dict(good, effective_model='composer-2.5[fast=true]'),
+            'denormalised': dict(good, effective_model='composer-2.5'),
+            'non-cursor adapter claims cursor': dict(cli='codex', family='cursor', model='gpt-5.6-sol')}
+        for label, decision in bad.items():
+            with self.subTest(label):
+                with self.assertRaises(e.ExecutionError):
+                    e.check_decision(core, decision)
+        self.assertEqual(e.check_decision(core, dict(cli='codex', family='openai', model='gpt-5.6-sol')), 'openai')
+
+    def test_select_uses_the_rederived_family_for_the_independence_check(self):
+        # A resolved decision that lies about its family (as an edited record could) is refused.
+        liar = dict(self.decision('claude-opus-5-5-high', 'x'), family='openai')
+        with patch.object(core.routing, 'resolve', side_effect=lambda *a, **k: dict(liar)):
+            with self.assertRaisesRegex(e.ExecutionError, 'family'):
+                self.choose(self.CLAUDE, self.GPT, host='google')
+
+    def test_pins_are_rederived_and_cannot_relabel_a_role(self):
+        for key in ('ALLOY_CURSOR_MODEL', 'ALLOY_CURSOR_AGENT_MODEL'):
+            with self.subTest(key=key):
+                with patch.dict(os.environ, {key: 'claude-opus-5-5-high'}):
+                    with self.assertRaises(self.r.RoutingError):
+                        self.choose(self.COMPOSER, self.GPT, host='anthropic')
+                # A Cursor pin applies to every Cursor profile, so the control pairs the matching
+                # Composer Maker with a non-Cursor Checker: a matching pin is not a change.
+                with patch.dict(os.environ, {key: 'composer-2.5'}):
+                    maker, checker = self.choose(self.COMPOSER, self.codex['id'], host='anthropic')
+                    self.assertEqual((maker['family'], checker['family']), ('cursor', 'openai'))
+
+    def revalidation_task(self):
+        maker, checker = self.choose(self.COMPOSER, self.CLAUDE, host='openai')
+        return dict(maker=maker, checker=checker, host_family='openai', max_estimated_usd=None)
+
+    def test_revalidation_covers_the_effective_model_and_fast_state(self):
+        task = self.revalidation_task()
+        REAL_REVALIDATE(core, task, 'maker')
+        REAL_REVALIDATE(core, task, 'checker')
+        # an edited stored decision is re-derived and refused
+        for label, changes in (('effective model', dict(effective_model='composer-2.5[effort=max,fast=false]')),
+                               ('fast flag', dict(cursor_fast=True)), ('family', dict(family='anthropic')),
+                               ('auto', dict(effective_model='auto'))):
+            with self.subTest(label):
+                tampered = dict(task, maker=dict(task['maker'], **changes))
+                with self.assertRaises(e.ExecutionError):
+                    REAL_REVALIDATE(core, tampered, 'maker')
+        # a changed profile (fast opt-in) or effort pin changes the effective model: start a new task
+        profile = next(p for p in self.config['profiles'] if p['id'] == self.COMPOSER)
+        profile['cursor_fast'] = True
+        self.r.save(self.r.root() / 'routing.json', self.config)
+        with self.assertRaisesRegex(e.ExecutionError, 'changed'):
+            REAL_REVALIDATE(core, task, 'maker')
+        profile['cursor_fast'] = False
+        self.r.save(self.r.root() / 'routing.json', self.config)
+        REAL_REVALIDATE(core, task, 'maker')
+        for key in ('ALLOY_CURSOR_EFFORT', 'ALLOY_CURSOR_AGENT_EFFORT'):
+            with patch.dict(os.environ, {key: 'max'}):
+                with self.assertRaisesRegex(e.ExecutionError, 'changed'):
+                    REAL_REVALIDATE(core, task, 'maker')
+        for key in ('ALLOY_CURSOR_MODEL', 'ALLOY_CURSOR_AGENT_MODEL'):
+            with patch.dict(os.environ, {key: 'claude-opus-5-5-high'}):
+                with self.assertRaises(self.r.RoutingError):
+                    REAL_REVALIDATE(core, task, 'maker')
+
+    def test_revalidation_and_readiness_rederive_even_when_routing_agrees_with_a_bad_record(self):
+        liar = dict(self.decision('claude-opus-5-5-high', 'x'), family='openai', answers=None)
+        task = dict(maker=dict(liar), checker=dict(liar), host_family='google', max_estimated_usd=None)
+        with patch.object(core.routing, 'resolve', side_effect=lambda *a, **k: dict(liar)):
+            for role in ('maker', 'checker'):
+                with self.assertRaisesRegex(e.ExecutionError, 'family'):        # stored == fresh, both wrong
+                    REAL_REVALIDATE(core, task, role)
+            self.args.maker_profile = self.args.checker_profile = self.CLAUDE
+            self.args.check, self.args.host_family, self.args.max_estimated_usd = False, 'google', None
+            report = REAL_READINESS(core, self.args, str(self.repo))
+        self.assertFalse(report['ready'])
+        self.assertTrue(any('family' in b for b in report['blockers']), report['blockers'])
+
+    def test_older_task_records_without_cursor_fields_still_revalidate(self):
+        maker, checker = self.choose(self.codex['id'], self.CLAUDE, host='google')
+        task = dict(maker=dict(maker), checker=dict(checker), host_family='google', max_estimated_usd=None)
+        for role in ('maker', 'checker'):
+            for key in ('effective_model', 'cursor_fast'):
+                task[role].pop(key, None)            # a record written before these fields existed
+        REAL_REVALIDATE(core, task, 'maker')
+
+    def test_real_select_probes_both_cursor_roles_through_the_gateway(self):
+        self.patch_e('probe', side_effect=REAL_PROBE)
+        maker, checker = self.choose(self.COMPOSER, self.CLAUDE, host='openai')
+        self.assertEqual(len(self.cursor_calls('help')), 2)
+        self.plan(help=HELP_ALL.replace('--skip-worktree-setup', ''))
+        with self.assertRaisesRegex(e.ExecutionError, 'compatibility check failed'):
+            self.choose(self.COMPOSER, self.CLAUDE, host='openai')
+
+    def test_readiness_refuses_a_cursor_role_without_a_boundary_and_names_the_reason(self):
+        self.patch_e('readiness', side_effect=REAL_READINESS)
+        self.patch_e('probe', side_effect=REAL_PROBE)
+        self.args.host_family, self.args.check = 'openai', False
+        self.args.maker_profile, self.args.checker_profile = self.COMPOSER, self.CLAUDE
+        report = REAL_READINESS(core, self.args, str(self.repo))
+        self.assertTrue(report['ready'], report['blockers'])
+        with patch.object(core, '_CURSOR_PREFLIGHT', {}), patch.dict(
+                os.environ, MOCK_SANDBOX_PREFLIGHT='write_leak', ALLOY_ALLOW_UNSANDBOXED='1'):
+            core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None)
+            report = REAL_READINESS(core, self.args, str(self.repo))
+        self.assertFalse(report['ready'])
+        for role in ('maker', 'checker'):
+            self.assertTrue(any(b.startswith(role + ':') and 'Cursor roles are refused' in b
+                                for b in report['blockers']), report['blockers'])
+
+
+class CursorManagedEndToEndTests(CursorManagedBase):
+    """The real dispatch, runner, spawn gateway and tripwires, behind the mock sandbox-exec and
+    the fake cursor-agent: a complete managed task with a Cursor Maker and a Cursor Checker."""
+
+    def setUp(self):
+        super().setUp()
+        self.real_dispatch()
+        self.plan(maker_writes=[dict(path='file.txt', text='new\n')])
+
+    def home(self):
+        return core.cursor_login_home()
+
+    def writes(self, profile, path):
+        return MOCKMOD.sbpl_decision(profile, 'file-write-create', path)
+
+    def test_full_cursor_execute_integrate_and_cleanup(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(task['state'], 'ready')
+        self.assertEqual((self.repo / 'file.txt').read_text(), 'old\n')      # the source checkout is untouched
+        record = task['rounds'][0]
+        maker, checker = record['maker'], record['checker']
+        for call, role, decision in ((maker, 'maker', self.maker), (checker, 'checker', self.checker)):
+            self.assertEqual(call['status'], 'ok', call.get('error'))
+            self.assertEqual(call['name'], 'cursor')
+            self.assertEqual(call['effective_model'], decision['effective_model'])
+            self.assertEqual(call['session_mode'], 'fresh_context_fallback')
+            self.assertEqual(call['permissions']['enforcement'], 'macos_sandbox_exec')
+            self.assertTrue(call['permissions']['os_isolation'])
+            self.assertEqual(call['provider_session_id'], 'fake-session-1')
+        self.assertFalse(maker['read_only'])
+        self.assertTrue(checker['read_only'])
+        self.assertEqual(maker['permissions']['write_allowlist'], list(e.CURSOR_MAKER_WRITES))
+        self.assertEqual(checker['permissions']['write_allowlist'], list(e.CURSOR_CHECKER_WRITES))
+        self.assertEqual(maker['changed_paths'], ['file.txt'])
+        self.assertEqual(maker['canary_changes'], [])
+        self.assertEqual(checker['workspace_changes'], [])
+        self.assertEqual(checker['canary_changes'], [])
+        self.assertEqual(task['sessions']['maker']['mode'], 'fresh_context_fallback')
+        self.assertEqual(task['sessions']['checker']['mode'], 'fresh_context_fallback')
+        self.assertEqual(self.action(task, 'integrate'), 0)
+        self.assertEqual((self.repo / 'file.txt').read_text(), 'new\n')
+        self.assertFalse(Path(task['worktree']).exists())
+
+    def test_each_process_gets_only_the_sandboxed_role_contract(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        (maker_profile, maker_cmd), (checker_profile, checker_cmd) = self.inference()
+        for cmd, role, decision in ((maker_cmd, 'maker', self.maker), (checker_cmd, 'checker', self.checker)):
+            tail = cmd[3:]
+            # the build's own node, started directly: never the bash launcher
+            self.assertEqual(cmd[:3], [os.path.realpath(self.install.node), '--use-system-ca', os.path.realpath(self.install.index)])
+            self.assertFalse(os.path.exists(self.install.marker))
+            self.assertEqual(tail[tail.index('--model') + 1], decision['effective_model'])
+            self.assertEqual(tail[tail.index('--sandbox') + 1], 'disabled')
+            self.assertEqual(tail[tail.index('--workspace') + 1], task['worktree'])
+            for flag in ('-p', '--trust', '--skip-worktree-setup'):
+                self.assertEqual(tail.count(flag), 1, (role, flag))
+            self.assertFalse(set(FORBIDDEN_FLAGS) & set(tail), role)
+            self.assertNotIn('Change file.txt', ' '.join(tail))                # task text is never on argv
+            self.assertRegex(tail[-1], r'^Read ".*/prompt_in/prompt\.md" in full for your instructions')
+        self.assertNotIn('--mode', maker_cmd)
+        self.assertEqual(checker_cmd[checker_cmd.index('--mode') + 1], 'ask')
+        self.assertEqual(checker_cmd.count('--mode'), 1)
+
+    def test_maker_profile_allows_only_the_worktree_content_and_the_private_runtime(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        (profile, _), _ = self.inference()
+        wt, loc, home = task['worktree'], self.git_locations(task), self.home()
+        runtime = re.findall(r'\(subpath "([^"]*/runtime/(?:state|cache|tmp))"\)', profile)
+        self.assertEqual(sorted(p.rsplit('/', 1)[1] for p in runtime), ['cache', 'state', 'tmp'])
+        for allowed in [wt + '/file.txt', wt + '/new/dir/file.txt'] + [p + '/x' for p in runtime]:
+            self.assertEqual(self.writes(profile, allowed), 'allow', allowed)
+        for denied in [loc['dotgit'], loc['gitdir'] + '/x', loc['gitdir'] + '/info/attributes',
+                       loc['common'] + '/x', loc['common'] + '/hooks/pre-commit', str(self.repo / 'file.txt'),
+                       str(self.base / 'sibling'), '/private/tmp/x', '/private/var/tmp/x', home + '/x',
+                       home + '/.cursor/x', home + '/.local/share/cursor-agent/x', home + '/Library/Caches/x',
+                       str(e.home(core) / 'tasks' / 'x')]:
+            self.assertEqual(self.writes(profile, denied), 'deny', denied)
+        self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-link', wt + '/link'), 'deny')
+        for rel in BUILTIN_DENIALS:
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', home + '/' + rel + '/secret'), 'deny', rel)
+
+    def test_checker_profile_grants_only_the_runtime_file_login_and_three_executables(self):
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        _, (profile, _) = self.inference()
+        wt, loc, home = task['worktree'], self.git_locations(task), self.home()
+        runtime = re.findall(r'\(subpath "([^"]*/runtime/(?:state|cache|tmp))"\)', profile)
+        self.assertEqual(len(runtime), 3)
+        for p in runtime:
+            self.assertEqual(self.writes(profile, p + '/x'), 'allow')
+        for denied in (wt + '/file.txt', wt + '/new.txt', loc['dotgit'], loc['gitdir'] + '/x', loc['common'] + '/x',
+                       home + '/x', '/private/tmp/x'):
+            self.assertEqual(self.writes(profile, denied), 'deny', denied)
+        # These are the three verified fixture binaries corresponding to the production
+        # node, bundled rg and /usr/bin/sw_vers. Assert the complete list, not just one denial.
+        allowed = [os.path.realpath(self.install.node), os.path.realpath(self.install.rg),
+                   os.path.realpath(self.install.system[0])]
+        self.assertEqual([line for line in profile.splitlines() if 'process-exec' in line],
+                         ['(deny process-exec*)', '(allow process-exec ' +
+                          ' '.join('(literal %s)' % json.dumps(path) for path in allowed) + ')'])
+        for path in allowed:
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'process-exec', path), 'allow', path)
+        for path in ('/bin/sh', '/bin/bash', '/usr/bin/security', '/usr/bin/open', '/usr/bin/log',
+                     '/usr/bin/env', self.install.launcher):
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'process-exec', path), 'deny', path)
+        auth = home + '/.cursor/auth.json'
+        self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', auth), 'allow')
+        self.assertEqual(self.writes(profile, auth), 'allow')
+        for path in (auth + '.tmp', home + '/.cursor/other.json'):
+            self.assertEqual(self.writes(profile, path), 'deny', path)
+        for path in (home + '/Library/Keychains', home + '/Library/Keychains/login.keychain-db'):
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', path), 'deny', path)
+        self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-link', wt + '/link'), 'deny')
+        for rel in BUILTIN_DENIALS:
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', home + '/' + rel + '/secret'), 'deny', rel)
+
+    def test_configured_sensitive_read_denials_reach_both_roles_and_never_widen_a_grant(self):
+        extra = self.base / 'extra-secret'
+        extra.mkdir()
+        (extra / 'sentinel.txt').write_text('sentinel\n')
+        with patch.dict(os.environ, ALLOY_CURSOR_DENY_READ_PATHS=str(extra)):
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        for profile, _ in self.inference():
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', str(extra / 'sentinel.txt')), 'deny')
+            self.assertEqual(MOCKMOD.sbpl_decision(profile, 'file-read-data', str(extra) + '/nested/x'), 'deny')
+            for rel in BUILTIN_DENIALS:                                   # additive: the built-ins stay
+                self.assertEqual(MOCKMOD.sbpl_decision(
+                    profile, 'file-read-data', self.home() + '/' + rel + '/secret'), 'deny', rel)
+        # an extra denial that covers the worktree the roles must read fails closed (no dispatch)
+        self.reset()
+        with patch.dict(os.environ, ALLOY_CURSOR_DENY_READ_PATHS=str(e.home(core))):
+            before = len(self.inference())
+            code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertEqual(len(self.inference()), before)
+        self.assertEqual((self.repo / 'file.txt').read_text(), 'old\n')
+
+    def test_a_correction_round_starts_a_fresh_context_and_never_resumes(self):
+        self.plan(maker_writes=[dict(path='file.txt', text='new\n')], verdicts=[
+            dict(verdict='fail', findings=[dict(path='file.txt', evidence='Concrete failure', fix='Fix it')]),
+            dict(verdict='pass', findings=[])])
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(len(task['rounds']), 2)
+        modes = [r[role]['session_mode'] for r in task['rounds'] for role in ('maker', 'checker')]
+        self.assertEqual(modes, ['fresh_context_fallback'] * 4)
+        for _, cmd in self.inference():
+            self.assertFalse({'--resume', '--continue', '--session-id'} & set(cmd))
+        staged = (e.taskdir(core, task['id']) / 'round-1/maker/prompt_in/prompt.md').read_text()
+        self.assertIn('TASK / ACCEPTANCE CRITERIA:', staged)               # a full prompt, not a resume update
+        self.assertIn('Concrete failure', staged)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            e.finish(core, task)
+        metrics = json.loads(output.getvalue())['metrics']
+        self.assertEqual((metrics['resumed_worker_calls'], metrics['fresh_worker_starts']), (0, 4))
+
+    def test_maker_writes_outside_scope_or_to_git_internals_fail_before_gates_and_review(self):
+        cases = [
+            ('ignored file', dict(maker_writes=[dict(path='file.txt', text='new\n'), dict(path='ignored.txt', text='x')]),
+             'outside allowed'),
+            ('gitdir attributes', dict(maker_writes=[dict(path='file.txt', text='new\n')],
+                                       maker_git_writes=[dict(base='gitdir', rel='info/attributes', text='* text\n')]),
+             'protected Git internals'),
+            ('gitdir commondir', dict(maker_git_writes=[dict(base='gitdir', rel='commondir', text=' ')]),
+             'protected Git internals|uncertain'),
+            ('common hook', dict(maker_git_writes=[dict(base='common', rel='hooks/post-checkout', text='#!/bin/sh\n')]),
+             'protected Git internals'),
+            ('pointer', dict(maker_git_writes=[dict(base='pointer', rel='', text='\n')]),
+             'protected Git internals|uncertain'),
+            ('outside canary', dict(maker_writes=[dict(path='file.txt', text='new\n')], maker_tamper_canary=True),
+             'canary')]
+        for label, plan, message in cases:
+            with self.subTest(label):
+                self.reset()
+                self.plan(**plan)
+                before = len(self.inference())
+                code, task = self.create()
+                self.assertEqual(code, 3, task.get('error'))
+                self.assertEqual(task['state'], 'needs_attention')
+                self.assertRegex(task['error'], message)
+                self.assertEqual(len(self.inference()) - before, 1)         # the Maker only: no review call
+                self.assertNotIn('gates', task['rounds'][0])
+                self.assertTrue(Path(task['worktree']).exists())
+
+    def test_checker_tampering_fails_before_review(self):
+        self.args.allow_path = ['file.txt', 'ignored.txt']
+        cases = [
+            ('ignored file', dict(maker_writes=[dict(path='file.txt', text='new\n'), dict(path='ignored.txt', text='aaaa')],
+                                  checker_writes=[dict(path='ignored.txt', text='bbbb')]), 'Checker changed worktree'),
+            ('git internals', dict(maker_writes=[dict(path='file.txt', text='new\n')],
+                                   checker_git_writes=[dict(base='common', rel='info/attributes', text='x\n')]),
+             'Checker changed worktree'),
+            ('outside canary', dict(maker_writes=[dict(path='file.txt', text='new\n')], checker_tamper_canary=True),
+             'protected canary')]
+        for label, plan, message in cases:
+            with self.subTest(label):
+                self.reset()
+                self.plan(**plan)
+                code, task = self.create()
+                self.assertEqual(code, 3, task.get('error'))
+                self.assertIn(message, task['error'])
+                self.assertNotIn('review', task['rounds'][0])
+
+    def test_no_boundary_means_no_cursor_process_and_unsandboxed_override_never_helps(self):
+        for env in ({}, {'ALLOY_ALLOW_UNSANDBOXED': '1'}):
+            with self.subTest(env=env):
+                self.reset()
+                with patch.object(core, '_CURSOR_PREFLIGHT', {}), patch.dict(
+                        os.environ, dict(env, MOCK_SANDBOX_PREFLIGHT='write_leak')):
+                    code, task = self.create()
+                self.assertEqual(code, 3)
+                self.assertEqual(task['state'], 'needs_attention')
+                self.assertRegex(task['error'], 'sandbox unavailable.*Cursor roles are refused')
+                self.assertEqual(self.cursor_calls(), [])
+                self.assertEqual(self.inference(), [])
+                self.assertEqual((self.repo / 'file.txt').read_text(), 'old\n')
+                self.assertNotIn('maker', task['rounds'][0])
+
+    def test_cursor_api_overrides_and_router_keys_never_reach_any_cursor_process(self):
+        poison = dict(CURSOR_API_KEY='poison-key', CURSOR_API_ENDPOINT='https://poison.invalid/api',
+                      TYPESAFE_API_KEY='poison-router', OPENROUTER_API_KEY='poison-router', SSH_AUTH_SOCK='/tmp/poison.sock')
+        self.patch_e('probe', side_effect=REAL_PROBE)              # status and help calls too
+        with patch.dict(os.environ, poison), patch.object(core, '_CONFIG', dict(poison)):
+            code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        calls = self.cursor_calls()
+        self.assertTrue({c['kind'] for c in calls} >= {'status', 'help', 'maker', 'checker'})
+        for call in calls:
+            self.assertFalse(set(poison) & set(call['env_names']), call['kind'])
+        self.assertNotIn('poison', json.dumps(self.sandbox_calls()))
+
+    def test_secrets_never_reach_the_staged_or_saved_checker_prompt(self):
+        text = '; '.join(v[0] for v in SECRETS.values())
+        self.prompt.write_text('Change file.txt to new. ' + text)
+        self.args.test = ["echo '%s'" % text]
+        self.plan(maker_writes=[dict(path='file.txt', text='new\n' + text + '\n')])
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        folder = e.taskdir(core, task['id']) / 'round-0/checker'
+        for path in (folder / 'prompt.txt', folder / 'prompt_in/prompt.md',
+                     e.taskdir(core, task['id']) / 'review-0.json'):
+            body = path.read_text()
+            for _, value in SECRETS.values():
+                self.assertNotIn(value, body, str(path))
+            self.assertIn('[REDACTED', body)
+        self.assertEqual(oct((folder / 'prompt_in/prompt.md').stat().st_mode & 0o777), '0o600')
+        for status_path in e.taskdir(core, task['id']).glob('round-*/*/status.json'):
+            for _, value in SECRETS.values():
+                self.assertNotIn(value, status_path.read_text())
+
+    def test_real_probe_readiness_and_dispatch_share_one_boundary(self):
+        self.patch_e('probe', side_effect=REAL_PROBE)
+        code, task = self.create()
+        self.assertEqual(code, 0, task.get('error'))
+        self.assertEqual(len(self.cursor_calls('help')), 2)         # run() probes the Maker and the Checker
+        core.ADAPTERS['cursor'].__dict__.pop('_auth_cache', None)
+        with patch.object(core, '_CURSOR_PREFLIGHT', {}), patch.dict(os.environ, MOCK_SANDBOX_PREFLIGHT='write_leak'):
+            self.reset()
+            code, task = self.create()
+        self.assertEqual(code, 3)
+        self.assertRegex(task['error'], 'Cursor roles are refused')

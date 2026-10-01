@@ -2,7 +2,7 @@
 name: alloy
 description: >-
   Run a multi-model panel: dispatch one prompt to every AI coding CLI
-  installed locally (Codex, Grok, Claude, Antigravity/agy) in parallel as a READ-ONLY panel, then judge
+  installed locally (Codex, Grok, Claude, Antigravity/agy, Cursor on macOS) in parallel as a READ-ONLY panel, then judge
   and synthesize their answers (consensus, disagreements, unique insights, blind
   spots) into one answer that surfaces disagreement instead of hiding it. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
@@ -34,17 +34,26 @@ Here the roles map to local tools:
 
 - **Panel** = the **complete set of available models** — every AI coding CLI
   installed and authenticated here (`codex`, `grok`, `antigravity` (Gemini, on
-  agy >= 1.1), and a fresh, independent `claude` instance; extensible), run **in
+  agy >= 1.1), `cursor` (macOS only; see the Cursor note below), and a fresh,
+  independent `claude` instance; extensible), run **in
   parallel, read-only, with web search enabled, and (by default) reading the
   user's repository** by
   `bin/alloy` — so they can ground coding answers in the *real* code, not just
   what you put in the prompt. Read-only adapters run live in the working tree;
   their CLI read-only flag prevents writes (best-effort; `antigravity` instead
   runs against an alloy-generated read-tool allow-list in an alloy-owned HOME,
-  and is granted the repo explicitly), and a tamper tripwire
+  and is granted the repo explicitly; `cursor` runs ask-mode inside a macOS
+  `sandbox-exec` profile), and a tamper tripwire
   flags any change (`summary.repo_tamper` — if true, tell the user to check
   `git status`). `ALLOY_WEB=0` disables web; `--no-repo`/`ALLOY_REPO=none`
-  disables repo access. Including a panelist of the host's own family is
+  disables repo access. **Cursor** is the public name (`cursor-agent` is only the
+  executable and an old input alias). Its safety comes from an Alloy-generated
+  macOS sandbox, not from Cursor's own flags: plan mode and Cursor's `--sandbox`
+  flag are not boundaries, and `--mode ask` is defense in depth. It is refused on
+  Linux and whenever `doctor` shows `[no-sbx]`; do not try to work around that,
+  and `ALLOY_ALLOW_UNSANDBOXED` never applies to it. Every Cursor call uses one
+  explicit model (`composer-2.5` unless pinned); `auto` and unknown model IDs are
+  refused. Including a panelist of the host's own family is
   deliberate **self-fusion** (a model fused with itself still adds lift); that
   instance is a *separate* process with its own fresh context.
 - **Judge + Synthesizer** = **you** (the host — Claude, Grok, Codex, or
@@ -85,11 +94,14 @@ panelist fetches go to those CLIs' own model providers.
    user to check `git status`. In managed **execute**, the Maker has explicit
    file-write and command permissions in its task worktree; the Checker remains
    read-only. Integration uses `alloy integrate`, which also cleans up after
-   proving integration. Worktrees are not security sandboxes. Never pass bypass flags
+   proving integration. Worktrees are not security sandboxes (a Cursor Maker or
+   Checker is the exception: it runs inside a macOS sandbox, with no force or
+   auto-approval flag in any Cursor role). Never pass bypass flags
    (`--yolo`, `-y`, `--dangerously-bypass-approvals-and-sandbox`, `cursor-agent
-   -f`) to any CLI, and never enable `ALLOY_ALLOW_UNSANDBOXED` on the user's
-   behalf (it lets write-capable agents run — they get a disposable repo *copy*,
-   never the real tree, but you still don't enable it for them).
+   -f`/`--force`) to any CLI, and never enable `ALLOY_ALLOW_UNSANDBOXED` on the
+   user's behalf (it lets write-capable agents run — they get a disposable repo
+   *copy*, never the real tree, but you still don't enable it for them; it never
+   applies to Cursor).
 
 3. **`allowed-tools` is not the safety boundary.** It gates *your* tools, not the
    subprocesses. The panel's read-only-ness comes from `bin/alloy` (each CLI's
@@ -137,6 +149,9 @@ Run `doctor` first:
 - If **1 panelist is ready**: it still works (a 1-model panel + your synthesis
   still adds a real check), but note the panel is thin.
 - If **2+ are ready**: proceed.
+- `antigravity` on macOS may show `[ready]` with `auth unknown`: Alloy never reads
+  the keychain where that login lives. Proceed; if the run reports status `auth`,
+  ask the user to sign in to `agy`.
 
 ### Shipped configuration and user credentials
 
@@ -214,8 +229,8 @@ combines those judgments with eligible profiles, cost, evidence and quota.
 Unknown measured success, latency and tokens per successful fix stay unknown;
 never present vendor benchmarks as local outcomes. Keep
 price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
-for coding and consider high for independent verification; retain Sol as a capable independent-family option and Astra for hard
-reasoning/science. These are task-specific priors, not universal winners.
+for coding and consider high for independent verification; prefer GPT-6.1 Sol (`codex-large-gpt-6-1-sol`) as the large Codex profile and
+keep Astra for hard reasoning/science. These are task-specific priors, not universal winners.
 
 ### Choose implementation and verification effort separately
 
@@ -280,6 +295,13 @@ progress messages are collapsed.
 Treat only fresh quota as evidence. Provider windows are shared subscription
 capacity, not this task's token count. Keep Antigravity's Gemini and Claude/GPT
 pools separate, and preserve Codex/Claude model-specific windows. Grok reads included-credit usage from its CLI billing endpoint when available.
+Alloy never reads the macOS keychain, so Claude quota may be unknown unless a
+credentials file, the opt-in status-line hook (`alloy usage
+--record-claude-statusline`) or the opt-in `usage.claude_probe` is in place;
+do not read the keychain yourself to fill it in. Cursor exposes no usage: its two
+pools, `cursor:models` (composer-*, cursor-grok-*) and `cursor:other` (every other
+model through Cursor, the more expensive pool), are unknown unless the user sets
+them by hand. Prefer Cursor-native models when routing through Cursor.
 The router uses this snapshot itself; do not override its
 family/tier constraints or treat unknown capacity as unlimited. Never redeem
 reset credits or change subscriptions as part of displaying usage.
@@ -540,7 +562,11 @@ Add `--check` to the execute command when a readiness report is needed before
 dispatch; normal execute also checks readiness. Show the combined blocker report
 instead of attempting workers one at a time.
 
-Set `--host-family` to your actual model family, not automatically to your CLI's.
+Set `--host-family` to your actual model family, not automatically to your CLI's
+(a host running Cursor's Composer is family `cursor`). A Cursor worker's family is
+the vendor of its model (`claude-*` Anthropic, `gpt-*` OpenAI, `gemini-*` Google,
+`grok-*` xAI, `composer-*` `cursor`), so a Cursor-served Claude model is never
+independent of an Anthropic host.
 Prefer `--route` whenever Jev routing is authorized/configured and its key is
 available (unless the user explicitly requests keyless mode); otherwise replace
 it with `--maker-profile <id> --checker-profile <id>`. Jev assesses the task once;
@@ -562,8 +588,13 @@ unseen round once. Tool output alone does not satisfy this requirement.
 Maker commands use explicit edit/test permissions. `--allow-path` is validated
 after execution, not an OS confinement boundary. Codex uses `workspace-write`;
 Claude/Grok use `acceptEdits` and Bash permissions; Antigravity uses `accept-edits`
-and a private per-run settings directory with write/command tools. No sandbox
-bypass flags. Inspect `task.json` and each worker's `status.json` for machine-readable
+and a private per-run settings directory with write/command tools. A Cursor Maker
+runs Cursor's normal agent mode inside the macOS sandbox and can write only the
+non-Git contents of its worktree, a private runtime and the CLI file login; a Cursor Checker runs
+`--mode ask` with that runtime and the CLI file login writable. Cursor profiles ship disabled, so
+enable them only when the user asks (`alloy setup --enable-cursor` or `alloy
+models enable --id ID`). If the sandbox is unavailable the role is refused. No
+sandbox bypass flags. Inspect `task.json` and each worker's `status.json` for machine-readable
 `permissions.repository_write`, `command_execution`, enforcement and scope.
 
 Never detach dispatch with `nohup`, `disown`, or shell backgrounding. Keep the
@@ -735,3 +766,11 @@ loop (at most three loops), with local gates and a compact host handoff.
 
 See `docs/methodology.md` for the mapping to OpenRouter Fusion and the
 host-as-judge bias disclosure, and `docs/adding-a-panelist.md` to add a CLI.
+
+Cursor login setup: `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login` once.
+All Cursor children use the file store at `~/.cursor/auth.json` (0600); the
+sandbox permits its refresh and directory chmod only, denies keychain reads and
+`/usr/bin/security` execution, and keeps the compile cache in the private runtime.
+Panels and Checkers allow only the bundled Node runtime, bundled `rg` and
+`/usr/bin/sw_vers` as literal executables. Maker commands keep their worktree
+execution grant, with `/usr/bin/security` denied. Alloy never reads the keychain.
