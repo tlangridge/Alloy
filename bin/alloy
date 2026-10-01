@@ -2296,7 +2296,14 @@ class CursorRuntime:
 
 # An interrupted run (SIGINT/SIGTERM) still removes its private runtimes at exit.
 _LIVE_RUNTIMES: "set[CursorRuntime]" = set()
-atexit.register(lambda: [rt.close(best_effort=True) for rt in list(_LIVE_RUNTIMES)])
+def _close_runtimes() -> None:
+    for rt in list(_LIVE_RUNTIMES):
+        try:
+            rt.close(best_effort=True)
+        except (CursorBoundaryError, OSError) as exc:
+            log(str(exc))
+
+atexit.register(_close_runtimes)
 
 
 def _cursor_containing_repo(path: str) -> "str | None":
@@ -2358,9 +2365,13 @@ def cursor_make_runtime(forbidden: "tuple | list" = (), *,
     if len(os.fsencode(os.path.join(base, "alloy-cursor-XXXXXXXX", "runtime", "state"))) > 84:
         base = "/private/tmp" if sys.platform == "darwin" else "/tmp"
     root = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-", dir=base))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-canary-"))
-    rt = CursorRuntime(root, outside)
+    # Register the first allocation immediately: a failed second mkdtemp or a
+    # signal in between allocations must not leak a runtime.
+    rt = CursorRuntime(root, "")
+    _LIVE_RUNTIMES.add(rt)
     try:
+        outside = os.path.realpath(tempfile.mkdtemp(prefix="alloy-cursor-canary-"))
+        rt.canary_outside = outside
         for d in (rt.state, rt.cache, rt.tmp, os.path.join(rt.canary, "sub")):
             os.makedirs(d, mode=0o700, exist_ok=True)
         for d in (root, os.path.dirname(rt.state), rt.state, rt.cache, rt.tmp, rt.canary, outside):
@@ -4737,6 +4748,7 @@ def _install_signal_handlers() -> None:
             pgids = list(_LIVE_PGIDS)
         for pg in pgids:
             _kill_group(pg)
+        _close_runtimes()
         sys.stderr.write("\n[alloy] interrupted; killed in-flight panelists\n")
         sys.exit(130)
 
