@@ -1009,6 +1009,7 @@ runpy.run_path(entry, run_name='__main__')
             for cli in ('claude', 'grok', 'antigravity'):
                 with self.subTest(cli=cli):
                     with patch.object(type(core.ADAPTERS[cli]), 'auth_state', return_value='ready'), \
+                            patch.object(type(core.ADAPTERS[cli]), 'read_only', True), \
                             self.assertRaisesRegex(e.ExecutionError, 'requires an OS read-only boundary'):
                         REAL_PROBE(core, dict(cli=cli, model='test', effort=None), False)
                     ad = e.worker_adapter(core, dict(cli=cli, model='test', effort=None), False)
