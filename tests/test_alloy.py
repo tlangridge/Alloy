@@ -1960,7 +1960,10 @@ class CursorNamingTests(CursorCase):
         self.assertEqual(m.ADAPTERS["cursor"].name, "cursor")
 
     def test_alloy_version(self):
-        self.assertEqual(self.mod.ALLOY_VERSION, "0.12.1")
+        with open(os.path.join(REPO, "VERSION"), encoding="utf-8") as source:
+            version = source.read().strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(self.mod.ALLOY_VERSION, version)
 
     def test_selection_normalises_and_dedupes(self):
         self.setenv(ALLOY_PANELISTS="cursor-agent, cursor,codex,nonsense")

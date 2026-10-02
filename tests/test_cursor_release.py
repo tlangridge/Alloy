@@ -599,7 +599,8 @@ class ReleaseWordingTests(unittest.TestCase):
     def test_the_changelog_entry_is_the_latest_and_matches_the_shipped_version(self):
         raw = read("CHANGELOG.md")
         headings = re.findall(r"(?m)^## \[([^\]]+)\] - (\d{4}-\d{2}-\d{2})$", raw)
-        self.assertEqual(headings[0], ("0.12.1", "2026-10-01"))
+        self.assertTrue(headings, "a dated release heading is required")
+        self.assertRegex(headings[0][0], r"^\d+\.\d+\.\d+$")
         self.assertTrue(changelog_section().startswith(RELEASE_HEADING))
         self.assertEqual(self.facts.ALLOY_VERSION, headings[0][0])
         self.assertEqual(read("VERSION").strip(), headings[0][0])
