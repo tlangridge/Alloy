@@ -33,7 +33,8 @@ Design notes (why it is the way it is):
     the project directory (that would let a hostile repo run code).
 
 No API keys live here and Alloy sends no telemetry. Opt-in Jev routing sends
-the task to TypeSafe; panel prompts go to the selected CLI providers. Explicit
+the task to TypeSafe/OpenRouter; optional Jevgrep search sends eligible source to
+its saved provider. Panel prompts go to the selected CLI providers. Explicit
 model refreshes query CLI providers. Cached subscription reads use native provider
 usage interfaces; ALLOY_USAGE=off disables them. The optional git update check can be
 disabled with ALLOY_NO_UPDATE_CHECK=1.
@@ -82,13 +83,14 @@ if __name__ == '__main__':
             sys.exit(0)
 import alloy_routing as routing
 import alloy_execution as execution
+import alloy_search as search
 from datetime import datetime, timezone
 try:
     import pwd
 except ImportError:  # pragma: no cover - non-POSIX
     pwd = None
 
-ALLOY_VERSION = "0.12.1"
+ALLOY_VERSION = "0.13.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -4817,6 +4819,7 @@ def build_parser() -> argparse.ArgumentParser:
     ve.set_defaults(func=cmd_version)
     routing.register(sub, sys.modules[__name__])
     execution.register(sub, sys.modules[__name__])
+    search.register(sub, sys.modules[__name__])
     return p
 
 
@@ -4826,7 +4829,7 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (routing.RoutingError, execution.ExecutionError, OSError, UnicodeError) as exc:
+    except (routing.RoutingError, execution.ExecutionError, search.SearchError, OSError, UnicodeError) as exc:
         log(str(exc))
         return 2
 
