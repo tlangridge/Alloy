@@ -62,6 +62,17 @@ Cursor quota is unknown unless you set it by hand.
 [Model research](docs/model-research.md) informs task-specific recommendations
 within a bounded cost tolerance.
 
+## Find code with Jevgrep
+
+Optional `alloy search "Where is this behavior implemented?" --root ./src` uses
+[Jevgrep](https://github.com/dzhng/jevgrep) to supply native source context to
+agents before implementation. Alloy preserves its tuned search and output
+defaults. Install `@dzhng/jevgrep` separately, then run
+`alloy search --auth-from-routing` to explicitly reuse your TypeSafe/OpenRouter
+key, or `jg auth` for separate setup. `alloy search --check` checks local readiness
+without inference. Searches upload eligible source and incur separate API usage;
+they are not automatically run by execute. See [setup and agent workflow](docs/search.md).
+
 ## Effort by role
 
 Alloy can use different reasoning effort for implementation and verification.

@@ -3,6 +3,16 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.13.0] - 2026-10-02
+
+- Add optional `alloy search` through Jevgrep, preserving upstream search defaults
+  and native agent context packets. The skill reuses relevant source evidence in
+  Maker handoffs without replacing independent Checker review.
+- Add inference-free local readiness checks and explicit TypeSafe/OpenRouter key
+  reuse through stdin, preserving any existing Jevgrep credentials by default.
+- Keep search opt-in and separately metered; bound subprocess lifetime/output,
+  retain incomplete results honestly, and fall back to ordinary source discovery.
+
 ## [0.12.1] - 2026-10-01
 
 - Managed Claude Makers and Checkers start with `--disallowedTools` denying direct rm
