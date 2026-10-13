@@ -3,6 +3,23 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.14.0] - 2026-10-13
+
+- Make quality and fewer revisions the routing objective for new setups. Select
+  Maker and Checker jointly; use capacity and cost among similarly qualified
+  choices. Migrate existing policy explicitly with a backup while preserving
+  profiles, pins, billing and quota pools.
+- Add Muse Wonder Full read-only consultation and checking, Argon profiles and
+  streamed AGY headless input, Claude panel effort forwarding, exact model-family
+  validation and current frontier evidence. Unsupported managed Muse writes stay
+  ineligible and its subscription capacity remains unknown.
+- Gate required tools and rendered image review on verified harness support.
+  Bind scoped, bounded image bytes to review receipts and retain demanding review
+  floors instead of promoting small models from a tiny seeded sample.
+- Record prompt-free process outcomes and provide an explicitly opt-in complete
+  execute evaluation. Keep gates, review, hidden correctness, integration and
+  user acceptance separate; count every worker attempt and correction.
+
 ## [0.13.0] - 2026-10-02
 
 - Add optional `alloy search` through Jevgrep, preserving upstream search defaults

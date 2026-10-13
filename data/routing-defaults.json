@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "jev_model": "jev-1.13.0",
   "profiles": [
     {
@@ -13,10 +13,7 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "codex",
-      "evidence": "alloy-bench 2026-09-25: small-tier Maker; reviewed seeded bugs as well as large models (Luna 5/6, Flash-low 6/6)",
-      "tier_by_mode": {
-        "review": "large"
-      }
+      "evidence": "Historical small-task component measurements; no promotion to demanding independent reviews."
     },
     {
       "id": "codex-medium",
@@ -152,10 +149,7 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "antigravity",
-      "evidence": "alloy-bench 2026-09-25: small-tier Maker; reviewed seeded bugs as well as large models (Luna 5/6, Flash-low 6/6)",
-      "tier_by_mode": {
-        "review": "large"
-      }
+      "evidence": "Historical small-task component measurements; no promotion to demanding independent reviews."
     },
     {
       "id": "antigravity-medium-gemini-3.8-flash-medium",
@@ -273,6 +267,75 @@
       "billing_mode": "subscription",
       "quota_pool": "cursor",
       "evidence": "Cursor discovery only; not benchmarked"
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "adapter": "claude",
+      "model": "claude-sonnet-5-5",
+      "family": "anthropic",
+      "effort": "high",
+      "tier": "large",
+      "cost_rank": 2.25,
+      "quota_pool": "claude",
+      "effort_by_mode": {
+        "review": "high"
+      },
+      "enabled": true,
+      "billing_mode": "unknown",
+      "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
+    },
+    {
+      "id": "claude-opus-5-5-xhigh",
+      "adapter": "claude",
+      "model": "claude-opus-5-5",
+      "family": "anthropic",
+      "effort": "xhigh",
+      "tier": "large",
+      "cost_rank": 3.5,
+      "quota_pool": "claude",
+      "enabled": true,
+      "billing_mode": "unknown",
+      "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
+    },
+    {
+      "id": "antigravity-argon-medium",
+      "adapter": "antigravity",
+      "model": "gemini-4-argon-medium",
+      "family": "google",
+      "effort": "medium",
+      "tier": "large",
+      "cost_rank": 2,
+      "quota_pool": "antigravity",
+      "effort_by_mode": {},
+      "enabled": true,
+      "billing_mode": "unknown",
+      "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
+    },
+    {
+      "id": "antigravity-argon-high",
+      "adapter": "antigravity",
+      "model": "gemini-4-argon-high",
+      "family": "google",
+      "effort": "high",
+      "tier": "large",
+      "cost_rank": 2.5,
+      "quota_pool": "antigravity",
+      "enabled": true,
+      "billing_mode": "unknown",
+      "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
+    },
+    {
+      "id": "muse-wonder-full",
+      "adapter": "muse",
+      "model": "muse-wonder-full-1.0",
+      "family": "meta",
+      "effort": "xhigh",
+      "tier": "large",
+      "cost_rank": 3,
+      "quota_pool": "muse",
+      "enabled": true,
+      "billing_mode": "unknown",
+      "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
     }
   ],
   "quota_pools": {},
@@ -284,6 +347,7 @@
     "discovery_ttl_seconds": 86400,
     "min_tier_by_mode": {
       "consult": "medium"
-    }
+    },
+    "objective": "quality_first"
   }
 }

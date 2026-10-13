@@ -60,6 +60,15 @@ class RoutingCase(unittest.TestCase):
             if k.startswith('ALLOY_') and k not in ('ALLOY_ROUTING_HOME', 'ALLOY_CONFIG', 'ALLOY_USAGE'):
                 os.environ.pop(k)
         self.config = r.starter(core)
+        # Compatibility coverage deliberately exercises the original cost policy.
+        # Quality-first defaults and invariants have their own test module.
+        self.config['policy']['objective'] = 'cost_first'
+        for p in self.config['profiles']:
+            if p['id'] in ('claude-sonnet-5-5', 'claude-opus-5-5-xhigh',
+                            'antigravity-argon-medium', 'antigravity-argon-high', 'muse-wonder-full'):
+                p['enabled'] = False
+            if p['id'] in ('codex-small', 'antigravity-small'):
+                p['tier_by_mode'] = {'review': 'large'}
         # Generic tier tests use consult mode; the shipped consult floor has its own test.
         self.config['policy'].pop('min_tier_by_mode', None)
         r.save(r.root() / 'routing.json', self.config)
@@ -137,8 +146,9 @@ class RouterTests(RoutingCase):
         self.assertIn('independent review', payload['questions']['review_fit_0']['instructions'])
 
     def test_execute_uses_review_specific_jev_judgments(self):
-        maker = dict(family='google', answers=response()['answers'], review_model_fits={'claude-large': .9})
-        checker = dict(family='anthropic')
+        maker = dict(cli='antigravity', model='gemini-4-argon-high', effort='high', family='google',
+                     answers=response()['answers'], review_model_fits={'claude-large': .9})
+        checker = dict(cli='claude', model='claude-opus-5-5', effort='high', family='anthropic')
         args = argparse.Namespace(max_estimated_usd=None, route=True, maker_profile=None,
                                   checker_profile=None, host_family='openai')
         with patch.object(r, 'inventory', return_value=self.available), patch.object(r.usage, 'get', return_value={}), \
@@ -657,7 +667,9 @@ class RouterTests(RoutingCase):
             r.setup(core, args)
         self.assertEqual(first, r.load())
         self.assertEqual(first['profiles'][:2], [original, disabled])
-        self.assertEqual(sum(p['model'] == 'gpt-6-sol' for p in first['profiles']), 1)
+        variants = [p for p in first['profiles'] if p['model'] == 'gpt-6-sol']
+        self.assertEqual({p['effort'] for p in variants}, {'low', 'high'})
+        self.assertTrue(all(not p['enabled'] for p in variants))
         self.assertTrue(any(p['model'] == 'claude-opus-5-5' for p in first['profiles']))
         self.assertTrue(all(p['billing_mode'] == 'subscription' for p in first['profiles'] if p['adapter'] == 'codex'))
         self.assertEqual((r.root() / 'routing.json').stat().st_mode & 0o777, 0o600)
@@ -712,8 +724,8 @@ class RouterTests(RoutingCase):
         with self.assertRaises(r.RoutingError):
             r.validate(self.config)
         shipped = {p['id']: p for p in r.starter(core)['profiles']}
-        self.assertEqual(shipped['codex-small']['tier_by_mode'], {'review': 'large'})
-        self.assertEqual(shipped['antigravity-small']['tier_by_mode'], {'review': 'large'})
+        self.assertNotIn('tier_by_mode', shipped['codex-small'])
+        self.assertNotIn('tier_by_mode', shipped['antigravity-small'])
 
     def test_quota_pacing_is_opt_in_and_spares_the_host(self):
         self.assertEqual(r.usage.window_seconds('5h'), 5 * 3600)
@@ -855,7 +867,7 @@ class CursorRoutingTests(RoutingCase):
 
     # -- registry, families, independence ---------------------------------------------------
     def test_registry_rubric_and_family_parser_mirror_the_gateway(self):
-        self.assertEqual(r.RUBRIC_VERSION, 5)
+        self.assertEqual(r.RUBRIC_VERSION, 6)
         self.assertEqual(list(r.FAMILIES).count('cursor'), 1)
         self.assertEqual(r.MODEL_KEYS['cursor'], 'ALLOY_CURSOR_MODEL')
         self.assertEqual(r.EFFORT_KEYS['cursor'], 'ALLOY_CURSOR_EFFORT')
@@ -1081,7 +1093,7 @@ class CursorRoutingTests(RoutingCase):
 
     def test_evidence_rows_declare_native_adapters_and_fast_state(self):
         data = self.data()
-        native = {'openai': 'codex', 'anthropic': 'claude', 'xai': 'grok', 'google': 'antigravity'}
+        native = {'openai': 'codex', 'anthropic': 'claude', 'xai': 'grok', 'google': 'antigravity', 'meta': 'muse'}
         self.assertTrue(data['models'])
         for row in data['models']:
             with self.subTest(models=row['models']):
@@ -1408,7 +1420,11 @@ class CursorRoutingTests(RoutingCase):
             with patch.dict(core.ADAPTERS, {cli: fake}):
                 argv = r.routed_adapter(core, dict(cli=cli, model='m', effort='high')).build_args('p', 'l', 'consult')
                 self.assertEqual(argv, ['--model', 'm', '--effort', 'high'])
-        self.assertEqual(set(r.EFFORT_FLAG_ADAPTERS) | {'codex', 'cursor'}, set(r.FAMILIES))
+        self.assertEqual(set(r.EFFORT_FLAG_ADAPTERS) | {'codex', 'cursor', 'muse'}, set(r.FAMILIES))
+        fake = types.SimpleNamespace(name='muse', build_args=lambda *a, **k: ['exec', '--model', 'm'])
+        with patch.dict(core.ADAPTERS, {'muse': fake}):
+            argv = r.routed_adapter(core, dict(cli='muse', model='m', effort='xhigh')).build_args('p', 'l', 'consult')
+            self.assertEqual(argv, ['exec', '--model', 'm', '--reasoning-effort', 'xhigh'])
 
     # -- probe, environment, discovery ---------------------------------------------------------
     def cursor_ready(self, help_text=CURSOR_HELP, version='2026.09.28-64d2043', code=0):

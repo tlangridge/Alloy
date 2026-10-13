@@ -1,7 +1,7 @@
 # Host or Jev routing
 
 Alloy can ask Jev to assess a task, then choose a configured model through
-Codex, Claude, Grok, Antigravity (`agy`) or Cursor. Routing is opt-in. Regular
+Codex, Claude, Grok, Antigravity (`agy`), Muse or Cursor. Routing is opt-in. Regular
 panels retain their existing behavior. Cursor routing has extra rules and is
 opt-in per profile; see [Cursor](#cursor).
 
@@ -272,15 +272,30 @@ See [model research](model-research.md) for strengths, limitations and sources.
 candidates without modifying configuration. Route JSON now includes the top three
 eligible recommendations and the selection cost basis.
 
-The router uses Jev's task kind to favor documented strengths within 25% of the
-cheapest eligible cost for medium/large tasks. Small tasks stay cost-first. Prices
-are directly compared only when all eligible profiles are metered with known
-prices; mixed billing retains configured relative ranks and quota pressure.
+New installations use `policy.objective: quality_first`. After hard eligibility
+filters, categorical role suitability ranks ahead of cost. Quota pressure and
+configured spend distinguish equally qualified choices. New task kinds include
+`ui_design`, `image_generation`, `image_understanding`, `orchestration` and
+`security`. Make routing jointly reserves a qualified Checker in another family.
+Material ambiguity returns `needs_clarification` before a Maker is dispatched.
 
-Optional `routing.json` policy fields:
+Existing schema-1 configurations normalize to schema 2 while retaining
+`cost_first`. Adopt the new objective explicitly, with a backup:
+
+```sh
+alloy setup --quality-first --refresh-defaults --non-interactive --skip-live-test
+```
+
+Migration preserves every existing profile, model/effort pin, billing choice and
+quota pool. Refresh adds missing exact effort variants while preserving existing profile IDs
+and all disabled choices. The legacy `cost_first` objective
+retains its configurable 25% specialty premium for medium/large tasks. That
+premium does not limit quality-first selection. Prices are compared directly
+only when all eligible profiles have comparable configured metered prices;
+otherwise relative ranks and quota pressure apply.
 
 ```json
-{"use_model_evidence": true, "task_fit_cost_slack": 0.25, "kind_confidence_floor": 0.65}
+{"objective": "quality_first", "use_model_evidence": true, "kind_confidence_floor": 0.65}
 ```
 
 `quota_pacing` (default `false`) prices subscription capacity by pace instead of
@@ -292,11 +307,10 @@ keeps the conservative remaining-fraction rule, because the host session draws
 on the same subscription. Reserves still exclude a pool outright. Pacing
 assumes steady use; enable it if your own usage is not front-loaded.
 
-A profile's `tier` is its capability for every mode unless `tier_by_mode`
-overrides it for one mode. The starter Luna and Gemini Flash Low profiles are
-small-tier Makers with `{"review": "large"}`: on alloy-bench they found seeded
-bugs as reliably as large models (Luna 5/6, Flash Low 6/6) at 1–5% of the
-cost, while as Makers they fell behind on medium and large changes.
+A profile's `tier` is its general capability. `tier_by_mode` still supports
+legacy configuration, but quality-first review cannot exceed that base tier or a
+lower matched evidence tier. Tiny seeded-review samples do not certify difficult
+review capability. New Luna and Flash Low defaults have no large-review promotion.
 The starter `gpt-6-sol` profile ships disabled: Codex with ChatGPT-account
 sign-in rejects that model. Enable it (`alloy models enable --id
 codex-large-gpt-6-sol`) only with API-key billing. The starter
@@ -307,15 +321,11 @@ for review, and it is not benchmarked. A pinned `ALLOY_CODEX_MODEL` still exclud
 Codex profiles with a different model. Consider `usage.reserve_fraction: 0.15`
 (the default is 0.1; see [usage](usage.md)).
 
-`min_tier_by_mode` sets a minimum tier per mode. The shipped default is
-`{"consult": "medium"}`: a panel question's difficulty lives in the repository,
-which the classifier never sees. On alloy-bench, Jev rated such questions "small"
-and the router's cheapest model answered a third of them wrongly; the floor
-raised routed consult accuracy from 0.67 to 0.83 at lower cost per correct answer.
-
-Set `use_model_evidence` to false for cost-only ranking. Exact model/effort matching
-and catalog expiry prevent old research from silently applying to new models.
-Existing profile tiers stay authoritative; `models advise` suggests adjustments.
+`min_tier_by_mode` sets a minimum tier per mode. The default consult floor is
+medium because a short task description may hide repository complexity.
+`use_model_evidence: false` disables editorial suitability adjustments; hard
+constraints and independent review remain enforced. Exact adapter/model/effort
+matching and catalog expiry prevent evidence transfer across identities.
 For custom models, `alloy models add --id PROFILE --task-preferences debugging,review`
 updates preferences; an empty string clears them. These are user priors, not
 measured success rates. Metadata never overrides hard eligibility constraints.
@@ -357,9 +367,10 @@ the dated prior. Thresholds require offline/live evaluation on representative
 work before any claim of improved accuracy. Malformed probabilities fail closed.
 Only matched effort-specific evidence or explicit user task preferences can
 influence fit. Stale/unmatched evidence cannot gain credibility from Jev's answer.
-Small tasks and `use_model_evidence=false` retain cost-based ranking. In the latter
-case no model-fit questions are requested. All hard filters and the existing
-cost-tolerance ceiling remain enforced in code, as does independent review.
+Quality-first considers matched priors at every task tier. With
+`use_model_evidence=false`, no fit questions are requested and suitability is
+unknown. All hard filters and independent review stay enforced. The legacy
+cost-tolerance ceiling applies only under `cost_first`.
 
 Decision history records the model cards and selected fit judgment for audit.
 Measured success rate, tokens per successful fix and latency are explicitly null:
@@ -422,3 +433,35 @@ available through `--route` with the user's own key.
 See [effort routing](effort-routing.md) for `effort_by_mode`, override precedence,
 role-specific Jev evidence, and keyless selection. Existing profiles remain intact
 on upgrade. No effort setting grants execution permissions.
+
+## Tools and rendered artifacts
+
+`--require-capability` explicitly requires a tool: `repo_read`, `managed_write`,
+`run_tests`, `web`, `image_input`, `image_generation`, `browser` or
+`session_resume`. Unknown tools are ineligible for a task that requires them. An indicated image
+modality remains a hard requirement even below the specialty confidence floor.
+Image generation requires an actual generator in the chosen harness; neither
+Muse vision nor Argon's multimodal understanding proves image output.
+
+A profile's optional `capabilities` map can record `unavailable`, `unverified` or
+a verified attestation with `source`, numeric Unix `observed_at`/`expires_at`,
+and `identity` containing the exact `model`, `effort` and `cli_version`. Changed
+identities and expired attestations invalidate the claim. Attestations cannot
+grant permissions or make Muse a managed writer. Native image review requires
+both a current image-input model card and a probed CLI `--image` mapping.
+
+Muse Wonder Full defaults to `muse-wonder-full-1.0` at xhigh, with explicit
+`ALLOY_MUSE_MODEL`/`ALLOY_MUSE_EFFORT` pins. It is a read-only consult/Checker;
+managed Muse writes are refused. AGY Argon defaults to high on CLI 1.3.4+ and
+uses stream-json stdin. Only low/medium/high are supported; conflicting model
+suffixes and effort flags fail validation. A fresh, same-version authoritative
+AGY account listing excludes missing IDs; advisory or expired data cannot.
+
+`alloy outcomes` shows prompt-free process receipts. Passed gates/review,
+correctness and user acceptance remain separate. Complete fixture evaluation
+uses `bench/execute.py --live` explicitly; ordinary routing never starts paid
+calibration or rewrites policy from outcome records.
+
+Native model aliases retain the native adapter's family. Explicit known model
+prefixes can identify another provider family, but opaque identities on a
+multi-family adapter cannot establish independent review and are refused.

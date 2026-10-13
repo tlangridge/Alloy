@@ -1,15 +1,16 @@
 ---
 name: alloy
 description: >-
-  Run a multi-model panel: dispatch one prompt to every AI coding CLI
-  installed locally (Codex, Grok, Claude, Antigravity/agy, Cursor on macOS) in parallel as a READ-ONLY panel, then judge
-  and synthesize their answers (consensus, disagreements, unique insights, blind
-  spots) into one answer that surfaces disagreement instead of hiding it. Use
+  Route work to the best qualified local AI CLI (Codex, Claude, Muse,
+  Antigravity/agy, Grok or Cursor). Prioritize quality and fewer revisions;
+  use subscription capacity and token cost to choose between suitable models.
+  Keep independent cross-family verification where necessary. Explicit panels
+  consult models read-only and synthesize evidence and disagreements. Use
   ONLY when the user explicitly asks for an alloy panel, a multi-model or
   cross-model consult, a second/third opinion from other AI CLIs, or types
   /alloy (sub-modes: ask, debate, review, plan, execute, search, doctor, or a full
   research, plan, implement and test task) or /alloy-execute (the execute
-  sub-mode: an efficient other-family Maker edits and tests in a managed
+  sub-mode: a qualified other-family Maker edits and tests in a managed
   worktree, an independent Checker reviews, the host judges and integrates). Do NOT trigger for ordinary
   single-model coding, planning, or review requests.
 license: MIT
@@ -22,18 +23,23 @@ allowed-tools:
   - Edit
 ---
 
-# Alloy — a local multi-CLI model panel
+# Alloy — quality-first task routing
 
-You are running the **Alloy** skill. It is a local implementation of the idea
-behind OpenRouter's "Fusion" router ("fusion beats frontier"): instead of
-trusting one model, dispatch the same prompt to a **panel** of independent
-models in parallel, then have a **judge** compare their answers and a
-**synthesizer** write a final answer grounded in that comparison.
+Alloy's goal is to finish work at high quality with as few revisions as possible.
+Define observable acceptance criteria, choose the best qualified worker for the
+role, and verify the result. Subscription capacity and token efficiency matter
+within the set of suitable workers. Avoid extra panel rounds unless independent
+approaches or a concrete unresolved disagreement justify them.
+
+Routing remains opt-in. Preserve explicit model pins, billing and quota reserves.
+New routing setups use `quality_first`; existing configurations retain their old
+objective until migrated. Published model cards are dated priors; local success
+rates stay unknown until measured on representative tasks.
 
 Here the roles map to local tools:
 
 - **Panel** = the **complete set of available models** — every AI coding CLI
-  installed and authenticated here (`codex`, `grok`, `antigravity` (Gemini, on
+  installed and authenticated here (`codex`, `grok`, `muse`, `antigravity` (Gemini, on
   agy >= 1.1), `cursor` (macOS only; see the Cursor note below), and a fresh,
   independent `claude` instance; extensible), run **in
   parallel, read-only, with web search enabled, and (by default) reading the
@@ -54,7 +60,7 @@ Here the roles map to local tools:
   and `ALLOY_ALLOW_UNSANDBOXED` never applies to it. Every Cursor call uses one
   explicit model (`composer-2.5` unless pinned); `auto` and unknown model IDs are
   refused. Including a panelist of the host's own family is
-  deliberate **self-fusion** (a model fused with itself still adds lift); that
+  available in explicit panels; that
   instance is a *separate* process with its own fresh context.
 - **Judge + Synthesizer** = **you** (the host — Claude, Grok, Codex, or
   whichever agent invoked this skill). You read the panel's answers, compare
@@ -167,11 +173,11 @@ keys in the skill, defaults, prompts, command arguments or release artifacts.
 
 For a new opt-in routing installation, run `alloy setup --skip-live-test` and
 choose `--jev-provider openrouter` if requested. For an existing configured user
-upgrading models, run `alloy setup --refresh-defaults --non-interactive --skip-live-test`.
+upgrading models and adopting quality-first policy, run `alloy setup --quality-first --refresh-defaults --non-interactive --skip-live-test`.
 This adds absent shipped models, backs up the config, and preserves existing
 profiles (including disabled models), effort choices, pins and billing. Check
 `alloy models advise` for pin conflicts; don't remove user pins automatically.
-To adopt a release's measured routing defaults wholesale (with the user's consent),
+To adopt a release's bundled routing defaults wholesale (with the user's consent),
 run `alloy setup --reset-defaults --non-interactive --skip-live-test`; it backs up
 the file and keeps provider, billing and quota pools.
 Setup with `--skip-live-test` makes no inference call and needs no API key yet.
@@ -199,7 +205,10 @@ The provider CLIs still need their normal authentication/subscriptions.
 
 Assess task kind, complexity, risk and ambiguity. Compare exact model/effort,
 capability evidence, expected task cost, quota headroom and verified failures.
-Select the cheapest credible worker; do not treat unknown quota as full, or
+Compare categorical role suitability before capacity or spend. Jointly select
+Maker and Checker so a cheaper Maker cannot consume the only strong review family.
+Do not promote a small Checker to difficult work from a tiny seeded-bug sample.
+Do not treat unknown quota as full, or
 invent measured success rates. Escalate after verified repeated failures. Keep
 model pins and billing settings intact. For execute, reserve an independent
 Checker and exclude the host family from both workers. If no valid trio exists,
@@ -227,10 +236,15 @@ convert an API discount into a claimed subscription saving.
 
 Jev classifies task kind, complexity, risk and ambiguity, and assesses candidate
 task fit from compact model cards in the same request. Deterministic policy
-combines those judgments with eligible profiles, cost, evidence and quota.
+combines those judgments with eligibility, exact evidence, role suitability, cost and quota.
 Unknown measured success, latency and tokens per successful fix stay unknown;
 never present vendor benchmarks as local outcomes. Keep
-price arithmetic and permission checks in code. Start Opus 5.5 at medium effort
+price arithmetic and permission checks in code. Muse Wonder Full xhigh is a
+read-only consult/Checker option; no managed Muse Maker is certified. AGY Argon
+supports low/medium/high, with high its maximum documented effort. It outputs
+text, so do not claim native image generation. Use real CLI generator evidence
+for image tasks and inspect actual pixels with `--artifact` for design reviews.
+Start Opus 5.5 at medium effort
 for coding and consider high for independent verification; prefer GPT-6.1 Sol (`codex-large-gpt-6-1-sol`) as the large Codex profile and
 keep Astra for hard reasoning/science. These are task-specific priors, not universal winners.
 
@@ -360,7 +374,9 @@ Parse the **first token** of the skill arguments:
 | `setup` | Setup | run `bin/alloy setup`; use noninteractive flags when no terminal is available. |
 | `models` | Model catalog | run the corresponding `bin/alloy models` subcommand. |
 | `doctor` | Doctor | run `bin/alloy doctor` and explain the result. Stop. |
-| `ask` | One-shot consult | one Alloy round on the rest of the args. Stop. |
+| `ask` | One-shot consult | choose one qualified read-only worker, using `--route` when configured. Use a panel only if requested or needed to resolve competing approaches. Stop. |
+| `panel` | Explicit panel | one read-only multi-model round on the rest of the args. Judge and synthesize. Stop. |
+| `outcomes` | Outcome receipts | run `bin/alloy outcomes`; explain that process gates and review are separate from verified correctness. Stop. |
 | `debate` | Gated debate | a second, evidence-gated rebuttal round — see "Debate round". Used rarely. Stop. |
 | `review` | Diff review | gather the diff, one Alloy round in `review` mode, give a pass/fail + findings. Stop. |
 | `plan` | Plan | research + plan rounds, present the plan for approval. Stop at the plan. |
@@ -392,7 +408,10 @@ of workers. The execute request already authorizes the bounded run.
 
 ## The Alloy round (the core primitive used by every mode)
 
-A single round is: **dispatch → judge → synthesize.**
+A single round is: **dispatch → judge → synthesize.** Route a consult to one
+qualified worker by default. For an explicit panel, use the requested models;
+otherwise choose the smallest independent set needed to answer the question.
+Never expand a routine task to every subscription just because they are available.
 
 ### a) Dispatch
 
@@ -403,7 +422,8 @@ else `--mode consult`.
 ```bash
 # write the prompt to a UNIQUE temp file (e.g. PF=$(mktemp -t alloy.XXXXXX);
 # write your prompt into "$PF" with the Write tool) -- never a fixed /tmp name.
-~/.claude/skills/alloy/bin/alloy panel --prompt-file "$PF" --mode consult
+"$ALLOY_BIN" panel --route --prompt-file "$PF" --mode consult
+# Explicit panel: omit --route and pass --panelists as appropriate.
 ```
 
 The command streams progress to stderr and prints the path to `manifest.json` on

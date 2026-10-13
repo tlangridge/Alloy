@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "revision": "2026-09-29.1",
-  "reviewed_at": "2026-09-17",
+  "revision": "2026-10-13-quality",
+  "reviewed_at": "2026-10-13",
   "expires_at": "2026-12-16",
   "models": [
     {
@@ -397,7 +397,10 @@
         "debugging",
         "review",
         "architecture",
-        "frontend"
+        "frontend",
+        "ui_design",
+        "orchestration",
+        "security"
       ],
       "strengths": "Strong coding and long investigations at medium effort; vendor reports FrontierCode 54.6% and CursorBench 52.5% at medium.",
       "limitations": "Vendor evidence, not local success probabilities. Main benchmark table mostly uses max; TerminalBench uses xhigh. Astra leads reported science and automation results. API task savings do not measure subscription quota savings.",
@@ -412,7 +415,7 @@
         "max"
       ],
       "basis": "conservative editorial prior from vendor benchmarks; not calibrated success probability",
-      "reviewed_at": "2026-09-22",
+      "reviewed_at": "2026-10-13",
       "api_pricing": {
         "input_per_million": 4,
         "output_per_million": 20,
@@ -422,7 +425,11 @@
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
       },
-      "effort_guidance": "Use low for supervised iteration, medium for normal implementation, and high for verification or edge-case-heavy debugging. Greater effort is not a reliable fix for an incorrect approach. Max is an explicit choice for difficult autonomous work; effort is not permission to expand scope. Vendor examples, not Alloy success rates or subscription savings."
+      "effort_guidance": "Use low for supervised iteration, medium for normal implementation, and high for verification or edge-case-heavy debugging. Greater effort is not a reliable fix for an incorrect approach. Max is an explicit choice for difficult autonomous work; effort is not permission to expand scope. Vendor examples, not Alloy success rates or subscription savings.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
     },
     {
       "models": [
@@ -462,6 +469,195 @@
         "source": "https://developers.openai.com/api/docs/models/gpt-6-sol",
         "notes": "Standard direct API text pricing. Above 272K input tokens input/cache are 2x and output 1.5x; cache writes and tools billed separately. Subscription pricing differs."
       }
+    },
+    {
+      "models": [
+        "gpt-6.1-sol"
+      ],
+      "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "review",
+        "architecture",
+        "orchestration"
+      ],
+      "strengths": "Broad complex coding and agentic work; a current OpenAI candidate for implementation and independent verification.",
+      "limitations": "Official model and API tool specifications are priors, not local CLI outcomes. The API image tool does not certify a Codex CLI generator.",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+      ],
+      "applicable_efforts": [
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-10-13",
+      "api_pricing": null,
+      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "claude-sonnet-5-5"
+      ],
+      "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "frontend",
+        "ui_design",
+        "documentation",
+        "testing"
+      ],
+      "strengths": "Strong bounded engineering, visual polish and everyday artifact work in the current Sonnet family.",
+      "limitations": "No current Alloy comparative rendered-UI or exact-effort benchmark. Retain Opus as a candidate for difficult sustained judgment.",
+      "sources": [
+        "https://www.anthropic.com/claude-sonnet-5-5"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-10-13",
+      "api_pricing": null,
+      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "gemini-4-argon-medium"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "research",
+        "architecture",
+        "orchestration",
+        "frontend",
+        "ui_design"
+      ],
+      "strengths": "Complex software workflows and long-context multimodal understanding at the documented default thinking level.",
+      "limitations": "Text output; no native image generation. API context and long-decode limits do not establish AGY limits or tool permissions.",
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon",
+        "https://www.antigravity.google/blog/gemini-4-argon-in-google-antigravity"
+      ],
+      "applicable_efforts": [
+        "medium"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-10-13",
+      "api_pricing": null,
+      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "gemini-4-argon-high"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "review",
+        "research",
+        "architecture",
+        "orchestration",
+        "frontend",
+        "ui_design",
+        "security"
+      ],
+      "strengths": "The highest documented Argon reasoning level for difficult engineering, long-context research and visual code work.",
+      "limitations": "No local exact-role measurements. Published comparisons use different harnesses and efforts. Image understanding does not imply image generation.",
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon",
+        "https://deepmind.google/models/gemini/"
+      ],
+      "applicable_efforts": [
+        "high"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-10-13",
+      "api_pricing": null,
+      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "muse-wonder-full-1.0"
+      ],
+      "family": "meta",
+      "adapters": [
+        "muse"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "implementation",
+        "debugging",
+        "review",
+        "architecture",
+        "research",
+        "orchestration"
+      ],
+      "strengths": "A separate frontier model for sustained engineering, memory and goal-directed agent workflows.",
+      "limitations": "Muse Code subscription access is distinct from Wonder API access. Most published evaluations use max; xhigh receives a conservative prior rather than inherited benchmark scores. Native image output and managed write boundaries are not certified.",
+      "sources": [
+        "https://research.meta.ai/blog/muse-wonder",
+        "https://research.meta.ai/static/muse-wonder-model-card"
+      ],
+      "applicable_efforts": [
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-10-13",
+      "api_pricing": null,
+      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
     }
   ]
 }

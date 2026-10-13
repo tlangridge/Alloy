@@ -1,7 +1,7 @@
 # Subscription meters and routing context
 
 Alloy reads remaining subscription capacity and renders it as Markdown suitable
-for Codex, Claude, Grok, Antigravity and Cursor sessions. Usage reads do not call
+for Codex, Claude, Grok, Antigravity, Muse and Cursor sessions. Usage reads do not call
 Jev or launch a coding task, and they make no model call unless you opt in to the
 Claude probe described below. Alloy never reads the macOS keychain. No separate
 menu-bar app is required.
@@ -23,6 +23,7 @@ An illustrative display (these percentages are examples):
 | Antigravity / Gemini | weekly | `█████████░` 90% | 4d | fresh |
 | Grok | weekly | `█████░░░░░` 51% | 5d 22h | fresh |
 | Cursor | — | unknown | — | unavailable |
+| Muse | — | unknown | — | unavailable |
 
 Every reported window appears separately, including model-specific windows. A
 bar fills with **remaining** capacity, not consumed capacity. A reset passing is
@@ -54,6 +55,7 @@ stable ID explicitly when multiple sessions share a directory.
 | Claude | An existing OAuth credential file or `CLAUDE_CODE_OAUTH_TOKEN` → Anthropic usage endpoint; otherwise Claude Code's own rate-limit fields, recorded by the opt-in status-line hook or a recorded stream; otherwise the opt-in probe | Never reads the macOS keychain and never refreshes or rewrites CLI credentials; unknown when no source is available. See [Claude quota without the keychain](#claude-quota-without-the-keychain) |
 | Antigravity | `agy -p /usage --output-format json` | Requires 1.1.11+ and a successful built-in usage report; unknown versions do not run print mode |
 | Grok | CLI billing REST endpoint with the existing login | Included-credit percentage and billing-period reset; no inference |
+| Muse | No verified subscription usage source | Unknown; per-call tokens and model-card API prices do not establish remaining capacity |
 | Cursor | None: the CLI exposes no usage command or quota API | Always unknown unless you set a pool by hand; see [Cursor pools](#cursor-pools) |
 
 API/proxy credential overrides disable ambiguous subscription probes rather than
@@ -227,3 +229,8 @@ including **Claude / Fable**. Fable routing observes both the shared Claude wind
 and its own weekly limit. `is_active` describes the current selection and does not
 hide a reported bucket. Unknown model scopes and surface-specific limits are not
 assumed to apply to every Claude model. No additional provider request is needed.
+
+Under quality-first routing, headroom and reset pacing distinguish equally
+qualified workers. Spare capacity cannot overrule a stronger required role.
+Unknown Muse capacity is reported explicitly; it is never treated as unlimited
+or inferred from tokens in a run. Manual quota reserves remain binding.

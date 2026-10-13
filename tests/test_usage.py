@@ -170,11 +170,19 @@ class UsageTests(unittest.TestCase):
 
     def test_make_requires_checker_with_capacity(self):
         self.args.mode = 'make'; self.args.host_family = 'openai'
+        self.available['muse']['status'] = 'not_installed'  # This case has no independent Meta seat.
         self.snapshot['providers']['claude'] = self.row('claude', 0)
         self.snapshot['providers']['grok'] = self.row('grok', 0)
         self.snapshot['providers']['antigravity'] = self.row('antigravity', .9, pool='antigravity:gemini')
         with self.assertRaises(r.RoutingError):
             r.resolve(core, self.config, response()['answers'], self.available, self.args, self.snapshot)
+
+    def test_muse_capacity_is_unknown_without_reading_credentials_or_invoking_a_cli(self):
+        with patch.object(u.Path, 'stat', side_effect=AssertionError('credential reads forbidden')), \
+                patch.object(u.subprocess, 'run', side_effect=AssertionError('CLI calls forbidden')):
+            self.assertTrue(u.binding(core, 'muse'))
+            with self.assertRaisesRegex(u.UsageError, 'verified'):
+                u.fetch(core, 'muse', {})
 
     def test_invalid_percentages_are_errors(self):
         for number in (float('nan'), -1, 101, True):

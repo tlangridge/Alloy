@@ -19,8 +19,9 @@ Design notes (why it is the way it is):
   * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
   * Prompts are passed on STDIN, never on argv -- avoids ARG_MAX limits,
     quoting/escaping breakage, leaking prompts into `ps`, and shell injection.
-    One CLI (`agy`) ignores stdin in headless mode; it gets the prompt as a
-    FILE it is pointed at, so the prompt still never lands on argv.
+    agy >= 1.3.4 reads it as one stream-json message from a stdin pipe; older
+    agy ignores stdin in headless mode and gets the prompt as a FILE it is
+    pointed at, as do CLIs with a prompt-file flag. It never lands on argv.
   * Each panelist runs in its own process group (start_new_session=True) so a
     hung CLI and all of its children can be killed as a group on timeout.
   * Panelist stdin is the prompt file (not a TTY); a CLI that wants to prompt
@@ -90,7 +91,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX
     pwd = None
 
-ALLOY_VERSION = "0.13.0"
+ALLOY_VERSION = "0.14.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -253,6 +254,75 @@ def _swap_flag(argv: "list[str]", flag: str, value: str) -> "list[str]":
     else:
         argv += [flag, value]
     return argv
+
+
+# --------------------------------------------------------------------------- #
+# JSONL event streams (Muse `exec --json`, agy `--output-format stream-json`)
+# --------------------------------------------------------------------------- #
+# Both CLIs print one JSON event per line and put the answer in the LAST event,
+# after every delta, tool result and (Muse) an echo of the whole prompt. The
+# engine keeps only the final events (read_jsonl_final), bounded, so neither a
+# head cap nor the transcript itself can cut off or crowd out the answer.
+_JSONL_FINAL_LINES = 5
+
+
+def jsonl_event(line: str, key: str) -> "dict | None":
+    """One JSONL line as an event (a JSON object whose `key` is a string), else None."""
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) and isinstance(obj.get(key), str) else None
+
+
+def read_jsonl_final(path: str, cap: int, key: str, final) -> str:
+    """The newest lines of a JSONL sidecar whose event satisfies final(event), read
+    line by line in bounded memory; a longer line is skipped, never buffered. A file
+    whose first line is not an event is read exactly as before (its first `cap` bytes)."""
+    limit = cap * 4 + 4096      # one JSON-escaped line
+    kept: "collections.deque[str]" = collections.deque(maxlen=_JSONL_FINAL_LINES)
+    first = True
+    try:
+        with open(path, "rb") as f:
+            while True:
+                raw = f.readline(limit + 1)
+                if not raw:
+                    break
+                oversized = len(raw) > limit and not raw.endswith(b"\n")
+                while oversized:            # drop the rest of the line without holding it
+                    rest = f.readline(1 << 16)
+                    oversized = bool(rest) and not rest.endswith(b"\n")
+                if len(raw) > limit and first:
+                    return read_text(path, cap)     # the first line cannot be classified
+                if len(raw) > limit or not raw.strip():
+                    continue
+                line = raw.decode("utf-8", errors="replace")
+                event = jsonl_event(line, key)
+                if first:
+                    if event is None:
+                        return read_text(path, cap)
+                    first = False
+                if event is not None and final(event):
+                    kept.append(line if line.endswith("\n") else line + "\n")
+    except FileNotFoundError:
+        return ""
+    if first:
+        return read_text(path, cap)
+    return "".join(kept)
+
+
+def redact_jsonl(text: str) -> "tuple[str, int]":
+    """Redact every string leaf of each line, so JSON escaping cannot hide a secret
+    from the text scrubber (a line that is not JSON is scrubbed as text)."""
+    out, total = [], 0
+    for line in text.split("\n"):
+        red, n = redact_json_text(line) if line.strip() else (line, 0)
+        out.append(red)
+        total += n
+    return "\n".join(out), total
 
 
 # Strip CSI colour codes AND OSC sequences (e.g. OSC 52 clipboard-write, OSC 8
@@ -453,7 +523,8 @@ def setting_int(key: str, default: int) -> int:
 #   parse()        -> clean answer text from (stdout, stderr, last_message)
 #   capabilities() -> {read_only, supports_json, default_model, ...}
 #   prepare_env()  -> optional env overrides for the child (e.g. an isolated HOME)
-# Optional runner hooks (defaults change nothing): stdin_from_prompt, capture_in_memory,
+# Optional runner hooks (defaults change nothing): stdin_from_prompt, stream_input with
+# stdin_payload() (a framed message, e.g. one JSON line, on a stdin pipe), capture_in_memory,
 # open_scope()/wrap_argv()/before_spawn()/after_exit() (a per-dispatch resource, the
 # final spawn gateway and a post-run tripwire), output_error(), provider_meta(),
 # read_stdout() (which part of a large stdout sidecar the engine parses) and
@@ -469,6 +540,8 @@ class Adapter:
     auth_hint = ""
     # Runner hooks. Defaults keep every existing adapter's behaviour unchanged.
     stdin_from_prompt = True        # False: stdin is DEVNULL (the prompt is a staged file)
+    stream_input = False            # True: stdin is a pipe carrying stdin_payload(prompt); wins
+                                    # over stdin_from_prompt
     capture_in_memory = False       # True: drain pipes into bounded memory, never into sidecars
     kill_group_on_exit = False      # True: always reap the whole process group before returning
     requires_os_boundary = False    # True: refused unless cursor_boundary_ready, whatever else is set
@@ -545,6 +618,13 @@ class Adapter:
         needs to confine a CLI's own state/config (agy) returns them here rather
         than mutating the user's real dotfiles."""
         return {}
+
+    def stdin_payload(self, prompt_text: str) -> str:
+        """What a stream_input adapter's child reads on stdin, written through a pipe
+        and then closed. Default: the run prompt unchanged. An adapter whose CLI
+        expects framed messages returns the framing; the run's prompt file is never
+        rewritten and the prompt never reaches argv."""
+        return prompt_text
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         raise NotImplementedError
@@ -724,9 +804,14 @@ class CodexAdapter(Adapter):
 # read-only posture on the CLI reporting at least this version.
 _AGY_MIN_ENFORCED = (1, 1, 0)
 _AGY_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+# From this release Alloy drives agy's documented stream-json print mode: the
+# prompt is one NDJSON message on stdin (--input-format stream-json, which needs
+# --output-format stream-json) and the answer is the final `result` event. Older
+# releases keep the staged-prompt invocation below.
+_AGY_STREAM_INPUT = (1, 3, 4)
 
-# The prompt is handed to agy as a FILE (it ignores stdin in print mode as of
-# 1.1.7), so this is the only text that ever reaches argv.
+# Before 1.3.4 the prompt is handed to agy as a FILE (it ignores stdin in print
+# mode as of 1.1.7), so this is the only text that ever reaches argv.
 _AGY_ARGV_PROMPT = (
     "Read the file {path} in full -- it contains your complete instructions -- "
     "then carry them out and write your answer to me directly. "
@@ -770,17 +855,25 @@ class AntigravityAdapter(Adapter):
     # On an older agy (< 1.1.0) none of this holds, so the adapter reports
     # read_only=False + experimental=True and the engine refuses it unless the
     # user sets ALLOY_ALLOW_UNSANDBOXED=1 -- the pre-0.1.8 behaviour.
+    #
+    # agy >= 1.3.4 (stream_input) takes the prompt as one stream-json message on
+    # a stdin PIPE, so nothing is staged and the prompt directory is no longer a
+    # read root. Its settings use only the action(target) grammar: read_file per
+    # canonical --add-dir root, read_url(*) only with web research on, and
+    # command/write/execute_url always denied. A run succeeds only on a final
+    # `result` event with status SUCCESS; exit 0 with ERROR is a failure.
     name = "antigravity"
     bin = "agy"
     stdin_from_prompt = False   # agy treats a file on stdin as a denied read_file target
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
-    # Latest Gemini family seat at high effort (currently 3.6 Flash High). agy
-    # also lists Claude 4.6 / GPT-OSS; those would duplicate the claude / codex
-    # seats. `agy models` lists the rest (gemini-3.6-flash-low for cheap/fast,
-    # gemini-3.1-pro-high for the previous Pro). Override: ALLOY_ANTIGRAVITY_MODEL.
-    default_model = "gemini-3.6-flash-high"
+    # Latest Gemini family seat at high effort. agy also lists Claude / GPT-OSS;
+    # those would duplicate the claude / codex seats. `agy models` lists the rest.
+    # An installed agy older than 1.3.4 keeps the seat it was verified with.
+    # Override: ALLOY_ANTIGRAVITY_MODEL.
+    default_model = "gemini-4-argon-high"
+    legacy_default_model = "gemini-3.6-flash-high"
 
     # Read tools get an allow-rule; everything else fails closed. Bare tool names
     # (no "(target)" suffix) mean "any target" on agy 1.1 -- with allowNonWorkspaceAccess
@@ -831,6 +924,16 @@ class AntigravityAdapter(Adapter):
     def experimental(self) -> bool:   # type: ignore[override]
         return not self._enforced()
 
+    @property
+    def stream_input(self) -> bool:   # type: ignore[override]
+        ver = self._agy_version()
+        return bool(ver and ver >= _AGY_STREAM_INPUT)
+
+    def stdin_payload(self, prompt_text: str) -> str:
+        # The one documented stream-json user message. ensure_ascii keeps it ONE
+        # physical line whatever the prompt contains.
+        return json.dumps({"event": "user", "message": {"content": prompt_text}}) + "\n"
+
     def _auth_evidence(self) -> "bool | None":
         """Login evidence without touching the macOS keychain (operator policy: Alloy
         never reads it, never runs `security`).
@@ -871,7 +974,10 @@ class AntigravityAdapter(Adapter):
                 "cannot verify it.")
 
     def model(self) -> "str | None":
-        return setting("ALLOY_ANTIGRAVITY_MODEL", self.default_model)
+        ver = self._agy_version()
+        legacy = ver is not None and ver < _AGY_STREAM_INPUT
+        return setting("ALLOY_ANTIGRAVITY_MODEL",
+                       self.legacy_default_model if legacy else self.default_model)
 
     # -- sandbox: an isolated HOME holding our settings.json ------------------ #
     # Files symlinked (not copied) from the real ~/.gemini so agy finds the
@@ -937,6 +1043,23 @@ class AntigravityAdapter(Adapter):
     def _settings(self, ctx: "dict | None" = None) -> dict:
         dirs = ["read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
         ver = self._agy_version()
+        if ver and ver >= _AGY_STREAM_INPUT:
+            # Reads stay scoped to the canonical --add-dir roots. Web research is an
+            # explicit read_url grant; execute_url, commands and writes never are.
+            roots = list(dict.fromkeys(os.path.realpath(d)
+                                       for d in (ctx or {}).get("agy_add_dirs", [])))
+            allow = ["read_file(%s)" % d for d in roots]
+            deny = list(self.WRITE_GRANTS) + ["execute_url(*)"]
+            if web_enabled():
+                allow.append("read_url(*)")
+            else:
+                deny.append("read_url(*)")
+            return {
+                "enableTerminalSandbox": True,
+                "showTips": False,
+                "showFeedbackSurvey": False,
+                "permissions": {"allow": allow, "deny": deny},
+            }
         # agy 1.2.12 fails closed if allow still lists bare tool names or the
         # 1.1 deny set: headless read_file is auto-denied even with path grants.
         # Emit the grammar it rewrites to. 1.1 keeps both grammars.
@@ -1021,25 +1144,33 @@ class AntigravityAdapter(Adapter):
                    ctx: "dict | None" = None) -> "list[str]":
         if ctx is None:
             ctx = {}
-        # agy ignores stdin in print mode (1.1.7), so the prompt goes in a file it
-        # is pointed at -- never on argv (ARG_MAX, `ps` leakage, quoting). The file
-        # lives in its own directory so the --add-dir grant covers the prompt only,
-        # not the sibling panelists' captured answers in the run dir.
-        pdir = ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path))
-        pin = os.path.join(pdir, "prompt_in")
-        os.makedirs(pin, exist_ok=True)
-        _chmod(pin, 0o700)
-        staged = os.path.join(pin, "prompt.md")
-        try:
-            shutil.copyfile(prompt_path, staged)
-            _chmod(staged, 0o600)
-        except OSError:
-            staged = os.path.abspath(prompt_path)  # fall back to the original
-        # `--mode plan` steers toward analysis over edits. It is an intent hint
-        # only (unenforced); the allow-list is what actually stops writes.
-        args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
-        ctx["agy_add_dirs"] = [os.path.abspath(d) for d in
-                               (os.path.dirname(staged), ctx.get("repo")) if d]
+        if self.stream_input:
+            # agy >= 1.3.4: the prompt is one stream-json message on stdin
+            # (stdin_payload); --input-format puts agy in print mode without -p,
+            # nothing is staged, and grants are canonical paths.
+            # `--mode plan` steers toward analysis over edits. It is an intent hint
+            # only (unenforced); the allow-list is what actually stops writes.
+            args = ["--input-format", "stream-json", "--output-format", "stream-json",
+                    "--mode", "plan"]
+            canon, roots = os.path.realpath, [ctx.get("repo")]
+        else:
+            # Older agy ignores stdin in print mode (1.1.7), so the prompt goes in a
+            # file it is pointed at -- never on argv (ARG_MAX, `ps` leakage, quoting).
+            # The file lives in its own directory so the --add-dir grant covers the
+            # prompt only, not the sibling panelists' captured answers in the run dir.
+            pdir = ctx.get("pdir") or os.path.dirname(os.path.abspath(prompt_path))
+            pin = os.path.join(pdir, "prompt_in")
+            os.makedirs(pin, exist_ok=True)
+            _chmod(pin, 0o700)
+            staged = os.path.join(pin, "prompt.md")
+            try:
+                shutil.copyfile(prompt_path, staged)
+                _chmod(staged, 0o600)
+            except OSError:
+                staged = os.path.abspath(prompt_path)  # fall back to the original
+            args = ["-p", _AGY_ARGV_PROMPT.format(path=staged), "--mode", "plan"]
+            canon, roots = os.path.abspath, [os.path.dirname(staged), ctx.get("repo")]
+        ctx["agy_add_dirs"] = [canon(d) for d in roots if d]
         if mode == "review":
             # Gate wrappers may print a path for fuller evidence than Alloy's
             # bounded review packet carries. Keep that evidence in one private,
@@ -1047,7 +1178,7 @@ class AntigravityAdapter(Adapter):
             logs = gate_log_dir()
             os.makedirs(logs, exist_ok=True, mode=0o700)
             _chmod(logs, 0o700)
-            ctx["agy_add_dirs"].append(logs)
+            ctx["agy_add_dirs"].append(canon(logs))
         repo = ctx.get("repo")
         if repo:
             # Linked worktrees keep HEAD and shared metadata outside the checkout.
@@ -1057,7 +1188,7 @@ class AntigravityAdapter(Adapter):
                 if pointer.startswith("gitdir:"):
                     target = pointer[len("gitdir:"):].strip()
                     if target and not any(c in target for c in "\r\n\0"):
-                        gitdir = os.path.abspath(os.path.join(repo, target))
+                        gitdir = canon(os.path.join(repo, target))
                         ctx["agy_add_dirs"].append(gitdir)
                         parent = os.path.dirname(gitdir)
                         if os.path.basename(parent) == "worktrees":
@@ -1081,24 +1212,80 @@ class AntigravityAdapter(Adapter):
         return args
 
     def usage_args(self, argv: "list[str]") -> "list[str]":
+        if "--input-format" in argv:
+            return argv     # stream-json input requires stream-json output; usage rides `result`
         return _swap_flag(argv, "--output-format", "json")
+
+    @staticmethod
+    def _stream_result(text: str) -> "dict | None":
+        """The `result` object of the last stream-json `result` event ({} when that
+        event carries no object), or None when there is no such event. Any line is
+        scanned, so a usage tail that starts mid-line still finds it."""
+        final = None
+        for line in text.split("\n"):
+            event = jsonl_event(line, "event")
+            if event is not None and event["event"] == "result":
+                final = event
+        if final is None:
+            return None
+        return final["result"] if isinstance(final.get("result"), dict) else {}
 
     def usage(self, stdout_tail: str) -> "dict | None":
         # agy counts cached tokens inside input_tokens and thinking inside
         # output (verified: total_tokens == input_tokens + output_tokens).
-        u = (json_object(stdout_tail) or {}).get("usage")
+        obj = self._stream_result(stdout_tail) if self.stream_input else json_object(stdout_tail)
+        u = (obj or {}).get("usage")
         if not isinstance(u, dict):
             return None
         cached = _count(u.get("cache_read_tokens"))
         return _usage(_count(u.get("input_tokens")) - cached, cached, 0,
-                      u.get("output_tokens"), u.get("thinking_tokens"),
-                      turns=(json_object(stdout_tail) or {}).get("num_turns"), source="agy-json")
+                      u.get("output_tokens"), u.get("thinking_tokens"), turns=obj.get("num_turns"),
+                      source="agy-stream-json" if self.stream_input else "agy-json")
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        if not self.stream_input:
+            return super().read_stdout(path, cap)
+        # The `result` event arrives after every delta and tool event: keep only it.
+        return read_jsonl_final(path, cap, "event", lambda e: e["event"] == "result")
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        return redact_jsonl(stdout) if self.stream_input else redact_secrets(stdout)
+
+    def output_error(self, stdout: str, stderr: str) -> "str | None":
+        if not self.stream_input:
+            return None
+        # A stream-json session can warn and continue after a turn error, exiting 0.
+        if re.search(r"^AGY_ERROR:", stderr, re.M):
+            return "agy reported AGY_ERROR"
+        if not stdout.strip():
+            return None      # nothing produced: the shared empty/auth classification decides
+        result = self._stream_result(stdout)
+        if result is None:
+            return "agy stream-json output has no result event"
+        status, error = result.get("status"), result.get("error")
+        if status != "SUCCESS":
+            return "agy result status %s%s" % (
+                status if isinstance(status, str) else "missing",
+                (": " + strip_ansi(str(error))[:300]) if error else "")
+        if error:
+            return "agy result reported an error: " + strip_ansi(str(error))[:300]
+        if not isinstance(result.get("response"), str):
+            return "agy result has no string response"
+        return None
 
     def parse(self, stdout: str, stderr: str, last_message: str) -> str:
         # The answer is rendered to stdout; stderr carries noise such as
         # "Shell cwd was reset to ..." and the tool-denied notice. Never parse
         # stderr as the answer -- a denial must surface as an empty result (the
         # engine reports the stderr tail as the reason), not as a fake answer.
+        if self.stream_input:
+            # Only a SUCCESS result is an answer: an ERROR status, an error, or no
+            # result at all is empty here and a failure in output_error.
+            result = self._stream_result(stdout) or {}
+            if (result.get("status") == "SUCCESS" and not result.get("error")
+                    and isinstance(result.get("response"), str)):
+                return strip_ansi(result["response"]).strip()
+            return ""
         obj = json_object(stdout) if capture_usage() else None
         if obj is not None and "response" in obj:
             return strip_ansi(str(obj.get("response") or "")).strip()
@@ -3454,6 +3641,12 @@ class ClaudeAdapter(Adapter):
     def model(self) -> "str | None":
         return setting("ALLOY_CLAUDE_MODEL")
 
+    def effort(self) -> "str | None":
+        # Sent verbatim: unset (the CLI default), inherit and default send nothing.
+        # A routed decision strips this flag and appends its own (routed_adapter).
+        value = setting("ALLOY_CLAUDE_EFFORT")
+        return None if not value or value.lower() in ("inherit", "default") else value
+
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
         # `-p` reads the prompt from stdin; `plan` is read-only. Never use
@@ -3475,6 +3668,9 @@ class ClaudeAdapter(Adapter):
         m = self.model()
         if m:
             args += ["--model", m]
+        effort = self.effort()
+        if effort:
+            args += ["--effort", effort]
         return args
 
     def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
@@ -3587,9 +3783,127 @@ class ClaudeAdapter(Adapter):
                                                io.StringIO(stdout))
 
 
+# `muse exec --json` prints one record per line (payload_type + payload). The run
+# ends with exactly one run.terminal.<completed|failed|cancelled> record whose
+# payload carries `terminal`, `text` (the answer) and `reason`.
+_MUSE_TERMINAL = "run.terminal."
+
+
+class MuseAdapter(Adapter):
+    # Meta's Muse Code CLI (`muse`), run headless as `muse exec`. The prompt is a
+    # real file (--prompt-file) and stdin is DEVNULL, so it never reaches argv.
+    # A consult is read-only by CLI policy, NOT by an OS boundary: --disable-write
+    # removes the non-shell workspace write tools and --disable-shell removes
+    # workspace shell execution; both stay rooted at --workspace (the repo, or the
+    # run's empty cwd). The run keeps no session log, runs no reminder agents and
+    # loads no foreign personal rules or skills; the workspace stays untrusted, so
+    # its own skills and rules are not loaded either. Never pass --yolo,
+    # --disable-approval, --disable-sandbox or --trust-workspace.
+    # There is no write-capable Muse role: its boundary is unverified, so a Muse
+    # instance that is not read-only is refused before anything is spawned.
+    name = "muse"
+    bin = "muse"
+    read_only = True
+    stdin_from_prompt = False
+    install_hint = "install the Muse Code CLI (`muse`), then run `muse login`"
+    auth_hint = "muse login   (or set META_API_KEY)"
+    default_model = "muse-wonder-full-1.0"
+    default_effort = "xhigh"
+
+    def is_authed(self) -> bool:
+        if setting("META_API_KEY") or setting("LLAMA_API_KEY"):
+            return True
+        path = setting("MUSE_AUTH_PATH") or os.path.join(
+            os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"),
+            "muse", "auth.json")
+        return os.path.isfile(path)
+
+    def model(self) -> "str | None":
+        return setting("ALLOY_MUSE_MODEL", self.default_model)
+
+    def effort(self) -> "str | None":
+        value = setting("ALLOY_MUSE_EFFORT", self.default_effort)
+        return None if not value or value.lower() in ("inherit", "default") else value
+
+    def build_args(self, prompt_path: str, last_message_path: str, mode: str,
+                   ctx: "dict | None" = None) -> "list[str]":
+        if not self.read_only:
+            raise CursorBoundaryError("a write-capable Muse role has no verified boundary")
+        ctx = ctx or {}
+        args = ["exec", "--json", "--prompt-file", os.path.abspath(prompt_path)]
+        workspace = ctx.get("repo") or ctx.get("cwd")
+        if workspace:
+            args += ["--workspace", workspace]
+        args += ["--disable-write", "--disable-shell", "--no-session-log",
+                 "--disable-reminders", "--no-foreign-personal-context"]
+        if not web_enabled():
+            args += ["--disable-web-tools"]
+        m = self.model()
+        if m:
+            args += ["--model", m]
+        effort = self.effort()
+        if effort:
+            args += ["--reasoning-effort", effort]
+        return args
+
+    def prepare_env(self, ctx: "dict | None" = None) -> dict:
+        # The launcher would otherwise start a background self-update from inside
+        # a panel run, or a device login if it ever saw a terminal.
+        return {"MUSE_NO_AUTO_UPDATE": "1", "MUSE_LOGIN": "0"}
+
+    @staticmethod
+    def _terminal(text: str) -> "dict | None":
+        """The last run.terminal.* record on any line, or None."""
+        final = None
+        for line in text.split("\n"):
+            record = jsonl_event(line, "payload_type")
+            if record is not None and record["payload_type"].startswith(_MUSE_TERMINAL):
+                final = record
+        return final
+
+    def read_stdout(self, path: str, cap: int) -> str:
+        # The terminal record trails every delta, tool record and the echoed prompt.
+        return read_jsonl_final(path, cap, "payload_type",
+                                lambda e: e["payload_type"].startswith(_MUSE_TERMINAL))
+
+    def redact_stdout(self, stdout: str) -> "tuple[str, int]":
+        return redact_jsonl(stdout)
+
+    def output_error(self, stdout: str, stderr: str) -> "str | None":
+        if not stdout.strip():
+            return None      # nothing produced: the shared empty/auth classification decides
+        record = self._terminal(stdout)
+        if record is None:
+            return "Muse output has no run.terminal record"
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        kind = record["payload_type"][len(_MUSE_TERMINAL):]
+        state = payload.get("terminal", kind)
+        if kind != "completed" or state != "completed":
+            reason = payload.get("reason")
+            if reason is not None and not isinstance(reason, str):
+                reason = json.dumps(reason)
+            return "Muse run %s%s" % (kind if kind != "completed" else str(state)[:40],
+                                      (": " + strip_ansi(reason)[:300]) if reason else "")
+        if not isinstance(payload.get("text"), str):
+            return "Muse terminal record has no string text"
+        return None
+
+    def parse(self, stdout: str, stderr: str, last_message: str) -> str:
+        # Only a completed terminal record is an answer; failed or cancelled runs,
+        # and output with no terminal record, are empty here and errors above.
+        record = self._terminal(stdout)
+        payload = (record or {}).get("payload")
+        if (record is None or record["payload_type"] != _MUSE_TERMINAL + "completed"
+                or not isinstance(payload, dict)
+                or payload.get("terminal", "completed") != "completed"
+                or not isinstance(payload.get("text"), str)):
+            return ""
+        return strip_ansi(payload["text"]).strip()
+
+
 # The default panel is the COMPLETE SET of available models: every verified,
-# read-only, non-experimental adapter (codex, grok, claude, cursor -- on macOS with
-# its OS write boundary validated -- and, on agy >= 1.1, antigravity/Gemini) that
+# read-only, non-experimental adapter (codex, grok, claude, muse, cursor -- on macOS
+# with its OS write boundary validated -- and, on agy >= 1.1, antigravity/Gemini) that
 # is installed + authed, including a fresh `claude` instance of the host's own
 # type. `llm` (experimental), the no-read-only adapter (opencode) and an OLD agy
 # are opt-in only. One canonical `cursor` entry: `cursor-agent` is an input alias
@@ -3602,6 +3916,7 @@ ADAPTERS: "dict[str, Adapter]" = {
     "opencode": OpenCodeAdapter(),
     "cursor": CursorAgentAdapter(),
     "antigravity": AntigravityAdapter(),
+    "muse": MuseAdapter(),
 }
 
 
@@ -3751,6 +4066,20 @@ def _kill_group(pgid: int) -> None:
         except (PermissionError, OSError):
             pass    # transient; still try SIGKILL on the next iteration
         time.sleep(0.3)
+
+
+def _feed_stdin(pipe, data: bytes) -> None:
+    """Write a framed stdin payload, then close the pipe. The EOF is what ends the
+    child's input: a stream-json CLI otherwise waits for its next message."""
+    try:
+        pipe.write(data)
+    except (OSError, ValueError):
+        pass        # the child exited or was killed; its own status says why
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
 
 
 def _safe_size(path: str) -> int:
@@ -3933,8 +4262,10 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     proc = None
     group_dead = True
     drains = None
+    feeder = None
     try:
         with ExitStack() as files:
+            framed = None
             if adapter.capture_in_memory:
                 stdin_f, stdout_f, stderr_f = subprocess.DEVNULL, subprocess.PIPE, subprocess.PIPE
             else:
@@ -3945,7 +4276,14 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 # on stdin is treated as a read_file target that headless mode
                 # auto-denies -- even when that path is already in --add-dir.
                 # DEVNULL is what actually lets the Checker read the worktree.
-                stdin_f = fin if adapter.stdin_from_prompt else subprocess.DEVNULL
+                # A stream_input CLI (agy >= 1.3.4) reads stdin_payload() from a
+                # pipe instead, so it sees its message stream and never a file.
+                if adapter.stream_input:
+                    text = fin.read().decode("utf-8", errors="replace")
+                    framed = adapter.stdin_payload(text).encode("utf-8", errors="replace")
+                    stdin_f = subprocess.PIPE
+                else:
+                    stdin_f = fin if adapter.stdin_from_prompt else subprocess.DEVNULL
             proc = subprocess.Popen(
                 argv, stdin=stdin_f, stdout=stdout_f, stderr=stderr_f, cwd=cwd, env=env,
                 start_new_session=True,
@@ -3961,6 +4299,10 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
             try:
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.add(pgid)
+                if framed is not None:
+                    feeder = threading.Thread(target=_feed_stdin, args=(proc.stdin, framed),
+                                              daemon=True)
+                    feeder.start()
                 # Persist inside the cleanup guard: disk errors must not orphan workers.
                 status["status"] = "running"
                 status["pid"] = proc.pid
@@ -4018,6 +4360,8 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                     proc.wait()
                 if adapter.kill_group_on_exit:
                     group_dead = _wait_group_dead(pgid)
+                if feeder is not None:
+                    feeder.join(timeout=5)     # the child is gone: its write ends now
                 with _LIVE_LOCK:
                     _LIVE_PGIDS.discard(pgid)
         status["exit_code"] = proc.returncode

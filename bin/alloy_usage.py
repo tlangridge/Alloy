@@ -35,8 +35,8 @@ import time
 import urllib.error
 import urllib.request
 
-PROVIDERS = ('codex', 'claude', 'grok', 'antigravity', 'cursor')
-LABELS = dict(codex='Codex', claude='Claude', grok='Grok', antigravity='Antigravity', cursor='Cursor')
+PROVIDERS = ('codex', 'claude', 'grok', 'antigravity', 'cursor', 'muse')
+LABELS = dict(codex='Codex', claude='Claude', grok='Grok', antigravity='Antigravity', cursor='Cursor', muse='Muse')
 MAX_BYTES = 1024 * 1024
 # Cursor has two subscription pools that its CLI does not expose. The names follow the
 # provider:pool convention of claude:sonnet and antigravity:gemini.
@@ -507,7 +507,7 @@ def binding(core, provider):
                        Path.home() / '.gemini/antigravity-cli/antigravity-oauth-token'],
         'grok': [grok_auth_path(core)],
         # Path, mtime and size only; the account file's contents are never read or hashed.
-        'cursor': [cursor_state_path()]}[provider]
+        'cursor': [cursor_state_path()], 'muse': []}[provider]
     parts = [str(p) for p in paths]
     for path in paths:
         try:
@@ -519,7 +519,7 @@ def binding(core, provider):
     names = {'codex': ('CODEX_API_KEY', 'OPENAI_API_KEY'),
              'claude': ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'),
              'antigravity': ('ANTIGRAVITY_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'), 'grok': ('XAI_API_KEY', 'GROK_API_KEY'),
-             'cursor': ()}[provider]
+             'cursor': (), 'muse': ()}[provider]
     # Persist only a digest, never tokens, identities or their source contents.
     parts.extend(core.setting(n, '') for n in names)
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
@@ -552,6 +552,8 @@ def fetch(core, provider, options):
         raise UsageError('Cursor CLI exposes no subscription usage source')
     if provider == 'claude':
         return fetch_claude(core, options)
+    if provider == 'muse':
+        raise UsageError('Muse CLI exposes no verified subscription usage source')
     # Never fall through to another provider's credentials, a keychain or the network.
     raise UsageError('Unknown usage provider: %s' % str(provider)[:64])
 

@@ -6,11 +6,12 @@ spend more verification effort where an error is costly or hard to expose.
 Managed execution is autonomous between handoffs, so it does not imply that
 all Makers should run at low effort.
 
-These are routing priors informed by [Thariq Shihipar's September 25 article](https://claude.dev/blog/spending-your-effort/),
-not measured Alloy success rates. Its Claude examples and vendor benchmark runs
-do not establish matching effort curves for Codex, Grok or Gemini. Effort names
-and supported levels differ across models and CLIs. No cache or quota savings
-are promised for a subprocess invocation.
+These are routing priors informed by current model specifications and
+[model evidence](model-research.md), not measured Alloy success rates. Effort
+names differ across models and CLIs. No cache or quota savings are promised
+for a subprocess invocation. Gemini 4 Argon supports low/medium/high; high is
+its documented maximum. Muse Wonder Full uses `--reasoning-effort`, while
+Claude uses `--effort`. Neither flag grants additional tools.
 
 ## Configure the roles
 
@@ -74,3 +75,9 @@ Save role-specific cards with Jev answers. Benchmark replay requires
 `review_model_context`/`review_fit_*` for its Checker. Capture fresh evidence when
 model or effort changes. Evaluate complete execute loops separately from the
 component proxy; report actual elapsed time, correctness, retries and quota use.
+
+Quality-first policy compares exact role identities. Opus 5.5 xhigh is available
+as a separate profile for difficult work; Muse Wonder Full xhigh adds a Meta
+consult/Checker family. Use the required effort for the task, rather than
+universally forcing every worker to maximum. An effort conflict with an AGY
+Gemini suffix fails validation instead of silently changing the model.
