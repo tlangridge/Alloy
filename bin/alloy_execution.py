@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import alloy_lifecycle as storage
+import alloy_artifacts as artifacts
 
 SCHEMA = 1
 ACTIVE = ('creating', 'running')
@@ -259,6 +260,17 @@ def worker_adapter(core, decision, write=False):
     ad.execution_permissions = permissions(ad, write)
     deny_rm_bypass(ad)
     if not write:
+        original_build = ad.build_args
+        def with_images(prompt, last, mode, ctx=None):
+            argv = original_build(prompt, last, mode, ctx)
+            images = getattr(ad, 'review_artifacts', [])
+            if images:
+                if ad.name not in ('muse', 'codex'):
+                    raise ExecutionError('No verified artifact input mapping for ' + ad.name)
+                for path in images:
+                    argv += ['--image', path]
+            return argv
+        ad.build_args = with_images
         if ad.name != 'cursor':
             wrap = ad.wrap_argv
             def readonly_argv(argv, ctx):
@@ -313,10 +325,11 @@ def worker_adapter(core, decision, write=False):
             pass
         elif ad.name == 'antigravity':
             argv[argv.index('--mode') + 1] = 'accept-edits'
-            staged = Path(ctx['pdir']) / 'prompt_in' / 'prompt.md'
-            task_prompt = str(staged) if staged.exists() else prompt
-            argv[argv.index('-p') + 1] = ('Read ' + json.dumps(task_prompt) + ' for your task. Implement it ONLY in ' + json.dumps(ctx['repo']) +
-                '. Run the specified tests there. Do not edit any other checkout or Git metadata.')
+            if '-p' in argv:
+                staged = Path(ctx['pdir']) / 'prompt_in' / 'prompt.md'
+                task_prompt = str(staged) if staged.exists() else prompt
+                argv[argv.index('-p') + 1] = ('Read ' + json.dumps(task_prompt) + ' for your task. Implement it ONLY in ' + json.dumps(ctx['repo']) +
+                    '. Run the specified tests there. Do not edit any other checkout or Git metadata.')
             argv += ['--sandbox']
         else:
             raise ExecutionError('No managed write adapter for ' + ad.name)
@@ -324,6 +337,16 @@ def worker_adapter(core, decision, write=False):
     ad.build_args = build
     if ad.name == 'antigravity':
         def settings(ctx=None):
+            if ad._agy_version() and ad._agy_version() >= (1, 3, 4):
+                repo = str(Path(ctx['repo']).resolve())
+                read_dirs = list(dict.fromkeys([repo] + (ctx or {}).get('agy_add_dirs', [])))
+                deny = ['execute_url(*)']
+                for target in (git(repo, 'rev-parse', '--path-format=absolute', '--git-dir'),
+                               git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')):
+                    deny.append('write_file(%s)' % target)
+                return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
+                            permissions=dict(allow=['read_file(%s)' % d for d in read_dirs] +
+                            ['write_file(%s)' % repo, 'command(*)'] + (['read_url(*)'] if core.web_enabled() else []), deny=deny))
             return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
                         permissions=dict(allow=list(ad.READ_TOOLS) + list(ad.WRITE_TOOLS) + ['command(*)'], deny=[]))
         ad._settings = settings
@@ -372,8 +395,13 @@ def check_decision(core, decision):
     or let a non-Cursor adapter claim family `cursor`. Returns the family to compare."""
     family = decision.get('family')
     if decision.get('cli') != 'cursor':
-        if family == 'cursor':
-            raise ExecutionError('Family cursor is reserved for Cursor Composer profiles')
+        if family not in core.routing.FAMILIES.values():
+            raise ExecutionError('Worker has no verified model family')
+        profile = dict(adapter=decision.get('cli'), family=family, model=decision.get('model', ''),
+                       effort=decision.get('effort'))
+        problem = core.routing.profile_problem(profile)
+        if problem:
+            raise ExecutionError('Worker identity is not dispatchable: ' + problem)
         return family
     try:
         effective = core.routing.cursor_dispatch_model(core, decision)
@@ -434,7 +462,9 @@ def readiness(core, args, repo):
             for profile in profiles:
                 opts = argparse.Namespace(mode='make' if role == 'maker' else 'review', profile=profile['id'], panelists=None,
                     exclude_family=args.host_family, host_family=args.host_family,
-                    max_estimated_usd=args.max_estimated_usd)
+                    max_estimated_usd=args.max_estimated_usd,
+                    require_capability=getattr(args, 'require_capability', None),
+                    artifact=getattr(args, 'artifact', None) if role == 'checker' else None)
                 try:
                     decision = r.resolve(core, config, answers, available, opts, snapshot)
                     check_decision(core, decision)
@@ -505,6 +535,11 @@ def review_packet(core, task, record, tip, diff, spec):
                   diff=diff, tests=gates, allowed_paths=task['allow_paths'],
                   dependencies='Read needed imports/configuration from this exact worktree; report missing context rather than assume a pass.')
     packet['protected_changes'] = [p for p in packet['changed_files'] if protected_path(p)]
+    if task.get('artifacts'):
+        try:
+            packet['artifacts'] = artifacts.receipts(task['worktree'], task['artifacts'], task['allow_paths'])
+        except (OSError, ValueError) as exc:
+            raise ExecutionError('Cannot prepare rendered artifacts: ' + str(exc)) from None
     # The packet is the ONLY thing a Checker prompt is built from, and it leaves this process for
     # a provider: recognised secret shapes (JWT, assignment, header forms) are scrubbed from every
     # source (goal, diff, gate command and output, paths) and again from the final encoded text,
@@ -529,7 +564,7 @@ def review_packet(core, task, record, tip, diff, spec):
 
 def host_assessment(args):
     # Explicit host judgments; confidence=1 means supplied, not calibrated truth.
-    return dict(kind=dict(choice=getattr(args, 'task_kind', 'implementation'), confidence=1),
+    return dict(source='explicit_host_assessment', kind=dict(choice=getattr(args, 'task_kind', 'implementation'), confidence=1),
                 complexity=dict(choice=getattr(args, 'task_tier', 'small'), confidence=1),
                 risk=dict(noul=int(getattr(args, 'task_risk', False))),
                 ambiguous=dict(noul=int(getattr(args, 'task_ambiguous', False))))
@@ -547,8 +582,8 @@ def select(core, args, prompt):
     maker_args.profile = args.maker_profile
     maker_args.panelists = None
     maker_args.exclude_family = ''
-    maker_args.prior_failures = 0
-    maker_args.failed_profile = []
+    maker_args.prior_failures = getattr(args, 'prior_failures', 0)
+    maker_args.failed_profile = getattr(args, 'failed_profile', [])
     if args.route:
         maker = r.route(core, prompt, maker_args, available=available, usage_snapshot=snapshot)
         answers = maker['answers']
@@ -556,13 +591,22 @@ def select(core, args, prompt):
         if not args.maker_profile or not args.checker_profile:
             raise ExecutionError('Supply --route or both --maker-profile and --checker-profile')
         answers = host_assessment(args)
-        maker = r.resolve(core, config, answers, available, maker_args, snapshot)
+        if r.quality.objective(config) == 'quality_first':
+            maker, reserved = r.resolve_pair(core, config, answers, available, maker_args, snapshot)
+            maker['reserved_checker'] = reserved
+        else:
+            maker = r.resolve(core, config, answers, available, maker_args, snapshot)
     review_args = copy.copy(maker_args)
     review_args.mode = 'review'
     review_args.profile = args.checker_profile
     review_args.exclude_family = ','.join((args.host_family, maker['family']))
-    checker = r.resolve(core, config, answers, available, review_args, snapshot,
-                        maker.get('review_model_fits', {}))
+    checker = maker.get('reserved_checker')
+    if checker is None:
+        checker = r.resolve(core, config, answers, available, review_args, snapshot,
+                            maker.get('review_model_fits', {}))
+    # The same assessed policy is carried into resumes; a migration must not
+    # silently replace an active task's captured worker contract.
+    maker['objective'] = checker['objective'] = r.quality.objective(config)
     # Independence is judged on the family re-derived from each worker's effective model, so a
     # Cursor-served Claude/GPT/Gemini/Grok model counts as its own family and can never be the
     # host's or the other role's family under the `cursor` adapter name.
@@ -583,16 +627,26 @@ def revalidate(core, task, role):
     r = core.routing
     config = r.load()
     decision = task[role]
+    config['policy']['objective'] = decision.get('objective', 'cost_first')
     args = argparse.Namespace(mode='make' if role == 'maker' else 'review',
         profile=decision['profile'], panelists=None, host_family=task['host_family'],
         exclude_family='' if role == 'maker' else ','.join((task['host_family'], task['maker']['family'])),
-        prior_failures=0, failed_profile=[], max_estimated_usd=task.get('max_estimated_usd'))
+        # Maker's automatic edit/test requirements are recalculated by resolve;
+        # do not forward them as explicit requirements of its read-only Checker.
+        require_capability=(task.get('required_capabilities') if role == 'maker' else
+                            decision.get('required_capabilities', task.get('required_capabilities'))),
+        artifact=task.get('artifacts') if role == 'checker' else None,
+        prior_failures=decision.get('retry_context', {}).get('verified_quality_failures', 0),
+        failed_profile=decision.get('retry_context', {}).get('failed_profiles', []),
+        max_estimated_usd=task.get('max_estimated_usd'))
     current = r.resolve(core, config, task['maker']['answers'], r.inventory(core), args, r.usage.get(core, config))
     # The stored decision and the fresh one are both re-derived; a Cursor decision must also keep
     # the exact effective model (which carries its effort and fast state) it was reviewed with.
     check_decision(core, decision)
     check_decision(core, current)
     keys = ('cli', 'model', 'family', 'effort', 'billing_mode')
+    if decision.get('cli_version') is not None:
+        keys += ('cli_version',)
     if decision.get('cli') == 'cursor':
         keys += ('effective_model', 'cursor_fast')
     if any(current.get(k) != decision.get(k) for k in keys):
@@ -688,6 +742,22 @@ def dispatch(core, task, role, prompt, folder):
                                  '); Cursor roles are refused')
         check_decision(core, decision)
     folder.mkdir(parents=True, exist_ok=True)
+    if role == 'checker' and task.get('artifacts'):
+        try:
+            receipt, images = artifacts.capture(task['worktree'], task['artifacts'], task['allow_paths'])
+            packet_path = taskdir(core, task['id']) / ('review-' + str(task['rounds'][-1]['index']) + '.json')
+            packet = core.routing.read_json(packet_path)
+            if receipt != packet.get('artifacts'):
+                raise ValueError('Artifact receipt changed after review packet creation')
+            ad.review_artifacts = []
+            for index, (row, data) in enumerate(zip(receipt, images)):
+                suffix = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp'}[row['mime_type']]
+                path = folder / ('artifact-' + str(index) + suffix)
+                path.write_bytes(data)
+                path.chmod(0o600)
+                ad.review_artifacts.append(str(path))
+        except (OSError, ValueError) as exc:
+            raise ExecutionError('Cannot attach rendered artifacts: ' + str(exc)) from None
     prompt_path = folder / 'prompt.txt'
     if ad.name == 'cursor' and role == 'checker':
         # The Checker prompt is already built from a redacted packet; scrub the whole text once
@@ -774,6 +844,8 @@ def checker_prompt(packet, packet_id, tip, absolute_read_rule=''):
         'suggest a scoped reproducer, reference comparison or property test when useful. '
         'Report at most 5 concrete failures with reproduction/input and expected versus actual behavior. '
         'Review protected_changes separately: compare acceptance checks and policy against the base, '
+        'If artifacts are listed, inspect the attached image pixels and their layout; '
+        'descriptions or metadata alone cannot complete that review. '
         'and report any weakened check or concrete violated invariant. No defect found is a valid pass. '
         'Return ONLY JSON: {"verdict":"pass"|"fail","findings":[{"path":"...","evidence":"concrete failure",'
         '"fix":"scoped remedy"}],"packet_id":"' + packet_id + '","revision":"' + tip + '","context_complete":true}. '
@@ -856,7 +928,48 @@ def worker_failure(task, role, result, text):
 
 def run(core, task):
     with storage.active_budget(core, task):
-        return run_attempt(core, task)
+        result = run_attempt(core, task)
+    record_outcome(core, result)
+    return result
+
+
+def record_outcome(core, task):
+    """Prompt-free observed process outcomes; ready is not verified correctness."""
+    rounds = task.get('rounds', [])
+    first = rounds[0] if rounds else {}
+    first_gates = first.get('gates', [])
+    first_review = first.get('review') or {}
+    dispatches = []
+    for record in rounds:
+        calls = ([('maker', record['maker'])] if 'maker' in record else [])
+        calls += [('checker', call) for call in
+                  (record.get('checker_attempts') or ([record['checker']] if 'checker' in record else []))]
+        dispatches.extend(dict(role=role, status=call.get('status'), duration_ms=call.get('duration_ms'),
+                               usage=call.get('usage')) for role, call in calls)
+    workers = {}
+    for role in ('maker', 'checker'):
+        worker = task.get(role, {})
+        workers[role] = {key: worker.get(key) for key in
+                         ('profile', 'cli', 'cli_version', 'model', 'effective_model', 'family', 'effort',
+                          'cursor_fast', 'billing_mode', 'quota_pool', 'objective', 'evidence_revision', 'evidence_sha256')}
+    row = dict(schema=1, task_id=task['id'], base=task.get('base'), revision=task.get('tip'),
+               kind=task.get('maker', {}).get('task_kind'), state=task.get('state'),
+               workers=workers, implementation_rounds=task.get('implementation_rounds', 0),
+               corrections=max(0, task.get('implementation_rounds', 0) - 1),
+               active_seconds=task.get('active_seconds'),
+               first_pass_gates=(all(g.get('exit_code') == 0 for g in first_gates) if first_gates else None),
+               first_pass_review=first_review.get('verdict'),
+               independently_verified_correctness=None, user_accepted=None,
+               integrated_commit=task.get('integration', {}).get('commit'), observed_at=time.time(),
+               dispatches=dispatches)
+    try:
+        core.routing.save(core.routing.root() / 'outcomes' / (task['id'] + '.json'), row)
+    except OSError:
+        # Telemetry is local and optional; recording failure cannot discard work
+        # or substitute for a gate. Expose the limitation in the task packet.
+        task['outcome_recording'] = 'unavailable'
+    else:
+        task['outcome_recording'] = 'recorded'
 
 
 def stop_progress(task, blockers):
@@ -1074,6 +1187,11 @@ def create_attempt(core, args, started_at, repo, prompt, key, logical, owner):
         raise ExecutionError('Explicit --allow-path required (use . for the whole tree)')
     if any(not cmd.strip() for cmd in args.test):
         raise ExecutionError('Test commands cannot be empty')
+    rendered = getattr(args, 'artifact', None) or []
+    for name in rendered:
+        p = Path(name)
+        if p.is_absolute() or '..' in p.parts or not p.parts or not name or not in_scope(p.as_posix(), allowed):
+            raise ExecutionError('Artifacts must be relative to the worktree and inside allowed paths')
     if Path(repo) == home(core) or Path(repo) in home(core).parents:
         raise ExecutionError('Execution state must live outside the source repository')
     if not getattr(args, 'check', False):
@@ -1123,6 +1241,7 @@ def create_attempt(core, args, started_at, repo, prompt, key, logical, owner):
                     readiness=report, sessions={},
                     git_common_dir=common,
                     maker=maker, checker=checker, host_family=args.host_family, allow_paths=allowed, tests=args.test,
+                    artifacts=rendered, required_capabilities=getattr(args, 'require_capability', None),
                     timeout=args.timeout, test_timeout=args.test_timeout, max_fix_rounds=args.max_fix_rounds,
                     max_estimated_usd=args.max_estimated_usd,
                     rounds=[], task_sha256=hashlib.sha256(prompt.encode()).hexdigest(), pid=os.getpid(),
@@ -1256,6 +1375,8 @@ def lifecycle(core, args):
 
 
 def finish(core, task):
+    if task.get('rounds'):
+        record_outcome(core, task)
     # Host sees a compact packet; detailed logs stay on disk.
     out = {k: task[k] for k in ('id', 'owner', 'logical_task_id', 'state', 'repo', 'worktree', 'branch', 'tip', 'integration', 'archive', 'closure', 'light', 'light_reason', 'active_seconds', 'budget_seconds', 'implementation_rounds', 'open_decisions', 'error', 'cleanup_eligible') if k in task}
     out['record'] = str(taskdir(core, task['id']) / 'task.json')
@@ -1319,6 +1440,10 @@ def register(sub, core):
     p.add_argument('--task-kind', choices=core.routing.evidence.KINDS, default='implementation')
     p.add_argument('--task-risk', action='store_true', help='host assessment requires large-tier workers')
     p.add_argument('--task-ambiguous', action='store_true', help='host assessment requires large-tier workers')
+    p.add_argument('--prior-failures', type=int, default=0, help='verified quality failures from a prior attempt; transport failures do not qualify')
+    p.add_argument('--failed-profile', action='append', default=[], help='exclude a verified failed profile while preserving logical task bounds')
+    p.add_argument('--require-capability', action='append', choices=core.routing.quality.CAPABILITIES)
+    p.add_argument('--artifact', action='append', help='relative PNG/JPEG/WebP output for actual image review; repeatable')
     p.add_argument('--max-estimated-usd', type=float)
     p.add_argument('--allow-path', action='append', required=True)
     p.add_argument('--test', action='append', required=True)

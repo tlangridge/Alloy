@@ -221,3 +221,23 @@ symlinking it. Home projects/config, skills manifests, the build's `.running`
 markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
 inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
 writes outside the task's allowed paths; the model may be offered tools it cannot use.
+
+## Framed headless input and terminal output
+
+An adapter with `stream_input=True` can implement `stdin_payload(prompt_text)`
+to frame its input. The runner feeds a pipe, closes it and reaps the process group
+on timeout; the ordinary file-stdin and staged-file paths stay available. AGY
+1.3.4+ uses one documented stream-json user message, scoped canonical read grants
+and an isolated settings directory. Mode names are intent hints, not permissions.
+
+For JSONL output, override `read_stdout` to extract bounded terminal records
+rather than the beginning of a long log. Confirm provider success independently
+of exit code, redact decoded string leaves, and accept only a completed answer.
+Muse extracts its `run.terminal.completed` record; AGY requires a `result` event
+whose status is `SUCCESS` and whose error is empty. Failed, cancelled, malformed
+or missing terminal records never count as answers.
+
+Capability claims belong to the exact model, effort, CLI version and tool
+mapping. Adding a read-only adapter does not certify its managed writer, image
+generator, browser or quota source. Cover the new transport with fake CLIs,
+including oversized output, errors, cancellation and late terminal records.

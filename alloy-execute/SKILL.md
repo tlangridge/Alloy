@@ -2,9 +2,9 @@
 name: alloy-execute
 description: >-
   Alias for `/alloy execute`: run an Alloy execute loop on the task that
-  follows (the host writes a SPEC, an efficient other-family Maker edits and
+  follows (the host writes a SPEC, a qualified other-family Maker edits and
   tests in a managed worktree, an independent Checker reviews, Alloy runs up
-  to two correction rounds, then the host judges and integrates with verified
+  to one correction by default, then the host judges and integrates with verified
   cleanup). Use ONLY when the user types /alloy-execute or says "alloy execute".
   Do NOT trigger for ordinary single-model coding requests, and do NOT trigger
   for other /alloy modes (ask, debate, review, plan, doctor) — those belong to

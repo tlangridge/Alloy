@@ -917,6 +917,7 @@ else:
         r.save(r.root()/'routing.json',config)
         env=dict(PATH=os.environ['PATH'], HOME=os.environ['HOME'], ALLOY_CONFIG='/dev/null',ALLOY_USAGE='off',
                  ALLOY_RUN_ROOT=str(self.base/'state/runs'),ALLOY_ROUTING_HOME=str(self.base/'config'),
+                 ALLOY_MIN_FREE_GB='0', ALLOY_BIN_MUSE='/nonexistent',
                  ALLOY_BIN_CLAUDE=str(binary),ALLOY_BIN_GROK=str(binary),ALLOY_BIN_CODEX='/nonexistent',ALLOY_BIN_ANTIGRAVITY='/nonexistent',
                  ALLOY_BIN_CURSOR='/nonexistent',   # a real Cursor build on this machine must never be reached
                  ANTHROPIC_API_KEY='test-only',XAI_API_KEY='test-only')
@@ -1004,7 +1005,8 @@ runpy.run_path(entry, run_name='__main__')
         self.assertIn(b'new\xff', (e.taskdir(core,task['id'])/'changes.patch').read_bytes())
         self.assertEqual(self.action(task,'integrate',squash=True),0)
 
-    def test_antigravity_staged_prompt_and_private_settings(self):
+    @patch.object(core.AntigravityAdapter, '_agy_version', return_value=(1, 2, 12))
+    def test_antigravity_staged_prompt_and_private_settings(self, version):
         prompt=self.base/'prompt.txt';prompt.write_text('Task')
         ctx=dict(repo=str(self.repo),pdir=str(self.base/'agy'),timeout_s=10,managed_worktree=True)
         ad=e.worker_adapter(core,dict(cli='antigravity',model='test',effort=None),True)
@@ -1318,6 +1320,7 @@ class CursorManagedBase(unittest.TestCase):
         env = patch.dict(os.environ, {
             'ALLOY_RUN_ROOT': str(self.base / 'state/runs'), 'ALLOY_ROUTING_HOME': self.routing_home,
             'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off', 'XDG_STATE_HOME': self.xdg,
+            'ALLOY_MIN_FREE_GB': '0',  # Resource policy is tested separately with fake disk readings.
             'ALLOY_BIN_CURSOR': self.cli, 'MOCK_SANDBOX_DUMP': self.dump, 'MOCK_SANDBOX_LOG': self.sblog})
         env.start()
         self.addCleanup(env.stop)
@@ -2196,7 +2199,9 @@ class CursorManagedSelectionTests(CursorManagedBase):
     def test_select_uses_the_rederived_family_for_the_independence_check(self):
         # A resolved decision that lies about its family (as an edited record could) is refused.
         liar = dict(self.decision('claude-opus-5-5-high', 'x'), family='openai')
-        with patch.object(core.routing, 'resolve', side_effect=lambda *a, **k: dict(liar)):
+        def forged(*args, **kwargs):
+            return {'candidates': [dict(liar)]} if getattr(args[4], '_candidate_pool', False) else dict(liar)
+        with patch.object(core.routing, 'resolve', side_effect=forged):
             with self.assertRaisesRegex(e.ExecutionError, 'family'):
                 self.choose(self.CLAUDE, self.GPT, host='google')
 

@@ -5,28 +5,21 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](#requirements)
 [![Install with skills.sh](https://img.shields.io/badge/skills.sh-npx%20skills%20add-000000)](https://www.skills.sh/)
 
-> **The local, CLI-agent way to run [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router) methodology** — using the AI CLIs you already have, with optional Jev task routing.
+**Alloy routes work to the best qualified model for the job, then verifies the result.**
+The goal is high quality with fewer revisions. Subscription capacity and token
+cost break ties between suitable workers.
 
-**Ask several frontier AI coding CLIs the same hard question, in parallel, and
-get an honest map of where they agree, disagree, and are collectively blind —
-instead of one confident answer from one model.**
+Alloy uses the coding CLIs already authenticated on your machine: Codex,
+Claude, Grok, Antigravity (`agy`), Muse Code and Cursor. Opt-in routing chooses
+one worker for a consult, or jointly selects an independent Maker and Checker
+for managed execution. Explicit multi-model panels remain available for difficult
+questions whose competing approaches need comparison.
 
-Alloy is a skill for [Claude Code](https://claude.com/claude-code),
-[Codex](https://github.com/openai/codex), [Grok](https://grok.com), Gemini CLI,
-Antigravity (`agy`), Cursor, and any host that can run a local skill. It brings the
-idea behind [OpenRouter's "Fusion"](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
-router — *"fusion beats frontier"* — down to the CLIs already installed on your
-machine. It dispatches one prompt to a **panel** of every model you have —
-`codex`, `grok`, a fresh `claude` instance, Antigravity/Gemini and, on macOS,
-`cursor` — running
-**in parallel, read-only inside your repo, and able to search the web**, then
-the **host** (whoever invoked `/alloy`) acts as the **judge** and
-**synthesizer**: it compares the answers and writes a final one that *surfaces
-the disagreement* rather than averaging it away.
-
-> **It does not merge answers into mush.** Its whole job is to show you the
-> consensus, the contradictions, the unique insight only one model had, and the
-> blind spot none of them saw — then let you decide.
+The host defines acceptance criteria and judges the evidence. The Maker edits
+and tests in an owned worktree; the Checker reviews the exact revision using
+another model family. Pins, billing settings, quota reserves and integration
+proof remain binding. Muse Wonder Full currently supports read-only consultation
+and checking; its managed write boundary is not yet certified.
 
 Alloy sends **no telemetry**. Regular panels use your authenticated CLIs.
 Optional **Jev routing** sends task text to TypeSafe or OpenRouter using your key; model discovery
@@ -50,7 +43,7 @@ alloy usage                               # subscription capacity meters
 # In your agent: /alloy-usage
 ```
 
-The guided setup detects Codex, Claude, Grok, Antigravity (`agy`) and Cursor,
+The guided setup detects Codex, Claude, Grok, Antigravity (`agy`), Muse and Cursor,
 accepts your Jev key and records how each CLI is billed. Cursor profiles ship
 disabled; setup asks before enabling them (`--enable-cursor` answers yes).
 Profiles are configurable as models change. Existing model pins remain binding. See [the routing guide](docs/routing.md)
@@ -59,8 +52,18 @@ for setup, catalog updates, cost assumptions and independent Maker/Checker use.
 and feed quota reserves and headroom into routing. Alloy never reads the macOS
 keychain: Claude quota comes from a credentials file or from opt-in sources, and
 Cursor quota is unknown unless you set it by hand.
-[Model research](docs/model-research.md) informs task-specific recommendations
-within a bounded cost tolerance.
+[Model research](docs/model-research.md) supplies dated task-specific priors.
+New routing setups use `quality_first`. Existing setups retain their objective
+until explicitly migrated:
+
+```sh
+alloy setup --quality-first --refresh-defaults --non-interactive --skip-live-test
+alloy outcomes  # local process receipts; correctness and user acceptance stay unknown
+```
+
+Migration makes a backup and preserves existing profiles, pins, billing and
+quota pools. Refresh adds profiles for Muse Wonder Full, Gemini 4 Argon,
+Claude Sonnet 5.5 and Opus 5.5 xhigh without replacing configured IDs.
 
 ## Find code with Jevgrep
 
@@ -83,89 +86,36 @@ configured effort in one request; keyless hosts can inspect
 chosen effort. See [effort routing](docs/effort-routing.md) for configuration,
 failure diagnosis, and the limits of the evidence.
 
-## See it in 15 seconds
+## Choose the right workflow
 
-A real Alloy round (the prompt: *"the single biggest reliability risk when an
-orchestrator runs multiple AI CLIs in parallel"*) — note that the two models
-**disagree**, which is exactly the point:
-
-```
-$ alloy doctor
-  [ready] codex   codex-cli 0.139.0
-  [ready] grok    0.46.0
-
-$ alloy panel --prompt-file prompt.txt
-[alloy] panel: codex, grok (2 model call(s))
-[alloy] codex: ok in 10.4s (exit 0)
-[alloy] grok: ok in 13.6s (exit 0)
+```sh
+alloy doctor
+alloy route --prompt-file task.txt --mode consult
+alloy panel --route --prompt-file task.txt
+alloy execute --route --host-family openai --prompt-file spec.txt \
+  --allow-path src --test 'python3 -m unittest discover -s tests -v'
+# An explicit panel when several independent approaches are useful:
+alloy panel --panelists claude,muse,antigravity --prompt-file question.txt
 ```
 
-- **codex:** "…nondeterministic, interleaved output causing the orchestrator to
-  misattribute messages to the wrong CLI."
-- **grok:** "…race conditions where agents modify the same shared files, leading
-  to silent code corruption."
+The router compares task suitability before cost. Execution reserves both roles
+together so a cheap Maker cannot consume the only qualified Checker family.
+Material acceptance ambiguity blocks Maker dispatch. Image generation requires
+a verified generator in the selected CLI; image input and benchmark reputation
+do not establish that tool. `--artifact render/page.png` sends actual bounded
+image bytes to a verified image-capable Checker and binds their hashes to the
+review packet.
 
-The host then judges (*they answered different questions — codex is about reading
-output, grok about writing files; both are real, they are not in conflict*) and
-synthesizes one answer that keeps both, attributed. One model would have given
-you only half the picture, confidently.
+Published model cards are useful priors, not Alloy success rates. The small
+historical component benchmark does not certify small models for difficult
+reviews. See [model evidence](docs/model-research.md) and [benchmark limitations](bench/RESULTS.md).
+Complete execute evaluation is separately opt-in:
 
----
-
-## Does fusing models actually help?
-
-Yes — and not just "more models = better." OpenRouter benchmarked the Fusion
-methodology Alloy implements and found that a **panel + a synthesis step** beats
-any single model, with a meaningful chunk of the gain coming from the *synthesis
-itself*:
-
-| Configuration — OpenRouter's DRACO benchmark (100 deep-research tasks) | Score |
-|---|---|
-| **Fable 5 + GPT-5.5, fused** (synthesized by Opus 4.8) | **69.0%** |
-| Fable 5 alone (best single model tested) | 65.3% |
-| Opus 4.8 *fused with itself* (same model, run twice) | 65.5% |
-| Opus 4.8 alone | 58.8% |
-
-> "Fable 5 + GPT-5.5 fused together scored 69.0%, surpassing every individual
-> model, including Fable 5 alone at 65.3%."
-> — [OpenRouter, *Fusion beats Frontier*](https://openrouter.ai/blog/announcements/fusion-beats-frontier/) (figures and charts © OpenRouter)
-
-<p align="center">
-  <img src="https://openrouter.ai/blog/images/blog/fusion-benchmark-chart.png" alt="DRACO benchmark scores: Fusion vs solo configurations" width="49%" />
-  <img src="https://openrouter.ai/blog/images/blog/fusion-benchmark-cost.png" alt="Score vs cost per task: Fusion vs solo configurations" width="49%" />
-</p>
-
-<sub>Charts © OpenRouter, from <a href="https://openrouter.ai/blog/announcements/fusion-beats-frontier/"><em>Surpassing Frontier Performance with Fusion</em></a> (Brian Thomas, 2026), shown with attribution. Alloy is an independent reimplementation and is not affiliated with OpenRouter.</sub>
-
-The third row is the telling one: fusing a model **with itself** still gained
-**+6.7 points** (58.8% → 65.5%), because parallel runs take different reasoning
-paths — so much of the lift is the *compare-and-synthesize* step, not just model
-diversity. (OpenRouter notes Fusion runs ~2–3× the latency of a single call; panel
-size is the cost knob.)
-
-```mermaid
-flowchart LR
-  Q["your hard question"] --> P{"panel — parallel,<br/>read-only, web search"}
-  P --> C["codex"]
-  P --> K["grok"]
-  P --> CL["claude<br/>(self-fusion)"]
-  C --> J["host: JUDGE<br/>(compare, don't merge)"]
-  K --> J
-  CL --> J
-  J --> S["host: SYNTHESIZE<br/>(surface disagreement)"]
-  S --> A["one answer + a map of<br/>agreement · conflict · blind spots"]
+```sh
+python3 bench/execute.py --task make-m-ttl-cache --host-family openai \
+  --maker-profile claude-opus-5-5-xhigh --checker-profile muse-wonder-full
+# Add --live to authorize real CLI calls. State and results stay outside the repo.
 ```
-
-**It is not a universal win, and Alloy is built around that.** Multi-model methods
-help most on *objective, high-stakes thinking* (research, architecture, debugging,
-factuality) and can *hurt* on subjective work — or when a confident-but-wrong voice
-drags the panel into agreement (a measured 10–40% accuracy drop in the multi-agent
-debate literature). So Alloy **surfaces disagreement instead of averaging it away**,
-keeps you as the decider, and gates its `debate` round on genuine, checkable
-disagreement. Evidence, sources, and the host-as-judge bias discussion are in
-[`docs/methodology.md`](docs/methodology.md).
-
----
 
 ## Install
 
@@ -273,11 +223,11 @@ Now, inside Claude Code:
 | Mode | What it does |
 |---|---|
 | `/alloy doctor` | Which panelists are installed / authed / ready, with fix-it hints. |
-| `/alloy ask <q>` | One Alloy round: panel answers in parallel → judge → synthesis. The cheapest, safest mode. |
+| `/alloy ask <q>` | Route one read-only consultation; use an explicit panel when competing approaches need comparison. |
 | `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
 | `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
-| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** An efficient other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy permits one correction by default within 45 active minutes. The host judges and integrates, with archived cleanup after verified integration. |
+| `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** A qualified other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy permits one correction by default within 45 active minutes. The host judges and integrates, with archived cleanup after verified integration. |
 | `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
 
 Consult/review panels stay read-only. In managed `execute`, the Maker writes
@@ -311,7 +261,7 @@ of being wrong is higher than the cost of asking three models, fuse."* They are 
 **poor** fit for raw line-by-line code generation (synthesis dilutes a model's
 distinctive voice and just adds latency and cost). That is why Alloy uses the
 panel for comparing ideas. Managed `execute` delegates implementation and
-testing to one efficient Maker. A separate
+testing to one qualified Maker. A separate
 model family challenges the result against the spec; the same Maker handles
 corrections before the host receives the result.
 
@@ -419,7 +369,7 @@ variables (env wins over the file):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, antigravity on agy >= 1.1, and cursor on macOS when its sandbox is validated). Set it to pin a narrower / cheaper panel. `cursor-agent` is accepted as an old spelling of `cursor`. |
+| `ALLOY_PANELISTS` | *all available* | which adapters form the panel; **unset = the complete set** of installed + authed read-only CLIs (codex, grok, claude, muse, antigravity on agy >= 1.1, and cursor on macOS when its sandbox is validated). Set it to pin a narrower / cheaper panel. `cursor-agent` is accepted as an old spelling of `cursor`. |
 | `ALLOY_REPO` | *git root of cwd* | directory the panel may **read** (read-only adapters run in it live; write-capable ones get a disposable copy). `none` = no repo access (throwaway cwd); also `--repo` / `--no-repo` |
 | `ALLOY_TIMEOUT` | `300` | per-panelist timeout, seconds (parallel, so the max not the sum) |
 | `ALLOY_MAKER_TIMEOUT` | `1800` | timeout for legacy read-only `panel --mode make`. Managed `execute` uses `--timeout` (default 1800s per worker) and `--test-timeout` (600s per gate) |
@@ -428,7 +378,10 @@ variables (env wins over the file):
 | `ALLOY_RETRY` | `auth` | statuses that earn one self-healing re-dispatch (never a loop); `auth` catches the transient token-refresh race. `auth,empty` also re-asks blanks; `0`/`off` disables |
 | `ALLOY_MAX_CHARS` | `200000` | cap on each panelist's captured output |
 | `ALLOY_CODEX_MODEL` | CLI default | codex model override (e.g. `gpt-6.1-sol`) |
-| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-3.6-flash-high` | agy model — the latest Gemini family seat (Claude 4.6 / GPT-OSS seats would duplicate other panelists). `agy models` lists the rest (e.g. `gemini-3.6-flash-low` for cheap/fast, `gemini-3.1-pro-high` for the previous Pro) |
+| `ALLOY_ANTIGRAVITY_MODEL` | `gemini-4-argon-high` on agy 1.3.4+ | Gemini family seat. Older agy retains its verified legacy default; `agy models` lists account availability. Explicit model pins remain binding. |
+| `ALLOY_MUSE_MODEL` | `muse-wonder-full-1.0` | Meta Muse Wonder Full, read-only consult/Checker |
+| `ALLOY_MUSE_EFFORT` | `xhigh` | Forwarded with `--reasoning-effort`; `inherit`/`default` sends no override |
+| `ALLOY_BIN_MUSE` | `muse` on `PATH` | Muse Code CLI path |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
 | `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
 | `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |

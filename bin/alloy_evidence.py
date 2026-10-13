@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 
 PATH = Path(__file__).resolve().parent.parent / 'data/model-evidence.json'
 KINDS = ('implementation', 'debugging', 'review', 'research', 'architecture',
-         'frontend', 'testing', 'documentation', 'other')
+         'frontend', 'testing', 'documentation', 'ui_design', 'image_generation',
+         'image_understanding', 'orchestration', 'security', 'other')
 
 
 def catalog():
@@ -49,7 +50,11 @@ def match(profile, data):
 def assessment(profile, data):
     row = match(profile, data)
     if 'task_preferences' in profile:
-        return dict(status='user-configured', preferred_tasks=profile['task_preferences'], sources=[])
+        inherited = dict(profile)
+        inherited.pop('task_preferences')
+        result = assessment(inherited, data)
+        result.update(status='user-configured', preferred_tasks=profile['task_preferences'])
+        return result
     if row is None:
         return dict(status=data['status'] if data['status'] != 'current' else 'unmatched',
                     preferred_tasks=[], sources=[])
@@ -60,6 +65,8 @@ def assessment(profile, data):
         preferred_tasks=row['preferred_tasks'] if supported else [],
         strengths=row['strengths'], limitations=row['limitations'], sources=row['sources'],
         basis=row['basis'], suggested_tier=row['suggested_tier'],
+        task_bands=row.get('task_bands', {}) if supported else {},
+        input_modalities=row.get('input_modalities', []),
         api_pricing=row.get('api_pricing'), effort_guidance=row.get('effort_guidance'))
 
 

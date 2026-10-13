@@ -4,8 +4,10 @@
 Alloy-owned Git worktree. A different model family reviews the result read-only;
 Alloy passes evidence back to the same Maker for one correction by default.
 The host receives a compact JSON handoff and decides whether to integrate.
-This reduces host-agent implementation and transcript handling; actual token
-savings depend on the task and are not measured or guaranteed.
+The objective is high work quality with fewer revisions. Quality-first routing
+selects both roles jointly; cost and available subscription capacity break ties
+between suitable pairs. Token savings depend on the task and are not measured
+or guaranteed.
 
 ## Start a task
 
@@ -16,7 +18,8 @@ managed-write adapters. CLI help/version checks fail closed when required
 permission flags are unavailable. These are compatibility checks, not proof that
 a particular CLI version correctly enforces its permissions. Provider profiles
 remain editable configuration. Cursor profiles ship disabled; see
-[Cursor roles](#cursor-roles).
+[Cursor roles](#cursor-roles). Muse Wonder Full is eligible for read-only checking,
+but has no certified managed-write adapter.
 
 Use `alloy setup --skip-live-test` if profiles are not configured, then
 `alloy models list`. Preserve existing model pins and billing settings. Setup
@@ -25,7 +28,7 @@ outside the repository with explicit acceptance criteria and test commands.
 
 ```sh
 alloy execute --repo /path/to/repo --prompt-file /path/to/spec.txt \
-  --host-family openai --maker-profile claude-small --checker-profile grok-large \
+  --host-family openai --maker-profile claude-opus-5-5-xhigh --checker-profile muse-wonder-full \
   --allow-path src --allow-path tests --test 'python3 -m unittest discover -s tests -v'
 ```
 
@@ -466,3 +469,38 @@ symlinking it. Home projects/config, skills manifests, the build's `.running`
 markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
 inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
 writes outside the task's allowed paths; the model may be offered tools it cannot use.
+
+## Quality-first selection and outcome evidence
+
+New routing setups use `quality_first`; migrate an existing setup with
+`alloy setup --quality-first --refresh-defaults --non-interactive --skip-live-test`.
+Pins, billing and quota pools are preserved. The policy compares the weaker
+role's suitability first and reserves three distinct families before any edit.
+Material acceptance ambiguity stops execution even with explicit profiles.
+The captured objective remains stable on resume; migration does not replace
+workers in an active task. A captured CLI version change stops dispatch for
+revalidation instead of silently changing the reviewed harness.
+
+`--prior-failures` and `--failed-profile` carry verified task-specific quality
+failures into selection. Provider errors and transport timeouts are separate.
+One failure requires medium capability; two require large. A small profile's
+legacy review promotion cannot qualify it for difficult quality-first checking.
+
+For UI/design work, repeat `--artifact render/page.png` to attach actual PNG,
+JPEG or WebP files generated in allowed paths. Each file must be regular,
+relative, symlink-free and at most 20 MiB. At most eight images with a total
+of 80 MiB can be attached. The Checker must have verified image
+input and an attachment mapping (currently Codex or Muse with `--image`).
+Bytes, MIME type and SHA-256 enter the review packet; changed receipts stop
+dispatch. Missing or inaccessible required images cannot produce a complete
+context receipt. Metadata and descriptions alone do not satisfy visual review.
+Image generation additionally requires a verified generator tool in the Maker
+harness; no generator is inferred from a multimodal model card.
+
+`alloy outcomes` reads prompt-free local process receipts. Every Maker call and
+Checker transport attempt counts. Passed gates and review remain separate from
+independently verified correctness and user acceptance, which stay unknown.
+`bench/execute.py --live` explicitly evaluates complete loops against hidden
+fixture tests after workers stop. It retains unfinished work and does not
+silently integrate results, alter policy, or launch paid calibration on normal
+tasks. Hidden fixture correctness is not general quality or user acceptance.

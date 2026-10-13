@@ -44,6 +44,7 @@ def run_alloy(args, env_extra=None, timeout=60, cwd=None):
     # that does not exist is "not installed", so nothing is spawned. Tests that
     # exercise Cursor run in-process (see CursorCase) with the mock CLI.
     env["ALLOY_BIN_CURSOR"] = "/no/such/cursor-agent"
+    env["ALLOY_BIN_MUSE"] = "/no/such/muse"
     for legacy in ("ALLOY_BIN_CURSOR_AGENT", "ALLOY_CURSOR_MODEL", "ALLOY_CURSOR_AGENT_MODEL",
                    "ALLOY_CURSOR_EFFORT", "ALLOY_CURSOR_AGENT_EFFORT", "CURSOR_API_KEY",
                    "CURSOR_API_ENDPOINT"):
@@ -281,7 +282,7 @@ class AlloyTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         names = {p["name"] for p in data["panelists"]}
         self.assertEqual(
-            {"codex", "grok", "claude", "llm", "opencode", "cursor", "antigravity"},
+            {"codex", "grok", "claude", "llm", "opencode", "cursor", "antigravity", "muse"},
             names)
         codex = next(p for p in data["panelists"] if p["name"] == "codex")
         self.assertEqual(codex["status"], "ready")
@@ -1508,7 +1509,8 @@ class ClaudeStreamUnitTests(unittest.TestCase):
         for name, adapter in self.f.ADAPTERS.items():
             if name != "claude":
                 self.assertIs(type(adapter).observe_output, base, name)
-                self.assertIs(type(adapter).read_stdout, self.f.Adapter.read_stdout, name)
+                if name not in ('antigravity', 'muse'):  # These extract their own JSONL terminal events.
+                    self.assertIs(type(adapter).read_stdout, self.f.Adapter.read_stdout, name)
 
 
 class ClaudeStreamDispatchTests(unittest.TestCase):
