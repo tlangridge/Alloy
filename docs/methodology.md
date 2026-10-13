@@ -123,7 +123,7 @@ evidence above:
   always excludes the Maker's family, and a checker of the host's own family is
   a voice, not the independent check.
 - **Fusion is for thinking, not raw codegen** (roles section). So execute does
-  *not* fuse the implementation: one cheap Maker writes the diff. The panel is
+  *not* fuse the implementation: one qualified Maker writes the diff. The panel is
   used for what it is good at — proving a concrete diff fails a concrete spec —
   and is asked for at most five labeled finding cards, not a rewrite.
 - **A confident wrong voice can drag a group** (debate section). So Checker

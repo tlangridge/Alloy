@@ -1,5 +1,11 @@
 # Alloy autoresearch
 
+This document describes the historical component experiment loop and its
+cost-per-solve metric. Current quality-first routing prioritizes work quality
+and fewer revisions before cost. For complete Maker/Checker evaluation, use
+`bench/execute.py` as described in [the README](../README.md); live runs require
+explicit opt-in. Component replay does not establish complete execute quality.
+
 An autonomous experiment loop, after Karpathy's
 [autoresearch](https://github.com/karpathy/autoresearch), that optimizes Alloy
 for **the best quality at the lowest cost across the user's subscription
