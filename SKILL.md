@@ -326,7 +326,12 @@ capacity, not this task's token count. Keep Antigravity's Gemini and Claude/GPT
 pools separate, and preserve Codex/Claude model-specific windows. Grok reads included-credit usage from its CLI billing endpoint when available.
 Alloy never reads the macOS keychain, so Claude quota may be unknown unless a
 credentials file, the opt-in status-line hook (`alloy usage
---record-claude-statusline`) or the opt-in `usage.claude_probe` is in place;
+--record-claude-statusline`) with an established response baseline, or the opt-in
+standalone `usage.claude_probe` is in place. Inside Claude Code, use
+`alloy usage --cached` for local self-inspection; the probe is always skipped.
+Status-line redraws never renew freshness. After switching accounts within the
+same keychain-backed profile, run `alloy usage --invalidate-claude` and restart
+Claude Code. See [usage](docs/usage.md#claude-quota-without-the-keychain);
 do not read the keychain yourself to fill it in. Cursor exposes no usage: its two
 pools, `cursor:models` (composer-*, cursor-grok-*) and `cursor:other` (every other
 model through Cursor, the more expensive pool), are unknown unless the user sets

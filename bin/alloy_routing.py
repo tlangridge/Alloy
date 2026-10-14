@@ -931,8 +931,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             return False
         if getattr(args, 'artifact', None) and (name not in ('codex', 'muse') or listed.get('image_flag') != '--image'):
             return False
-        remaining = usage.headroom(checker, usage_snapshot)
-        if remaining is not None and remaining <= config.get("usage", {}).get("reserve_fraction", .1):
+        if usage.reserve_reached(checker, usage_snapshot, config.get("usage", {}).get("reserve_fraction", .1)):
             return False
         pool = config.get("quota_pools", {}).get(other.get("quota_pool"), {})
         if (other["billing_mode"] == "subscription" and pool.get("remaining_fraction") is not None
@@ -981,7 +980,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
                 why = "no independent non-host Checker remains"
         live_remaining = usage.headroom(p, usage_snapshot)
         reserve = config.get("usage", {}).get("reserve_fraction", .1)
-        if live_remaining is not None and live_remaining <= reserve:
+        if usage.reserve_reached(p, usage_snapshot, reserve):
             why = "live subscription quota reserve reached"
         pool = config.get("quota_pools", {}).get(p.get("quota_pool"), {})
         if (p["billing_mode"] == "subscription" and pool.get("remaining_fraction") is not None

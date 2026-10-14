@@ -1,20 +1,16 @@
 """Subscription observations and session-friendly meters. No inference calls by default.
 
 Alloy never reads the macOS keychain and never runs `security` (operator policy, 2026-09-29).
-Claude quota therefore comes only from keychain-free sources, tried in this order:
-  1. a credentials FILE or CLAUDE_CODE_OAUTH_TOKEN that already exists -> Anthropic usage endpoint;
-  2. the rate-limit snapshot recorded by Claude Code's own status line. Opt in by pointing the
-     status-line command at `alloy usage --record-claude-statusline`; Alloy installs nothing.
-     A Claude run's stream-json output can be recorded the same way:
-     `claude -p ... --output-format stream-json --verbose | alloy usage --record-claude-stream`.
-     A snapshot older than usage.ttl_seconds is `stale`; no snapshot is `unknown`;
-  3. only when the operator sets `usage.claude_probe: true`: the `rate_limit_event` of one tiny
-     `claude -p ... --output-format stream-json --verbose` run (a real, cheap inference call;
-     read at most once per usage TTL).
+Claude quota uses existing OAuth credentials or profile-bound native observations.
+Status-line counters establish response progress; redraw/import time is not freshness.
+Independent windows retain their own provenance. A standalone inference probe requires
+explicit opt-in and is always skipped inside Claude Code.
 Cursor's two subscription pools are not exposed by its CLI, so they are `unknown` unless the
 operator sets `quota_pools["cursor:models"|"cursor:other"].remaining_fraction` by hand.
 """
 from __future__ import annotations
+
+import alloy_claude_observations as co
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -239,37 +235,36 @@ def meter_line(windows):
     return 'Claude ' + ' | '.join('%s %.0f%% left' % (w['window'], w['remaining_fraction'] * 100) for w in windows)
 
 
+def claude_context(core):
+    return co.context(core, binding(core, 'claude'))
+
+
 def record_claude_statusline(core, stream):
-    """`alloy usage --record-claude-statusline`: the opt-in Claude Code status-line command.
-    Claude Code sends its status JSON on stdin; keep only rate_limits.five_hour/seven_day,
-    write the snapshot atomically and privately, and print a one-line meter. It must never fail
-    a status line, so an absent or unusable rate_limits (API-key login, before the first
-    response) is a silent no-op. Alloy does not install it."""
+    """Record only normalized quota and a hashed native response counter baseline."""
     try:
         raw = stream.read(MAX_BYTES + 1)
         data = json.loads(raw) if len(raw) <= MAX_BYTES else None
-        lanes = data.get('rate_limits') if isinstance(data, dict) else None
-        if not isinstance(lanes, dict):
+        if not isinstance(data, dict) or core.setting('ANTHROPIC_API_KEY') or core.setting('ANTHROPIC_BASE_URL'):
             return 0
-        kept = {key: {'used_percentage': lanes[key].get('used_percentage'),
-                      'resets_at': timestamp(lanes[key].get('resets_at'))}
-                for key, _ in CLAUDE_WINDOWS if isinstance(lanes.get(key), dict)}
-        windows = claude_windows(kept)
-        core.routing.save(claude_snapshot_path(core), dict(schema=1, observed_at=time.time(), rate_limits=kept))
-    except (UsageError, OSError, ValueError, core.routing.RoutingError):
+        lanes = data.get('rate_limits')
+        windows = claude_windows(lanes) if isinstance(lanes, dict) and any(lanes.get(k) for k, _ in CLAUDE_WINDOWS) else []
+        if not windows and not isinstance(data.get('session_id'), str):
+            return 0
+        ctx = claude_context(core)
+        co.record_statusline(core, ctx, data, windows, lambda: claude_context(core))
+    except (UsageError, OSError, ValueError, TypeError, core.routing.RoutingError):
         return 0
-    print(meter_line(windows))
+    if windows:
+        print(meter_line(windows))
     return 0
 
 
-def record_claude_stream(core, stream):
-    """`claude -p ... --output-format stream-json --verbose | alloy usage --record-claude-stream`:
-    record the rate_limit_event of a Claude run that was made anyway (an operator's, or a
-    dispatch Alloy makes in stream-json mode) instead of spending a probe. Only the latest
-    event's five_hour/seven_day windows are kept, in the same snapshot the status-line command
-    writes, so the usage TTL, staleness and reserve rules are identical. The stream is read line
-    by line without holding it; like the status-line command it never fails its caller."""
+def record_claude_stream(core, stream, observation_context=None, started_at=None):
+    """Buffered imports are history unless an owned dispatch supplies its launch bound."""
     try:
+        ctx = observation_context or claude_context(core)
+        if core.setting('ANTHROPIC_API_KEY') or core.setting('ANTHROPIC_BASE_URL'):
+            return 0
         lines = []
         while True:
             line = stream.readline(MAX_BYTES + 1)
@@ -277,11 +272,10 @@ def record_claude_stream(core, stream):
                 break
             if 'rate_limit_event' in line and len(line) <= MAX_BYTES:
                 lines = (lines + [line])[-50:]
-        kept = {key: {'utilization': lane.get('utilization'), 'resetsAt': timestamp(lane.get('resetsAt', lane.get('resets_at')))}
-                for key, lane in claude_stream_lanes(''.join(lines)).items()}
-        windows = claude_windows(kept)
-        core.routing.save(claude_snapshot_path(core), dict(schema=1, observed_at=time.time(), unifiedWindows=kept))
-    except (UsageError, OSError, ValueError, core.routing.RoutingError):
+        windows = parse_claude_stream(''.join(lines))
+        # CLI imports cannot supply a trusted bound through a payload or command flag.
+        co.record_windows(core, ctx, windows, started_at, lambda: claude_context(core))
+    except (UsageError, OSError, ValueError, TypeError, core.routing.RoutingError):
         return 0
     print(meter_line(windows))
     return 0
@@ -502,7 +496,7 @@ def binding(core, provider):
         raise UsageError('Unknown usage provider: %s' % str(provider)[:64])
     paths = {
         'codex': [Path(core.setting('CODEX_HOME') or Path.home() / '.codex') / 'auth.json'],
-        'claude': [Path(core.setting('CLAUDE_CONFIG_DIR', str(Path.home() / '.claude'))) / '.credentials.json'],
+        'claude': [Path(core.setting('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')).expanduser().resolve() / '.credentials.json'],
         'antigravity': [Path.home() / '.gemini' / 'oauth_creds.json',
                        Path.home() / '.gemini/antigravity-cli/antigravity-oauth-token'],
         'grok': [grok_auth_path(core)],
@@ -522,6 +516,14 @@ def binding(core, provider):
              'cursor': (), 'muse': ()}[provider]
     # Persist only a digest, never tokens, identities or their source contents.
     parts.extend(core.setting(n, '') for n in names)
+    if provider == 'claude':
+        try:
+            epoch, _ = co.read(co.epoch_path(core))
+            parts.append(str(epoch['generation']))
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError):
+            parts.append('invalid-epoch')
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
@@ -580,50 +582,140 @@ def claude_probe(core):
     Opt-in (usage.claude_probe); spends a very small amount of quota; cached for the usage TTL.
     Runs through command(), which starts the child with stdin=DEVNULL (`< /dev/null`), so the
     run can never wait on, or read, the caller's terminal or pipe."""
+    if core.setting('CLAUDECODE'):
+        raise UsageError('Claude usage probe skipped inside Claude Code')
     return parse_claude_stream(command([binary_for(core, 'claude'), *CLAUDE_PROBE_ARGV], core, timeout=30))
 
 
+class ClaudeReading(tuple):
+    """Keep the existing three-value source contract with safe diagnostic metadata."""
+    def __new__(cls, source, windows, observed_at, diagnostics=()):
+        result = tuple.__new__(cls, (source, windows, observed_at))
+        result.diagnostics = list(diagnostics)
+        return result
+
+
+def local_claude(core, ctx, now, ttl):
+    windows, notes = co.local(core, ctx, now, ttl)
+    try:
+        legacy = read_claude_snapshot(core)
+        if legacy:
+            windows += co.observed(legacy[0], 'claude-legacy-snapshot', None, 'unverified', legacy[1])
+            notes.append('legacy_snapshot_unverified')
+    except (UsageError, OSError, ValueError):
+        notes.append('native_observation_invalid')
+    selected = co.select(windows, now, ttl)
+    if not any(w.get('source') == 'claude-legacy-snapshot' for w in selected):
+        notes = [n for n in notes if n != 'legacy_snapshot_unverified']
+    return selected, notes
+
+
 def fetch_claude(core, options):
-    """Claude quota with no keychain access. Sources, in order: an existing OAuth credential
-    (env or file), the status-line snapshot, the opt-in probe, then a stale snapshot. Returns
-    (source, windows, observed_at) so an old snapshot is reported stale, not fresh."""
+    """Read an existing OAuth source, passive native data, or an explicit standalone probe."""
     if core.setting('ANTHROPIC_API_KEY') or core.setting('ANTHROPIC_BASE_URL'):
         raise UsageError('API/proxy override present; subscription applicability is unknown')
+    ctx = claude_context(core)
     ttl = options.get('ttl_seconds', 120)
     ttl = ttl if finite(ttl, 5, 3600) else 120
-    failure = None
+    notes = []
     token = core.setting('CLAUDE_CODE_OAUTH_TOKEN')
     if not token:
-        home = Path(core.setting('CLAUDE_CONFIG_DIR', str(Path.home() / '.claude')))
+        home = Path(core.setting('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')).expanduser()
         try:
-            token = json.loads((home / '.credentials.json').read_text()).get('claudeAiOauth', {}).get('accessToken')
+            with (home / '.credentials.json').open('rb') as stream:
+                raw = stream.read(MAX_BYTES + 1)
+            token = json.loads(raw).get('claudeAiOauth', {}).get('accessToken') if len(raw) <= MAX_BYTES else None
         except (OSError, ValueError, AttributeError):
             token = None
-    if token:
+    if isinstance(token, str) and token:
         try:
-            return 'claude-oauth', claude_oauth(core, token), time.time()
+            started = time.time()
+            windows = co.observed(claude_oauth(core, token), 'claude-oauth', started, 'oauth-fetch')
+            try:
+                co.record_windows(core, ctx, windows, started, lambda: claude_context(core), source='claude-oauth')
+            except (OSError, ValueError, core.routing.RoutingError):
+                notes.append('observation_persistence_unavailable')
+            return ClaudeReading('claude-oauth', windows, started, notes)
         except UsageError as exc:
-            failure = exc
+            match = re.search(r'HTTP (\d{3})', str(exc))
+            notes.append('oauth_http_' + match.group(1) if match else 'oauth_unavailable')
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            failure = UsageError('Claude OAuth usage source unavailable or response format changed')
-    snapshot = None
-    try:
-        snapshot = read_claude_snapshot(core)
-    except UsageError as exc:
-        failure = failure or exc
-    except (OSError, ValueError):
-        failure = failure or UsageError('Claude rate-limit snapshot unreadable')
-    if snapshot and time.time() - snapshot[1] < ttl:
-        return 'claude-rate-limit-snapshot', snapshot[0], snapshot[1]
-    if options.get('claude_probe') is True:
+            notes.append('oauth_unavailable')
+    else:
+        notes.append('oauth_credential_unavailable')
+    windows, local_notes = local_claude(core, ctx, time.time(), ttl)
+    notes.extend(local_notes)
+    if not any(w['status'] == 'fresh' for w in windows):
+        if options.get('claude_probe') is not True:
+            notes.append('probe_disabled')
+        elif core.setting('CLAUDECODE'):
+            notes.append('probe_skipped_nested_claude')
+        else:
+            try:
+                started = time.time()
+                found = co.observed(claude_probe(core), 'claude-cli-probe', started, 'probe-start-bound')
+                return ClaudeReading('claude-cli-probe', found, started, notes)
+            except (UsageError, OSError, ValueError, subprocess.SubprocessError):
+                notes.append('probe_failed')
+    observed = [w['observed_at'] for w in windows if w.get('observed_at') is not None]
+    return ClaudeReading('claude-observations' if windows else None, windows,
+                         min(observed) if observed else None, notes)
+
+
+def claude_row(core, options, previous, now, ttl, force, cached, current_binding):
+    ctx = co.context(core, current_binding)
+    same = previous.get('binding') == current_binding
+    changed = bool(previous) and not same
+    previous = previous if same else {}
+    if core.setting('ANTHROPIC_API_KEY') or core.setting('ANTHROPIC_BASE_URL'):
+        return dict(status='unknown', source=None, windows=[], binding=current_binding,
+                    diagnostics=['subscription_inapplicable'], checked_at=now)
+    windows = previous.get('windows', [])
+    if previous.get('observation_schema') != co.SCHEMA:
+        # Only a bound OAuth cache has established provenance across this migration.
+        trusted = previous.get('source') == 'claude-oauth'
+        windows = co.observed(windows, previous.get('source'), previous.get('observed_at') if trusted else None,
+                              'oauth-fetch' if trusted else 'unverified')
+    checked = previous.get('checked_at', 0)
+    reuse = finite(checked, 0, now) and now - checked < ttl
+    if any(w.get('status') == 'fresh' and w.get('resets_at') is not None and w['resets_at'] <= now for w in windows):
+        reuse = False
+    notes = list(previous.get('diagnostics', []))
+    attempt = previous.get('last_attempt')
+    if not cached and (force or not reuse):
+        checked = time.time()
         try:
-            return 'claude-cli-probe', claude_probe(core), time.time()
-        except (UsageError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            failure = failure or (exc if isinstance(exc, UsageError) else UsageError('Claude usage probe failed'))
-    if snapshot:
-        return 'claude-rate-limit-snapshot', snapshot[0], snapshot[1]  # get() reports it stale
-    raise failure or UsageError('Claude usage unavailable: keychain access disabled by policy '
-        '(no credentials file and no rate-limit snapshot; see alloy usage --record-claude-statusline)')
+            reading = fetch(core, 'claude', options)
+            source, found = reading[:2]
+            observed = reading[2] if len(reading) > 2 else checked
+            if found and not all('freshness_basis' in w for w in found):
+                found = co.observed(found, source, observed if source == 'claude-oauth' else None,
+                                    'oauth-fetch' if source == 'claude-oauth' else 'unverified')
+            windows += found
+            notes = list(getattr(reading, 'diagnostics', []))
+            attempt = dict(at=checked, outcome='observed' if found else 'unavailable', reasons=notes)
+        except (UsageError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
+            notes = ['usage_refresh_failed']
+            attempt = dict(at=checked, outcome='failed', reasons=notes)
+    local, local_notes = local_claude(core, ctx, time.time(), ttl)
+    windows = co.select(windows + local, time.time(), ttl)
+    if claude_context(core) != ctx:
+        return dict(status='unknown', source=None, windows=[], checked_at=checked,
+                    binding=binding(core, 'claude'), diagnostics=['native_profile_changed'])
+    fresh = [w for w in windows if w['status'] == 'fresh']
+    complete = {w['window'] for w in fresh if w['pool'] == 'claude'} == {'5h', '7d'}
+    status = ('fresh' if windows and len(fresh) == len(windows) and complete else 'partial' if fresh else
+              'stale' if any(w['status'] == 'stale' for w in windows) else 'unverified' if windows else 'unknown')
+    sources = {w.get('source') for w in windows}
+    observed = [w['observed_at'] for w in windows if w.get('observed_at') is not None]
+    notes = list(dict.fromkeys(notes + local_notes))
+    if changed:
+        notes.append('native_profile_changed')
+    if complete:
+        notes = [n for n in notes if n != 'waiting_for_native_response']
+    return dict(status=status, source=next(iter(sources)) if len(sources) == 1 else 'claude-observations',
+                observation_schema=co.SCHEMA, windows=windows, observed_at=min(observed) if observed else None,
+                checked_at=checked, binding=current_binding, diagnostics=notes, last_attempt=attempt)
 
 
 def get(core, config=None, force=False, cached=False):
@@ -650,6 +742,8 @@ def get(core, config=None, force=False, cached=False):
     def one(provider):
         previous = old.get(provider, {})
         current_binding = binding(core, provider)
+        if provider == 'claude':
+            return provider, claude_row(core, options, previous, now, ttl, force, cached, current_binding)
         if provider == 'cursor':
             # Operator-set pools are configuration, not a provider read: never cached, so an edit
             # (or its removal) takes effect on the next read, including --cached.
@@ -683,10 +777,7 @@ def get(core, config=None, force=False, cached=False):
             observed = fetched[2] if len(fetched) > 2 else time.time()
             status = ('stale' if any(w.get('resets_at') is not None and w['resets_at'] <= time.time() for w in windows)
                       or time.time() - observed >= ttl else 'fresh')
-            # A fresh recorded snapshot stops being cache-valid when the observation stops being
-            # fresh (it can be older than this read). A stale one is the last resort after a
-            # failed probe or OAuth attempt: cache that failure for the TTL like any other provider.
-            checked = observed if source == 'claude-rate-limit-snapshot' and status == 'fresh' else time.time()
+            checked = time.time()
             return provider, dict(status=status, source=source, windows=windows,
                 observed_at=observed, checked_at=checked, binding=current_binding)
         except (UsageError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired):
@@ -770,6 +861,18 @@ def headroom(profile, snapshot):
     if profile.get('billing_mode') == 'metered':
         return None
     row = snapshot.get('providers', {}).get(profile['adapter'], {})
+    if profile['adapter'] == 'claude' and row.get('observation_schema') == co.SCHEMA:
+        now = time.time()
+        selected = co.select([w for w in row.get('windows', []) if w.get('pool') in applicable(profile)],
+                             now, snapshot.get('ttl_seconds', 120))
+        fresh = [w for w in selected if w['status'] == 'fresh']
+        # Known exhaustion remains authoritative even when another window is missing.
+        if any(w['remaining_fraction'] == 0 for w in fresh):
+            return 0.0
+        common = {w['window'] for w in fresh if w['pool'] == 'claude'}
+        if common != {'5h', '7d'} or len(fresh) != len(selected):
+            return None
+        return min(w['remaining_fraction'] for w in fresh)
     if row.get('status') != 'fresh':
         return None
     now = time.time()
@@ -787,6 +890,21 @@ def headroom(profile, snapshot):
     if any(finite(w.get('reserve_fraction')) and w['remaining_fraction'] <= w['reserve_fraction'] for w in selected):
         return 0.0
     return min(w['remaining_fraction'] for w in selected)
+
+
+def reserve_reached(profile, snapshot, reserve):
+    """A known constraint can forbid a task even when complete headroom is unknown."""
+    remaining = headroom(profile, snapshot)
+    if remaining is not None:
+        return remaining <= reserve
+    if profile.get('billing_mode') == 'metered' or profile['adapter'] != 'claude':
+        return False
+    row = snapshot.get('providers', {}).get('claude', {})
+    if row.get('observation_schema') != co.SCHEMA:
+        return False
+    windows = co.select([w for w in row.get('windows', []) if w.get('pool') in applicable(profile)],
+                        time.time(), snapshot.get('ttl_seconds', 120))
+    return any(w['status'] == 'fresh' and w['remaining_fraction'] <= reserve for w in windows)
 
 
 _WINDOW_UNITS = {'h': 3600, 'd': 86400, 'w': 7 * 86400}
@@ -815,6 +933,8 @@ def pacing(profile, snapshot):
     for w in row.get('windows', []):
         if w.get('pool') not in pools:
             continue
+        if row.get('observation_schema') == co.SCHEMA and co.classify(w, now, snapshot.get('ttl_seconds', 120))['status'] != 'fresh':
+            return None
         length = window_seconds(w.get('window'))
         if not length or w.get('resets_at') is None:
             return None
@@ -863,8 +983,8 @@ def render(snapshot):
             label = LABELS[provider] + (' / ' + pool if pool else '')
             # All provider text is escaped before entering Markdown.
             label = label.replace('|', '\\|').replace('\n', ' ')
-            status = row.get('status', 'unknown')
-            observed = row.get('observed_at')
+            status = w.get('status', row.get('status', 'unknown'))
+            observed = w.get('observed_at', row.get('observed_at'))
             if row.get('source') == 'operator-config':
                 status, observed = 'manual (operator-set)', None
             if observed is not None:
@@ -872,7 +992,10 @@ def render(snapshot):
             lines.append('| %s | %s | `%s` %.0f%% | %s | %s |' %
                 (label, str(w['window']).replace('|', '\\|').replace('\n', ' '),
                  bar, n * 100, reset_text(w.get('resets_at'), now), status))
-    lines += ['', 'Stale/unknown readings are excluded from quota calculations.']
+        if provider == 'claude' and row.get('diagnostics'):
+            reasons = ', '.join(str(v).replace('|', '\\|').replace('\n', ' ') for v in row['diagnostics'])
+            lines.append('| Claude / source status | — | — | — | %s |' % reasons)
+    lines += ['', 'Stale, unverified and unknown readings are excluded from quota calculations.']
     return '\n'.join(lines) + '\n'
 
 
@@ -881,10 +1004,16 @@ def emit(core, args):
         return record_claude_statusline(core, sys.stdin)
     if getattr(args, 'record_claude_stream', False):
         return record_claude_stream(core, sys.stdin)
+    if getattr(args, 'invalidate_claude', False):
+        location = co.epoch_path(core)
+        with co.locked(location):
+            core.routing.save(location, dict(generation=os.urandom(16).hex()))
+        print('Claude usage observations invalidated. Restart Claude Code to establish a new response baseline.')
+        return 0
     snapshot = get(core, force=args.refresh, cached=args.cached)
     if args.if_changed:
         state = {n: dict(status=p.get('status'), windows=[
-            dict(pool=w['pool'], window=w['window'], band=int(w['remaining_fraction'] * 20), resets_at=w.get('resets_at'))
+            dict(pool=w['pool'], window=w['window'], band=int(w['remaining_fraction'] * 20), resets_at=w.get('resets_at'), status=w.get('status'))
             for w in p.get('windows', [])]) for n, p in snapshot.get('providers', {}).items()}
         digest = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()
         session = args.session or os.environ.get('CODEX_THREAD_ID') or os.environ.get('ALLOY_SESSION_ID') or os.getcwd()
@@ -905,12 +1034,14 @@ def register(sub, core):
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--refresh', action='store_true', help='force bounded provider reads')
     group.add_argument('--cached', action='store_true', help='read cache only; no provider access')
+    group.add_argument('--invalidate-claude', action='store_true',
+        help='invalidate this Claude profile\'s observations after an account switch; restart Claude Code afterward')
     group.add_argument('--record-claude-statusline', action='store_true',
         help='opt-in Claude Code status-line command: read its JSON on stdin, record the Claude '
-             'rate-limit snapshot for keychain-free quota, print a one-line meter (Alloy installs nothing)')
+             'response-bound quota observations and print a one-line meter (Alloy installs nothing)')
     group.add_argument('--record-claude-stream', action='store_true',
         help='read `claude -p --output-format stream-json --verbose` output on stdin and record its '
-             'rate_limit_event as the same snapshot (no extra Claude call)')
+             'rate_limit_event as unverified history (no extra Claude call)')
     parser.add_argument('--format', choices=('markdown', 'json'), default='markdown')
     parser.add_argument('--if-changed', action='store_true', help='emit only on first use, 5%% change, reset or status change')
     parser.add_argument('--session', help='stable session identifier for change suppression')

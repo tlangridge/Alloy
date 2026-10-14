@@ -1327,7 +1327,11 @@ class ClaudeStreamUnitTests(unittest.TestCase):
 
     def snapshot(self):
         import types
-        return self.f.routing.usage.read_claude_snapshot(types.SimpleNamespace(routing=self.f.routing))
+        u = self.f.routing.usage
+        c = types.SimpleNamespace(routing=self.f.routing, setting=self.f.setting)
+        windows, _notes = u.co.local(c, u.claude_context(c), time.time(), 120)
+        times = [w['observed_at'] for w in windows if w.get('observed_at') is not None]
+        return (windows, min(times) if times else None) if windows else None
 
     # -- argv ------------------------------------------------------------------ #
     def test_default_argv_is_stream_json_with_verbose_and_still_read_only(self):
@@ -1466,7 +1470,11 @@ class ClaudeStreamUnitTests(unittest.TestCase):
         import io
         buf = io.StringIO()
         with self.mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
-            self.ad.observe_output(stream)
+            import types
+            u = self.f.routing.usage
+            c = types.SimpleNamespace(routing=self.f.routing, setting=self.f.setting)
+            self.ad.observe_output(stream, dict(_claude_usage_context=u.claude_context(c),
+                                               _claude_usage_started_at=time.time()))
         self.assertEqual(buf.getvalue(), "")             # a dispatch owns nothing on stdout
         return self.snapshot()
 
@@ -1593,7 +1601,11 @@ if mode == "auth":
 
     def snapshot(self):
         import types
-        return self.f.routing.usage.read_claude_snapshot(types.SimpleNamespace(routing=self.f.routing))
+        u = self.f.routing.usage
+        c = types.SimpleNamespace(routing=self.f.routing, setting=self.f.setting)
+        windows, _notes = u.co.local(c, u.claude_context(c), time.time(), 120)
+        times = [w['observed_at'] for w in windows if w.get('observed_at') is not None]
+        return (windows, min(times) if times else None) if windows else None
 
     def test_success_parses_the_result_redacts_and_feeds_quota(self):
         import contextlib

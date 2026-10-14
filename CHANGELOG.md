@@ -3,6 +3,18 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.14.1] - 2026-10-14
+
+- Make new Claude observations visible immediately, including cached reads.
+  Preserve shared and model-specific limits independently, with per-window
+  source, age and freshness instead of replacing an entire provider reading.
+- Bind native quota to its local profile and known authentication settings.
+  Use response-counter progress and owned dispatch launch bounds; redraws,
+  buffered imports and legacy snapshots cannot manufacture fresh capacity.
+- Skip inference probes inside Claude Code, expose sanitized source diagnostics,
+  and add explicit observation invalidation after account switches. Keep unknown
+  headroom conservative while honoring fresh known exhaustion.
+
 ## [0.14.0] - 2026-10-13
 
 - Make quality and fewer revisions the routing objective for new setups. Select
