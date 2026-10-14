@@ -198,6 +198,11 @@ The observation frontier is bounded. If too many overlapping readings prevent
 complete retention, the window reports incomplete coverage and subscription
 routing pauses until a verified response begins after the retained interval.
 Known constraints never become spare capacity through truncation.
+If a tighter overlapping observation is stale only because its conservative time
+bound is old, an unpassed reset can still make it contradict a fresh, looser
+reading. Alloy labels that conflict and blocks subscription routing until a
+later verified observation resolves it or the conflicting reset passes. This
+does not renew the stale observation's age. All-stale data remains unknown.
 
 Observations are bound to the canonical Claude configuration directory and known
 credential settings at ingestion. This identifies a local profile, **not a

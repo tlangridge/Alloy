@@ -1025,6 +1025,48 @@ class Lane4Tests(unittest.TestCase):
             self.assertAlmostEqual(u.headroom(self.claude_profile(), snapshot), .9)
             self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot, .1))
 
+    def test_stale_tighter_overlap_cannot_promote_fresh_loose_capacity(self):
+        base = time.time() - 300
+        def sample(start, end, remaining, window='5h', reset=None):
+            return u.co.observed([u.window('claude', window, remaining, reset or base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        inputs = [sample(0, 200, .02), sample(100, 110, .9), sample(100, 110, .9, '7d')]
+        def snapshot(candidates):
+            return dict(ttl_seconds=120, providers={'claude': dict(observation_schema=u.co.SCHEMA,
+                        observation_candidates=u.co.candidates(candidates))})
+        with patch.object(u.time, 'time', return_value=base + 200):
+            chosen = u.co.select(inputs, base + 200, 120)[0]
+            self.assertTrue(chosen['coverage_conflict'])
+            self.assertEqual((chosen['remaining_fraction'], chosen['observed_at']), (.9, base + 100))
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot(inputs)))
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot(inputs), .1))
+            expired = [dict(w, resets_at=base + 199) if i == 0 else w for i, w in enumerate(inputs)]
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), snapshot(expired)), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot(expired), .1))
+        with patch.object(u.time, 'time', return_value=base + 221):
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot(inputs)))
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot(inputs), .1))
+        with patch.object(u.time, 'time', return_value=base + 206):
+            resolved = snapshot(inputs + [sample(201, 205, .9)])
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), resolved), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), resolved, .1))
+
+    def test_observation_byte_limit_matches_atomic_file_and_preserves_prior_data(self):
+        with self.claude_env(), self.sealed():
+            location = self.native_path()
+            u.co._save(core, location, dict(previous='valid'))
+            data = dict(producers={str(i): dict(counter=i, received_at=time.time()) for i in range(20)})
+            compact = len(json.dumps(data).encode())
+            actual = len((json.dumps(data, indent=2, allow_nan=False) + '\n').encode())
+            with patch.object(u.co, 'MAX_BYTES', (compact + actual) // 2):
+                with self.assertRaises(ValueError):
+                    u.co._save(core, location, data)
+                self.assertEqual(u.co.read(location)[0], dict(previous='valid'))
+            with patch.object(u.co, 'MAX_BYTES', actual):
+                u.co._save(core, location, data)
+                self.assertEqual(location.stat().st_size, actual)
+                self.assertEqual(u.co.read(location)[0], data)
+
     def test_stale_binding_json_is_pruned_without_removing_epochs_or_locks(self):
         with self.claude_env(), self.sealed():
             directory = self.native_path().parent
@@ -1049,6 +1091,21 @@ class Lane4Tests(unittest.TestCase):
         with self.claude_env(), self.sealed(), patch.object(u.co.Path, 'iterdir', side_effect=OSError('unavailable')):
             self.native_record()
             self.assertTrue(self.native_path().exists())
+
+    def test_cleanup_keeps_a_generation_locked_by_a_concurrent_writer(self):
+        with self.claude_env(), self.sealed():
+            directory = self.native_path().parent
+            directory.mkdir(parents=True)
+            old = directory / ('0' * 64 + '.json')
+            r.save(old, dict(active=True))
+            os.utime(old, (time.time() - 7200, time.time() - 7200))
+            for i in range(1, 5):
+                r.save(directory / ('%064x.json' % i), {})
+            with u.co.locked(old):
+                self.native_record()
+                self.assertTrue(old.exists())
+            self.native_record()
+            self.assertFalse(old.exists())
 
     def test_partial_data_cannot_claim_full_headroom_but_fresh_exhaustion_still_blocks(self):
         with self.claude_env(), self.sealed():

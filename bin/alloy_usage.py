@@ -707,7 +707,7 @@ def claude_row(core, options, previous, now, ttl, force, cached, current_binding
                     binding=binding(core, 'claude'), diagnostics=['native_profile_changed'])
     fresh = [w for w in windows if w['status'] == 'fresh']
     complete = ({w['window'] for w in fresh if w['pool'] == 'claude'} == {'5h', '7d'}
-                and not any(w.get('coverage_incomplete') for w in windows))
+                and not any(w.get('coverage_incomplete') or w.get('coverage_conflict') for w in windows))
     status = ('fresh' if windows and len(fresh) == len(windows) and complete else 'partial' if fresh else
               'stale' if any(w['status'] == 'stale' for w in windows) else 'unverified' if windows else 'unknown')
     sources = {w.get('source') for w in windows}
@@ -715,6 +715,8 @@ def claude_row(core, options, previous, now, ttl, force, cached, current_binding
     notes = list(dict.fromkeys(notes + local_notes))
     if any(w.get('coverage_incomplete') for w in windows):
         notes.append('native_observation_overflow')
+    if any(w.get('coverage_conflict') for w in windows):
+        notes.append('native_observation_conflict')
     if changed:
         notes.append('native_profile_changed')
     if complete:
@@ -877,7 +879,7 @@ def headroom(profile, snapshot):
         if any(w['remaining_fraction'] == 0 for w in fresh):
             return 0.0
         common = {w['window'] for w in fresh if w['pool'] == 'claude'}
-        if common != {'5h', '7d'} or len(fresh) != len(selected) or any(w.get('coverage_incomplete') for w in selected):
+        if common != {'5h', '7d'} or len(fresh) != len(selected) or any(w.get('coverage_incomplete') or w.get('coverage_conflict') for w in selected):
             return None
         return min(w['remaining_fraction'] for w in fresh)
     if row.get('status') != 'fresh':
@@ -911,7 +913,8 @@ def reserve_reached(profile, snapshot, reserve):
         return False
     windows = co.select([w for w in row.get('observation_candidates', row.get('windows', [])) if w.get('pool') in applicable(profile)],
                         time.time(), snapshot.get('ttl_seconds', 120))
-    return any(w.get('coverage_incomplete') or w['status'] == 'fresh' and w['remaining_fraction'] <= reserve for w in windows)
+    return any(w.get('coverage_incomplete') or w.get('coverage_conflict')
+               or w['status'] == 'fresh' and w['remaining_fraction'] <= reserve for w in windows)
 
 
 _WINDOW_UNITS = {'h': 3600, 'd': 86400, 'w': 7 * 86400}
@@ -996,6 +999,8 @@ def render(snapshot):
             status = w.get('status', row.get('status', 'unknown'))
             if w.get('coverage_incomplete'):
                 status += ' · incomplete coverage'
+            if w.get('coverage_conflict'):
+                status += ' · conflicting observations'
             observed = w.get('observed_at', row.get('observed_at'))
             if row.get('source') == 'operator-config':
                 status, observed = 'manual (operator-set)', None

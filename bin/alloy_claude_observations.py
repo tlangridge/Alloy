@@ -122,6 +122,13 @@ def select(windows, now, ttl):
                          w.get('observed_at') or 0, w.get('received_at') or 0,
                          w.get('source') == 'claude-oauth'))
         chosen = dict(chosen)
+        if fresh and any(w['status'] == 'stale'
+                         and (w['resets_at'] is None or w['resets_at'] > now)
+                         and w['remaining_fraction'] < chosen['remaining_fraction'] for w in candidates):
+            # A long run's lower time bound can be stale on arrival while still
+            # contradicting a looser overlapping reading. Do not renew its age
+            # or let that contradiction establish positive routing capacity.
+            chosen['coverage_conflict'] = True
         if any(w.get('coverage_incomplete') for w in candidates):
             chosen['coverage_incomplete'] = True
             chosen['coverage_until'] = max(_upper(w) for w in candidates)
@@ -201,15 +208,28 @@ def _prune(location):
         entries.sort(key=lambda pair: pair[0], reverse=True)
         for modified, item in entries[4:]:
             if item != location and modified < time.time() - 3600:
-                item.unlink()
+                # Recheck under that generation's lock: a concurrent writer may
+                # have replaced the old JSON after directory enumeration.
+                fd = os.open(str(item) + '.lock', os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                try:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    info = item.lstat()
+                    if stat.S_ISREG(info.st_mode) and info.st_mtime < time.time() - 3600:
+                        item.unlink()
+                finally:
+                    os.close(fd)
     except OSError:
         pass
 
 
 def _save(core, location, data):
-    if len(json.dumps(data).encode()) > MAX_BYTES:
+    serialized = json.dumps(data, indent=2, allow_nan=False) + '\n'
+    if len(serialized.encode()) > MAX_BYTES:
         raise ValueError('Observation storage limit exceeded')
-    core.routing.save(location, data)
+    core.routing.save(location, serialized)
     _prune(location)
 
 
