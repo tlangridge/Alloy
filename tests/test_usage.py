@@ -179,6 +179,7 @@ class UsageTests(unittest.TestCase):
 
     def test_muse_capacity_is_unknown_without_reading_credentials_or_invoking_a_cli(self):
         with patch.object(u.Path, 'stat', side_effect=AssertionError('credential reads forbidden')), \
+                patch.object(u.Path, 'resolve', side_effect=AssertionError('other provider path resolution forbidden')), \
                 patch.object(u.subprocess, 'run', side_effect=AssertionError('CLI calls forbidden')):
             self.assertTrue(u.binding(core, 'muse'))
             with self.assertRaisesRegex(u.UsageError, 'verified'):

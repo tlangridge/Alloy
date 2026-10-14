@@ -496,12 +496,14 @@ def binding(core, provider):
         raise UsageError('Unknown usage provider: %s' % str(provider)[:64])
     paths = {
         'codex': [Path(core.setting('CODEX_HOME') or Path.home() / '.codex') / 'auth.json'],
-        'claude': [Path(core.setting('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')).expanduser().resolve() / '.credentials.json'],
+        'claude': [Path(core.setting('CLAUDE_CONFIG_DIR') or str(Path.home() / '.claude')) / '.credentials.json'],
         'antigravity': [Path.home() / '.gemini' / 'oauth_creds.json',
                        Path.home() / '.gemini/antigravity-cli/antigravity-oauth-token'],
         'grok': [grok_auth_path(core)],
         # Path, mtime and size only; the account file's contents are never read or hashed.
         'cursor': [cursor_state_path()], 'muse': []}[provider]
+    if provider == 'claude':
+        paths = [p.parent.expanduser().resolve() / p.name for p in paths]
     parts = [str(p) for p in paths]
     for path in paths:
         try:
