@@ -91,7 +91,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX
     pwd = None
 
-ALLOY_VERSION = "0.14.0"
+ALLOY_VERSION = "0.14.1"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -684,7 +684,7 @@ class Adapter:
         arrives last, is never cut off by the cap."""
         return read_text(path, cap)
 
-    def observe_output(self, stdout: str) -> None:
+    def observe_output(self, stdout: str, ctx=None) -> None:
         """Called once per finished dispatch with the redacted text read_stdout() returned
         (what is persisted as stdout.txt). Instrumentation only: an exception here never
         fails a run."""
@@ -3769,18 +3769,18 @@ class ClaudeAdapter(Adapter):
             total += n
         return "\n".join(out), total
 
-    def observe_output(self, stdout: str) -> None:
-        """Alloy's own Claude dispatches feed Claude quota: hand the stream's
-        rate_limit_events to alloy_usage.record_claude_stream, which keeps the latest
-        five_hour/seven_day windows in the same snapshot the status-line command writes.
+    def observe_output(self, stdout: str, ctx=None) -> None:
+        """Alloy's own Claude dispatches feed profile-bound quota observations.
+        The private launch context provides a conservative response-time bound.
         No extra Claude call, no keychain. That function prints a one-line meter; it is
         swallowed here because a dispatch owns nothing on stdout (the panel prints its
         manifest path there). A run that produced no rate_limit_event records nothing."""
         if "rate_limit_event" not in stdout or not claude_quota_recording_enabled():
             return
         with redirect_stdout(io.StringIO()):
-            routing.usage.record_claude_stream(types.SimpleNamespace(routing=routing),
-                                               io.StringIO(stdout))
+            routing.usage.record_claude_stream(types.SimpleNamespace(routing=routing, setting=setting),
+                io.StringIO(stdout), observation_context=(ctx or {}).get('_claude_usage_context'),
+                started_at=(ctx or {}).get('_claude_usage_started_at'))
 
 
 # `muse exec --json` prints one record per line (payload_type + payload). The run
@@ -4284,6 +4284,16 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                     stdin_f = subprocess.PIPE
                 else:
                     stdin_f = fin if adapter.stdin_from_prompt else subprocess.DEVNULL
+            if adapter.name == 'claude':
+                try:
+                    if claude_quota_recording_enabled():
+                        usage_core = types.SimpleNamespace(routing=routing, setting=lambda key, default=None: env.get(key, default))
+                        ctx['_claude_usage_context'] = routing.usage.claude_context(usage_core)
+                        ctx['_claude_usage_started_at'] = time.time()
+                except Exception:
+                    # Quota instrumentation must never prevent the real work.
+                    ctx.pop('_claude_usage_context', None)
+                    ctx.pop('_claude_usage_started_at', None)
             proc = subprocess.Popen(
                 argv, stdin=stdin_f, stdout=stdout_f, stderr=stderr_f, cwd=cwd, env=env,
                 start_new_session=True,
@@ -4412,7 +4422,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
 
     result = adapter.parse(stdout_text, stderr_text, last_text)
     try:
-        adapter.observe_output(red_out)          # the redacted text: only what is persisted is handed on
+        adapter.observe_output(red_out, ctx)     # Only redacted output and the private launch bound.
     except Exception:  # pragma: no cover - instrumentation never fails a run
         pass
     result, c_res = redact_secrets(result)        # redact BEFORE capping

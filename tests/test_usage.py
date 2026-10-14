@@ -3,6 +3,7 @@ import argparse
 import ast
 import contextlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -179,6 +180,7 @@ class UsageTests(unittest.TestCase):
 
     def test_muse_capacity_is_unknown_without_reading_credentials_or_invoking_a_cli(self):
         with patch.object(u.Path, 'stat', side_effect=AssertionError('credential reads forbidden')), \
+                patch.object(u.Path, 'resolve', side_effect=AssertionError('other provider path resolution forbidden')), \
                 patch.object(u.subprocess, 'run', side_effect=AssertionError('CLI calls forbidden')):
             self.assertTrue(u.binding(core, 'muse'))
             with self.assertRaisesRegex(u.UsageError, 'verified'):
@@ -308,7 +310,7 @@ class Lane4Tests(unittest.TestCase):
     setUp = UsageTests.setUp
     row = UsageTests.row
 
-    CLAUDE_ENV = ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR')
+    CLAUDE_ENV = ('CLAUDECODE', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR')
 
     def home(self):
         home = Path(self.tmp.name) / 'home'
@@ -619,14 +621,15 @@ class Lane4Tests(unittest.TestCase):
     def test_claude_without_a_credential_file_is_unknown_with_the_policy_reason_and_runs_nothing(self):
         for options in ({}, {'keychain': True}, {'keychain': False}, {'claude_probe': False}):
             with self.subTest(options=options), self.claude_env(), self.sealed():
-                with self.assertRaisesRegex(u.UsageError, 'keychain access disabled by policy'):
-                    u.fetch(core, 'claude', options)
+                result = u.fetch(core, 'claude', options)
+                self.assertEqual(result[1], [])
+                self.assertIn('oauth_credential_unavailable', result.diagnostics)
         config = dict(self.config, usage=dict(self.config.get('usage', {}), keychain=True))
         with self.claude_env(), self.sealed():
             snapshot = self.get_claude(config, force=True)
         row = snapshot['providers']['claude']
         self.assertEqual((row['status'], row['windows']), ('unknown', []))
-        self.assertIn('keychain access disabled by policy', row['error'])
+        self.assertIn('oauth_credential_unavailable', row['diagnostics'])
         # Unknown Claude quota never blocks routing.
         self.enable('claude-large')
         self.assertEqual(self.resolve(snapshot)['cli'], 'claude')
@@ -655,27 +658,6 @@ class Lane4Tests(unittest.TestCase):
              patch.object(u.urllib.request, 'build_opener', return_value=opener):
             u.fetch(core, 'claude', {})
         self.assertEqual(opener.open.call_args[0][0].get_header('Authorization'), 'Bearer env-test-token')
-
-    def test_claude_oauth_failure_falls_back_to_the_snapshot_and_api_overrides_read_nothing(self):
-        self.snapshot_file(age=5)
-        opener = Mock()
-        opener.open.side_effect = u.urllib.error.HTTPError('url', 401, 'secret-body', {}, io.BytesIO(b'secret'))
-        with self.claude_env(CLAUDE_CODE_OAUTH_TOKEN='test-token'), patch.object(u.urllib.request, 'build_opener', return_value=opener), \
-             patch.object(u, 'command', side_effect=AssertionError('no subprocess')):
-            source, windows, _ = u.fetch(core, 'claude', {})
-        self.assertEqual(source, 'claude-rate-limit-snapshot')
-        self.assertEqual(opener.open.call_count, 1)
-        u.claude_snapshot_path(core).unlink()
-        with self.claude_env(CLAUDE_CODE_OAUTH_TOKEN='test-token'), patch.object(u.urllib.request, 'build_opener', return_value=opener), \
-             patch.object(u, 'command', side_effect=AssertionError('no subprocess')):
-            with self.assertRaisesRegex(u.UsageError, 'HTTP 401') as caught:
-                u.fetch(core, 'claude', {})
-            self.assertNotIn('secret', str(caught.exception))
-        self.snapshot_file()
-        for name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'):
-            with self.subTest(override=name), self.claude_env(**{name: 'test-value'}), self.sealed():
-                with self.assertRaisesRegex(u.UsageError, 'API/proxy override present'):
-                    u.fetch(core, 'claude', {'claude_probe': True})
 
     # ---- Claude: rate_limit_event, status-line and snapshot sources ---- #
 
@@ -741,130 +723,556 @@ class Lane4Tests(unittest.TestCase):
         self.assertAlmostEqual(u.headroom(claude, self.snapshot), .2)
         self.assertIn('| Claude | 5h |', u.render(self.snapshot))
 
-    def test_snapshot_is_fresh_within_the_ttl_stale_after_and_unknown_when_missing(self):
-        with self.claude_env(), self.sealed():
-            snapshot = self.get_claude(self.config, force=True)
-            self.assertEqual(snapshot['providers']['claude']['status'], 'unknown')  # no file
-            self.snapshot_file(age=10, five=20, seven=30)
-            row = self.get_claude(self.config, force=True)['providers']['claude']
-            self.assertEqual((row['status'], row['source']), ('fresh', 'claude-rate-limit-snapshot'))
-            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .8)
-            self.assertAlmostEqual(time.time() - row['observed_at'], 10, delta=3)  # the recording time, not now
-            claude = dict(adapter='claude', model='claude-opus-5-5', billing_mode='subscription')
-            self.assertAlmostEqual(u.headroom(claude, dict(enabled=True, ttl_seconds=120, providers={'claude': row})), .7)
-            self.snapshot_file(age=300, five=20, seven=30)
-            row = self.get_claude(self.config, force=True)['providers']['claude']
-            self.assertEqual(row['status'], 'stale')
-            self.assertAlmostEqual(time.time() - row['observed_at'], 300, delta=3)
-            self.assertEqual(len(row['windows']), 2)  # kept for display, excluded from routing
-            self.assertIsNone(u.headroom(claude, dict(enabled=True, ttl_seconds=120, providers={'claude': row})))
-            self.assertIn('stale · 30', u.render(dict(enabled=True, providers={'claude': row})))
-            # The TTL is the configured one.
-            config = dict(self.config, usage=dict(self.config.get('usage', {}), ttl_seconds=600))
-            self.assertEqual(self.get_claude(config, force=True)['providers']['claude']['status'], 'fresh')
-            # A fresh snapshot is cache-valid only while it is fresh, not for a whole TTL after
-            # it was read: a recording 100s old is re-read before its 120s are up.
-            self.snapshot_file(age=100, five=20, seven=30)
-            self.assertEqual(self.get_claude(self.config, forget=True)['providers']['claude']['status'], 'fresh')
-            self.snapshot_file(age=0, five=50, seven=30)
-            with patch.object(u.time, 'time', return_value=time.time() + 30):  # 130s after the first recording
-                row = self.get_claude(self.config)['providers']['claude']
-            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .5)
-            # A reading whose reset has passed is stale however new it is.
-            self.snapshot_file(age=1)
-            path = u.claude_snapshot_path(core)
-            data = json.loads(path.read_text()); data['rate_limits']['five_hour']['resets_at'] = time.time() - 5
-            path.write_text(json.dumps(data))
-            self.assertEqual(self.get_claude(self.config, force=True)['providers']['claude']['status'], 'stale')
+    def native_path(self):
+        return u.co.path(core, u.claude_context(core))
 
-    def test_snapshot_age_cannot_be_forged_by_content_or_mtime_and_bad_files_are_unknown(self):
-        with self.claude_env(), self.sealed():
-            self.snapshot_file(age=300, recorded=time.time())  # new claim inside an old file
-            self.assertEqual(self.get_claude(self.config, force=True)['providers']['claude']['status'], 'stale')
-            path = self.snapshot_file(age=0, recorded=time.time() - 300)  # old claim inside a new file
-            self.assertEqual(self.get_claude(self.config, force=True)['providers']['claude']['status'], 'stale')
-            self.snapshot_file(age=0, recorded=time.time() + 3600)       # dated in the future
-            os.utime(path, (time.time() + 3600, time.time() + 3600))
-            row = self.get_claude(self.config, forget=True, force=True)['providers']['claude']
-            self.assertEqual((row['status'], row['windows']), ('unknown', []))
-            for content in ('not json', '[]', '{}', '{"rate_limits": {"five_hour": {"used_percentage": 500000}}}',
-                            '{"rate_limits": {"five_hour": {"used_percentage": "6"}}}', 'x' * (u.SNAPSHOT_BYTES + 1)):
-                with self.subTest(content=content[:30]):
-                    path.write_text(content)
-                    row = self.get_claude(self.config, forget=True, force=True)['providers']['claude']
-                    self.assertEqual((row['status'], row['windows']), ('unknown', []))
-            path.unlink(); path.mkdir()  # not a regular file
-            self.assertEqual(self.get_claude(self.config, forget=True, force=True)['providers']['claude']['status'], 'unknown')
+    def native_record(self, age=0, five=.06, seven=.55, only=None, bound=True):
+        windows = u.parse_claude_stream(self.stream(five=five, seven=seven))
+        if only:
+            windows = [w for w in windows if w['window'] == only]
+        ctx = u.claude_context(core)
+        u.co.record_windows(core, ctx, windows, time.time() - age if bound else None,
+                           lambda: u.claude_context(core))
+        return self.native_path()
 
-    def test_statusline_command_records_only_rate_limits_privately(self):
-        stdout = io.StringIO()
-        payload = self.statusline(five=6, seven=55)
-        payload['rate_limits']['spend_limit'] = dict(used_percentage=99, resets_at=1)
-        with contextlib.redirect_stdout(stdout):
-            code = u.record_claude_statusline(core, io.StringIO(json.dumps(payload)))
-        self.assertEqual(code, 0)
-        self.assertEqual(stdout.getvalue().strip(), 'Claude 5h 94% left | 7d 45% left')
-        path = u.claude_snapshot_path(core)
-        text = path.read_text()
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        for private in ('/private', 'claude-x', 'session_id', 'transcript', 'spend_limit', 'cwd'):
-            self.assertNotIn(private, text)
-        data = json.loads(text)
-        self.assertEqual(set(data), {'schema', 'observed_at', 'rate_limits'})
-        self.assertEqual(set(data['rate_limits']), {'five_hour', 'seven_day'})
-        self.assertEqual(set(data['rate_limits']['five_hour']), {'used_percentage', 'resets_at'})
-        junk = self.statusline(five=6, seven=55)
-        junk['rate_limits']['five_hour']['resets_at'] = {'nested': ['junk']}
-        with contextlib.redirect_stdout(io.StringIO()):
-            u.record_claude_statusline(core, io.StringIO(json.dumps(junk)))
-        self.assertIsNone(json.loads(path.read_text())['rate_limits']['five_hour']['resets_at'])
+    def record_line(self, counter=None, **kwargs):
+        payload = self.statusline(**kwargs)
+        if counter is not None:
+            payload['prompt_cache'] = dict(requests=counter)
         with contextlib.redirect_stdout(io.StringIO()):
             u.record_claude_statusline(core, io.StringIO(json.dumps(payload)))
+        return payload
+
+    def claude_profile(self, model='opus'):
+        return dict(adapter='claude', model=model, billing_mode='subscription')
+
+    def test_legacy_snapshots_are_display_only_regardless_of_age(self):
         with self.claude_env(), self.sealed():
-            source, windows, observed = u.fetch(core, 'claude', {})
-        self.assertEqual(source, 'claude-rate-limit-snapshot')
-        self.assertAlmostEqual(windows[0]['remaining_fraction'], .94)
-        self.assertAlmostEqual(windows[1]['remaining_fraction'], .45)
-        self.assertAlmostEqual(observed, time.time(), delta=5)
+            for age in (0, 10, 300):
+                self.snapshot_file(age=age)
+                row = self.get_claude(self.config, force=True, forget=True)['providers']['claude']
+                self.assertEqual((row['status'], row['source']), ('unverified', 'claude-legacy-snapshot'))
+                self.assertEqual(len(row['windows']), 2)
+                self.assertIsNone(u.headroom(self.claude_profile(), dict(providers={'claude': row})))
+                self.assertIn('legacy_snapshot_unverified', row['diagnostics'])
 
-    def test_statusline_command_never_fails_and_never_writes_on_unusable_input(self):
-        path = u.claude_snapshot_path(core)
-        huge = json.dumps(self.statusline(pad='x' * (u.MAX_BYTES + 10)))
-        for label, raw in (('empty', ''), ('not json', '{{{'), ('array', '[]'), ('no limits', json.dumps({'model': {}})),
-                           ('limits not an object', '{"rate_limits": 5}'), ('no windows', '{"rate_limits": {"spend_limit": {}}}'),
-                           ('invalid used', json.dumps(self.statusline(five=float('nan')))),
-                           ('negative', json.dumps(self.statusline(five=-4))), ('oversized', huge)):
-            with self.subTest(case=label):
-                stdout = io.StringIO()
-                with contextlib.redirect_stdout(stdout):
+    def test_bound_windows_expire_individually_and_cannot_gain_age_from_mtime(self):
+        with self.claude_env(), self.sealed():
+            path = self.native_record(age=300)
+            row = self.get_claude(self.config, force=True)['providers']['claude']
+            self.assertEqual(row['status'], 'stale')
+            config = dict(self.config, usage=dict(self.config.get('usage', {}), ttl_seconds=600))
+            self.assertEqual(self.get_claude(config, force=True)['providers']['claude']['status'], 'fresh')
+            path = self.native_record(age=0)
+            os.utime(path, (time.time() - 300, time.time() - 300))
+            row = self.get_claude(self.config, force=True, forget=True)['providers']['claude']
+            self.assertEqual(row['status'], 'stale')
+            self.assertGreater(time.time() - row['observed_at'], 299)
+
+    def test_bad_legacy_and_bound_files_do_not_invent_capacity(self):
+        with self.claude_env(), self.sealed():
+            path = self.snapshot_file()
+            for content in ('not json', '[]', '{}', '{"rate_limits":{"five_hour":{"used_percentage":500000}}}',
+                            'x' * (u.SNAPSHOT_BYTES + 1)):
+                path.write_text(content)
+                row = self.get_claude(self.config, force=True, forget=True)['providers']['claude']
+                self.assertEqual((row['status'], row['windows']), ('unknown', []))
+            path.unlink()
+            bound = self.native_record()
+            for content in ('not json', '[]', '{}', 'x' * (u.co.MAX_BYTES + 1)):
+                bound.write_text(content)
+                row = self.get_claude(self.config, force=True, forget=True)['providers']['claude']
+                self.assertEqual((row['status'], row['windows']), ('unknown', []))
+            bound.unlink(); bound.mkdir()
+            self.assertEqual(self.get_claude(self.config, force=True, forget=True)['providers']['claude']['status'], 'unknown')
+
+    def test_statusline_saves_only_normalized_quota_and_hashed_producer_privately(self):
+        with self.claude_env(), self.sealed():
+            self.record_line(10)
+            path = self.native_path()
+            saved = path.read_text()
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            for private in ('/private', 'claude-x', 'session_id', 'transcript', 'cwd', '"s"'):
+                self.assertNotIn(private, saved)
+            self.assertEqual(len(json.loads(saved)['producers']), 1)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'unverified')
+            self.record_line(11, five=40)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'fresh')
+            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .6)
+
+    def test_startup_without_limits_establishes_zero_then_first_response_is_observed(self):
+        with self.claude_env(), self.sealed():
+            with contextlib.redirect_stdout(io.StringIO()):
+                u.record_claude_statusline(core, io.StringIO(json.dumps(dict(session_id='s', cost=dict(total_api_duration_ms=0)))))
+            self.record_line(1)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'fresh')
+            self.assertTrue(all(w['freshness_basis'] == 'response-counter' for w in row['windows']))
+
+    def test_redraws_and_first_seen_positive_counters_never_renew_freshness(self):
+        with self.claude_env(), self.sealed():
+            self.record_line(10)
+            self.record_line(10, five=70)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'unverified')
+            self.record_line(11)
+            first = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.record_line(11, five=70)
+            self.record_line(None, five=80)
+            second = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(first['windows'], second['windows'])
+
+    def test_counter_high_water_rejects_reset_and_replay_until_new_progress(self):
+        with self.claude_env(), self.sealed():
+            for count in (10, 2, 3, 10):
+                self.record_line(count)
+                row = self.get_claude(self.config, cached=True)['providers']['claude']
+                self.assertEqual(row['status'], 'unverified')
+            self.record_line(11)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'fresh')
+            self.record_line(0, session_id='new-session')
+            self.record_line(1, session_id='new-session')
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'fresh')
+
+    def test_long_gap_progress_uses_prior_callback_bound_and_redraw_cannot_renew_it(self):
+        now = time.time()
+        with self.claude_env(), self.sealed():
+            with patch.object(u.time, 'time', return_value=now - 300):
+                self.record_line(10)
+            self.record_line(11)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'stale')
+            self.record_line(11)
+            again = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(again['windows'], row['windows'])
+            self.record_line(12)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'fresh')
+
+    def test_missing_or_invalid_counters_and_unidentified_producers_are_unverified(self):
+        with self.claude_env(), self.sealed():
+            for counter in (None, True, -1, '2', float('nan')):
+                self.record_line(counter)
+                self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'unverified')
+            self.record_line(0, session_id=None)
+            self.record_line(1, session_id=None)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'unverified')
+
+    def test_missing_or_decreased_counter_does_not_advance_the_response_bound(self):
+        now = time.time()
+        for marker in (None, 2, 'invalid'):
+            with self.subTest(marker=marker), self.claude_env(), self.sealed():
+                session = 'producer-' + str(marker)
+                with patch.object(u.time, 'time', return_value=now - 300):
+                    self.record_line(10, session_id=session)
+                self.record_line(marker, session_id=session)
+                self.record_line(11, session_id=session)
+                row = self.get_claude(self.config, cached=True)['providers']['claude']
+                self.assertEqual(row['status'], 'stale')
+                self.assertGreater(now - row['observed_at'], 299)
+
+    def test_statusline_invalid_input_is_bounded_and_never_fails_its_caller(self):
+        with self.claude_env(), self.sealed():
+            for raw in ('', '{{{', '[]', '{"model":{}}', '{"rate_limits":5}',
+                        json.dumps(self.statusline(five=float('nan'))), json.dumps(self.statusline(five=-4)),
+                        json.dumps(self.statusline(pad='x' * (u.MAX_BYTES + 10)))):
+                with contextlib.redirect_stdout(io.StringIO()) as out:
                     self.assertEqual(u.record_claude_statusline(core, io.StringIO(raw)), 0)
-                self.assertEqual(stdout.getvalue(), '')
-                self.assertFalse(path.exists())
-        with patch.object(r, 'save', side_effect=OSError('read-only')), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(u.record_claude_statusline(core, io.StringIO(json.dumps(self.statusline()))), 0)
+                self.assertEqual(out.getvalue(), '')
+                self.assertFalse(self.native_path().exists())
+            with patch.object(r, 'save', side_effect=OSError('read-only')):
+                self.record_line(1)
 
-    def test_alloy_usage_flag_is_a_working_statusline_command_and_touches_no_provider(self):
-        parser = argparse.ArgumentParser()
-        u.register(parser.add_subparsers(), core)
-        args = parser.parse_args(['usage', '--record-claude-statusline'])
-        self.assertTrue(args.record_claude_statusline)
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(['usage', '--record-claude-statusline', '--refresh'])
-        with self.sealed(), patch.object(u, 'get', side_effect=AssertionError('no provider read')), \
-             patch.object(sys, 'stdin', io.StringIO(json.dumps(self.statusline()))), \
-             contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(args.func(args), 0)
-        self.assertIn('Claude 5h', out.getvalue())
-        self.assertTrue(u.claude_snapshot_path(core).exists())
-        # The real entry point, as Claude Code would run it: a status-line command with the
-        # JSON on stdin. No HOME is set for the child and no provider is reached.
-        u.claude_snapshot_path(core).unlink()
-        env = {'PATH': os.environ.get('PATH', ''), 'ALLOY_ROUTING_HOME': self.tmp.name, 'ALLOY_CONFIG': '/dev/null'}
-        done = subprocess.run([sys.executable, str(REPO / 'bin/alloy'), 'usage', '--record-claude-statusline'],
-                              input=json.dumps(self.statusline(five=6, seven=55)), env=env,
-                              capture_output=True, text=True, timeout=60)
-        self.assertEqual((done.returncode, done.stdout.strip()), (0, 'Claude 5h 94% left | 7d 45% left'), done.stderr)
-        self.assertTrue(u.claude_snapshot_path(core).exists())
+    def test_new_local_reading_is_immediate_and_cached_mode_never_writes_or_calls_provider(self):
+        with self.claude_env(), self.sealed():
+            first = self.get_claude(self.config, force=True)
+            self.assertEqual(first['providers']['claude']['status'], 'unknown')
+            self.record_line(10)
+            self.record_line(11, five=40)
+            cache = (r.root() / 'usage-cache.json').read_bytes()
+            with patch.object(u, 'fetch', side_effect=AssertionError('no fetch')), patch.object(r, 'save', side_effect=AssertionError('no write')):
+                row = u.get(core, self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'fresh')
+            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .6)
+            self.assertEqual((r.root() / 'usage-cache.json').read_bytes(), cache)
+            with patch.object(u, 'fetch', side_effect=AssertionError('no fetch')):
+                row = u.get(core, self.config)['providers']['claude']
+            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .6)
+
+    def test_common_updates_preserve_scoped_oauth_limits_with_their_original_age(self):
+        with self.claude_env(), self.sealed():
+            old = self.row('claude', age=30)
+            old['source'] = 'claude-oauth'
+            old['windows'] = u.parse_claude(dict(five_hour=dict(utilization=10), seven_day=dict(utilization=10),
+                seven_day_sonnet=dict(utilization=100)))
+            r.save(r.root() / 'usage-cache.json', dict(providers={'claude': old}))
+            self.native_record(five=.2, seven=.3)
+            snapshot = u.get(core, self.config, cached=True)
+            row = snapshot['providers']['claude']
+            self.assertEqual(u.headroom(self.claude_profile('sonnet'), snapshot), 0)
+            self.assertAlmostEqual(u.headroom(self.claude_profile('opus'), snapshot), .7)
+            scoped = next(w for w in row['windows'] if w['pool'] == 'claude:sonnet')
+            self.assertAlmostEqual(scoped['observed_at'], old['observed_at'])
+            with patch.object(u.time, 'time', return_value=time.time() + 100):
+                expired = u.get(core, self.config, cached=True)
+                self.assertIsNone(u.headroom(self.claude_profile('sonnet'), expired))
+                self.assertAlmostEqual(u.headroom(self.claude_profile('opus'), expired), .7)
+
+    def test_equal_timestamp_prefers_oauth_and_missing_windows_do_not_disappear(self):
+        now = time.time() - 1
+        a = u.co.observed([u.window('claude', '5h', .1)], 'claude-oauth', now, 'oauth-fetch')
+        b = u.co.observed([u.window('claude', '5h', .9)], 'claude-stream', now, 'dispatch-start-bound')
+        self.assertEqual(u.co.select(a + b, time.time(), 120)[0]['remaining_fraction'], .1)
+        with self.claude_env(), self.sealed():
+            self.native_record(five=.9, seven=.1)
+            self.native_record(five=.1, only='5h')
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(len(row['windows']), 2)
+            self.assertAlmostEqual(row['windows'][1]['remaining_fraction'], .9)
+
+    def test_concurrent_oauth_completion_cannot_erase_newer_scoped_constraints(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        old_started, release_old = Event(), Event()
+        calls = []
+        def oauth(_core, _token):
+            calls.append(1)
+            if len(calls) == 1:
+                old_started.set()
+                if not release_old.wait(5):
+                    raise AssertionError('test synchronization timed out')
+                used = 20
+            else:
+                used = 100
+            return u.parse_claude(dict(five_hour=dict(utilization=10), seven_day=dict(utilization=10),
+                                       seven_day_sonnet=dict(utilization=used)))
+        with self.claude_env(CLAUDE_CODE_OAUTH_TOKEN='test-token'), self.only('claude'), \
+             patch.object(u, 'claude_oauth', side_effect=oauth), ThreadPoolExecutor(max_workers=1) as executor:
+            old = executor.submit(u.get, core, self.config, True)
+            try:
+                self.assertTrue(old_started.wait(5))
+                latest = u.get(core, self.config, force=True)
+                self.assertEqual(u.headroom(self.claude_profile('sonnet'), latest), 0)
+            finally:
+                release_old.set()
+            old.result(timeout=5)
+            final = u.get(core, self.config, cached=True)
+            self.assertEqual(u.headroom(self.claude_profile('sonnet'), final), 0)
+
+    def test_overlapping_dispatches_preserve_a_tighter_late_completion(self):
+        with self.claude_env(), self.sealed():
+            base = time.time() - 100
+            ctx = u.claude_context(core)
+            for start, end, remaining in ((base + 5, base + 20, .4), (base, base + 60, .03)):
+                with patch.object(u.co.time, 'time', return_value=end):
+                    u.co.record_windows(core, ctx, [u.window('claude', '5h', remaining, base + 3600)],
+                                        start, lambda: u.claude_context(core))
+                snapshot = self.get_claude(self.config, cached=True)
+            chosen = snapshot['providers']['claude']['windows'][0]
+            self.assertAlmostEqual(chosen['remaining_fraction'], .03)
+            self.assertEqual(chosen['observed_at'], base)
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot, .1))
+            self.assertEqual(len(snapshot['providers']['claude']['observation_candidates']), 2)
+
+    def test_interval_frontier_is_independent_of_arrival_order(self):
+        base = time.time() - 30
+        def sample(start, end, remaining):
+            return u.co.observed([u.window('claude', '5h', remaining, base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        inputs = [sample(0, 10, .1), sample(5, 15, .2), sample(12, 20, .3)]
+        for order in itertools.permutations(inputs):
+            frontier = []
+            for incoming in order:
+                frontier = u.co.candidates(frontier + [incoming])
+            chosen = u.co.select(frontier, time.time(), 120)[0]
+            self.assertEqual(chosen['remaining_fraction'], .2)
+            self.assertEqual(chosen['observed_at'], base + 5)
+            self.assertEqual(len(frontier), 2)
+            later = u.co.candidates(frontier + [sample(21, 25, .8)])
+            self.assertEqual(u.co.select(later, time.time(), 120)[0]['remaining_fraction'], .8)
+            self.assertEqual(len(later), 1)
+
+    def test_different_future_resets_cannot_hide_an_overlapping_constraint(self):
+        now = time.time()
+        a = u.co.observed([u.window('claude', '5h', .02, now + 3600)],
+                          'claude-oauth', now - 20, 'oauth-fetch', now - 1)
+        b = u.co.observed([u.window('claude', '5h', .9, now + 7200)],
+                          'claude-stream', now - 10, 'dispatch-start-bound', now - 2)
+        self.assertEqual(u.co.select(a + b, now, 120)[0]['remaining_fraction'], .02)
+        a[0]['resets_at'] = now - 1
+        self.assertEqual(u.co.select(a + b, now, 120)[0]['remaining_fraction'], .9)
+
+    def test_frontier_overflow_stays_blocked_through_expiry_and_overlapping_updates(self):
+        base = time.time() - 200
+        def sample(start, end, remaining, window='5h'):
+            return u.co.observed([u.window('claude', window, remaining, base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        frontier = u.co.candidates([sample(i, 99, .02 + i * .02) for i in range(u.co.MAX_FRONTIER + 1)])
+        self.assertEqual(len(frontier), 1)
+        self.assertTrue(frontier[0]['coverage_incomplete'])
+        self.assertEqual(frontier[0]['observed_at'], base)
+        frontier = u.co.candidates(frontier + [sample(98, 139, .9), sample(98, 139, .9, '7d')])
+        snapshot = dict(ttl_seconds=120, providers={'claude': dict(observation_schema=u.co.SCHEMA,
+                        observation_candidates=frontier, windows=u.co.select(frontier, base + 140, 120))})
+        with patch.object(u.time, 'time', return_value=base + 140):
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot))
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot, .01))
+            self.assertFalse(u.reserve_reached(dict(self.claude_profile(), billing_mode='metered'), snapshot, .1))
+        frontier = u.co.candidates(frontier + [sample(141, 145, .9), sample(141, 145, .9, '7d')])
+        snapshot['providers']['claude']['observation_candidates'] = frontier
+        with patch.object(u.time, 'time', return_value=base + 146):
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), snapshot), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot, .1))
+
+    def test_stale_tighter_overlap_cannot_promote_fresh_loose_capacity(self):
+        base = time.time() - 300
+        def sample(start, end, remaining, window='5h', reset=None):
+            return u.co.observed([u.window('claude', window, remaining, reset or base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        inputs = [sample(0, 200, .02), sample(100, 110, .9), sample(100, 110, .9, '7d')]
+        def snapshot(candidates):
+            return dict(ttl_seconds=120, providers={'claude': dict(observation_schema=u.co.SCHEMA,
+                        observation_candidates=u.co.candidates(candidates))})
+        with patch.object(u.time, 'time', return_value=base + 200):
+            chosen = u.co.select(inputs, base + 200, 120)[0]
+            self.assertTrue(chosen['coverage_conflict'])
+            self.assertEqual((chosen['remaining_fraction'], chosen['observed_at']), (.9, base + 100))
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot(inputs)))
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot(inputs), .1))
+            expired = [dict(w, resets_at=base + 199) if i == 0 else w for i, w in enumerate(inputs)]
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), snapshot(expired)), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot(expired), .1))
+        with patch.object(u.time, 'time', return_value=base + 221):
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot(inputs)))
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot(inputs), .1))
+        with patch.object(u.time, 'time', return_value=base + 206):
+            resolved = snapshot(inputs + [sample(201, 205, .9)])
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), resolved), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), resolved, .1))
+
+    def test_observation_byte_limit_matches_atomic_file_and_preserves_prior_data(self):
+        with self.claude_env(), self.sealed():
+            location = self.native_path()
+            u.co._save(core, location, dict(previous='valid'))
+            data = dict(producers={str(i): dict(counter=i, received_at=time.time()) for i in range(20)})
+            compact = len(json.dumps(data).encode())
+            actual = len((json.dumps(data, indent=2, allow_nan=False) + '\n').encode())
+            with patch.object(u.co, 'MAX_BYTES', (compact + actual) // 2):
+                with self.assertRaises(ValueError):
+                    u.co._save(core, location, data)
+                self.assertEqual(u.co.read(location)[0], dict(previous='valid'))
+            with patch.object(u.co, 'MAX_BYTES', actual):
+                u.co._save(core, location, data)
+                self.assertEqual(location.stat().st_size, actual)
+                self.assertEqual(u.co.read(location)[0], data)
+
+    def test_stale_binding_json_is_pruned_without_removing_epochs_or_locks(self):
+        with self.claude_env(), self.sealed():
+            directory = self.native_path().parent
+            directory.mkdir(parents=True)
+            old = []
+            for i in range(8):
+                item = directory / ('%064x.json' % i)
+                r.save(item, {})
+                os.utime(item, (time.time() - 7200 + i, time.time() - 7200 + i))
+                old.append(item)
+                item.with_suffix('.json.lock').touch()
+            epoch = directory / 'epoch.json'
+            r.save(epoch, dict(epoch='existing'))
+            self.native_record()
+            self.assertTrue(epoch.exists())
+            self.assertTrue(self.native_path().exists())
+            self.assertFalse(old[0].exists())
+            self.assertTrue(old[-1].exists())
+            self.assertEqual(len(list(directory.glob('*.json.lock'))), 9)
+
+    def test_observation_cleanup_failure_does_not_fail_recording(self):
+        with self.claude_env(), self.sealed(), patch.object(u.co.Path, 'iterdir', side_effect=OSError('unavailable')):
+            self.native_record()
+            self.assertTrue(self.native_path().exists())
+
+    def test_cleanup_keeps_a_generation_locked_by_a_concurrent_writer(self):
+        with self.claude_env(), self.sealed():
+            directory = self.native_path().parent
+            directory.mkdir(parents=True)
+            old = directory / ('0' * 64 + '.json')
+            r.save(old, dict(active=True))
+            os.utime(old, (time.time() - 7200, time.time() - 7200))
+            for i in range(1, 5):
+                r.save(directory / ('%064x.json' % i), {})
+            with u.co.locked(old):
+                self.native_record()
+                self.assertTrue(old.exists())
+            self.native_record()
+            self.assertFalse(old.exists())
+
+    def test_partial_data_cannot_claim_full_headroom_but_fresh_exhaustion_still_blocks(self):
+        with self.claude_env(), self.sealed():
+            self.native_record(five=.9, only='5h')
+            snapshot = self.get_claude(self.config, cached=True)
+            self.assertEqual(snapshot['providers']['claude']['status'], 'partial')
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot))
+            self.native_record(five=1, only='5h')
+            snapshot = self.get_claude(self.config, cached=True)
+            self.assertEqual(u.headroom(self.claude_profile(), snapshot), 0)
+            self.assertIsNone(u.pacing(self.claude_profile(), dict(snapshot, ttl_seconds=0)))
+
+    def test_partial_fresh_constraint_still_enforces_the_configured_routing_reserve(self):
+        self.enable('claude-large', 'codex-large')
+        with self.claude_env(), self.sealed():
+            self.native_record(five=.95, only='5h')
+            snapshot = self.get_claude(self.config, cached=True)
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot))
+            self.config['usage'] = dict(reserve_fraction=.1)
+            self.assertEqual(self.reasons(self.resolve(snapshot))['claude-large'], 'live subscription quota reserve reached')
+            self.config['usage']['reserve_fraction'] = .04
+            self.assertNotIn('claude-large', self.reasons(self.resolve(snapshot)))
+            self.assertFalse(u.reserve_reached(dict(self.claude_profile(), billing_mode='metered'), snapshot, .1))
+
+    def test_partial_constraint_reserves_independent_checker_capacity(self):
+        self.enable('antigravity-large-gemini', 'claude-large')
+        self.args.mode = 'make'; self.args.host_family = 'openai'
+        # Identify the shipped Gemini Maker without depending on its versioned ID.
+        for profile in self.config['profiles']:
+            profile['enabled'] = profile['adapter'] == 'antigravity' and profile['model'].startswith('gemini-') or profile['id'] == 'claude-large'
+        with self.claude_env(), self.sealed():
+            self.native_record(five=.95, only='5h')
+            snapshot = self.get_claude(self.config, cached=True)
+            with self.assertRaises(r.RoutingError):
+                self.resolve(snapshot)
+            self.native_record(five=.4, only='5h')
+            snapshot = self.get_claude(self.config, cached=True)
+            self.assertEqual(self.resolve(snapshot)['cli'], 'antigravity')
+
+    def test_profile_and_credential_changes_never_rebind_old_native_data(self):
+        with self.claude_env(), self.sealed():
+            self.native_record()
+            self.assertEqual(self.get_claude(self.config, force=True)['providers']['claude']['status'], 'fresh')
+            for extra in ({'CLAUDE_CONFIG_DIR': str(Path(self.tmp.name) / 'other-profile')},
+                          {'CLAUDE_CODE_OAUTH_TOKEN': 'new-test-token'}):
+                with self.claude_env(**extra), patch.object(u, 'claude_oauth', side_effect=u.UsageError('unavailable')):
+                    for opts in ({'cached': True}, {}, {'force': True}):
+                        row = self.get_claude(self.config, **opts)['providers']['claude']
+                        self.assertEqual((row['status'], row['windows']), ('unknown', []))
+
+    def test_api_and_proxy_overrides_cannot_use_or_record_subscription_observations(self):
+        with self.claude_env():
+            self.native_record()
+            for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'):
+                with self.claude_env(**{key: 'test-value'}), self.sealed():
+                    for opts in ({'cached': True}, {'force': True}):
+                        row = self.get_claude(self.config, **opts)['providers']['claude']
+                        self.assertEqual((row['status'], row['windows']), ('unknown', []))
+                    self.record_line(0); self.record_line(1)
+                    self.assertFalse(self.native_path().exists())
+
+    def test_invalidation_rejects_old_cache_and_late_dispatch_without_provider_access(self):
+        parser = argparse.ArgumentParser(); u.register(parser.add_subparsers(), core)
+        with self.claude_env(), self.sealed():
+            self.native_record()
+            ctx = u.claude_context(core)
+            self.get_claude(self.config, force=True)
+            args = parser.parse_args(['usage', '--invalidate-claude'])
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(args.func(args), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                u.record_claude_stream(core, io.StringIO(self.stream()), observation_context=ctx, started_at=time.time()-1)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual((row['status'], row['windows']), ('unknown', []))
+            self.record_line(10)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'unverified')
+            self.record_line(11)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'fresh')
+
+    def test_stream_import_is_unverified_and_launch_bounds_reject_long_or_late_runs(self):
+        with self.claude_env(), self.sealed(), contextlib.redirect_stdout(io.StringIO()):
+            u.record_claude_stream(core, io.StringIO(self.stream()))
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'unverified')
+            self.native_record(age=300)
+            self.assertEqual(self.get_claude(self.config, cached=True)['providers']['claude']['status'], 'stale')
+            self.native_record(age=10, five=.2)
+            self.native_record(age=30, five=.9)
+            row = self.get_claude(self.config, cached=True)['providers']['claude']
+            self.assertEqual(row['status'], 'fresh')
+            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .1)
+
+    def test_stream_recording_discards_private_output_and_rejects_bad_or_oversized_events(self):
+        with self.claude_env(), self.sealed(), contextlib.redirect_stdout(io.StringIO()):
+            for raw in ('', '{"type":"result"}\n', 'rate_limit_event ' + 'x' * (u.MAX_BYTES + 10),
+                        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}\n'):
+                self.assertEqual(u.record_claude_stream(core, io.StringIO(raw)), 0)
+                self.assertFalse(self.native_path().exists())
+            raw = 'x' * (u.MAX_BYTES + 10) + '\n' + self.stream()
+            self.assertEqual(u.record_claude_stream(core, io.StringIO(raw)), 0)
+            saved = self.native_path().read_text()
+            for private in ('session_id', 'result', 'tools', 'status', 'overage', 'rateLimitType'):
+                self.assertNotIn('"' + private + '"', saved)
+
+    def test_probe_disabled_or_nested_never_launches_a_child_even_on_refresh(self):
+        config = dict(self.config, usage=dict(self.config.get('usage', {}), claude_probe=True))
+        with self.claude_env(CLAUDECODE='1'), self.sealed():
+            row = self.get_claude(config, force=True)['providers']['claude']
+            self.assertEqual(row['status'], 'unknown')
+            self.assertIn('probe_skipped_nested_claude', row['diagnostics'])
+            self.assertEqual(u.provider_env(core)['CLAUDECODE'], '1')
+            with self.assertRaisesRegex(u.UsageError, 'skipped inside Claude Code'):
+                u.claude_probe(core)
+        with self.claude_env(), self.sealed():
+            row = self.get_claude(self.config, force=True)['providers']['claude']
+            self.assertIn('probe_disabled', row['diagnostics'])
+
+    def test_failed_attempts_remain_visible_without_renewing_observations_or_repeating(self):
+        config = dict(self.config, usage=dict(self.config.get('usage', {}), claude_probe=True))
+        with self.claude_env(), patch.object(u, 'command', side_effect=u.UsageError('private stderr')) as command, \
+             patch.object(u, 'binary_for', return_value='/fake/claude'):
+            self.native_record(age=300)
+            for _ in range(3):
+                row = self.get_claude(config)['providers']['claude']
+                self.assertEqual(row['status'], 'stale')
+                self.assertIn('probe_failed', row['diagnostics'])
+                self.assertIn('probe_failed', u.render(dict(enabled=True, providers={'claude': row})))
+            self.assertEqual(command.call_count, 1)
+            self.assertGreater(time.time() - row['observed_at'], 299)
+            self.assertNotIn('private', json.dumps(u.public(dict(providers={'claude': row}))))
+
+    def test_expired_history_does_not_repeat_a_failed_refresh_within_the_cache_ttl(self):
+        config = dict(self.config, usage=dict(claude_probe=True))
+        with self.claude_env(), patch.object(u, 'command', side_effect=u.UsageError('unavailable')) as command, \
+             patch.object(u, 'binary_for', return_value='/fake/claude'):
+            path = self.native_record(age=300)
+            data = json.loads(path.read_text())
+            for w in data['windows']:
+                w['resets_at'] = time.time() - 1
+            r.save(path, data)
+            for _ in range(3):
+                self.assertEqual(self.get_claude(config)['providers']['claude']['status'], 'stale')
+            self.assertEqual(command.call_count, 1)
+            self.get_claude(config, force=True)
+            self.assertEqual(command.call_count, 2)
+
+    def test_oauth_failures_are_sanitized_even_with_a_native_fallback(self):
+        with self.claude_env(CLAUDE_CODE_OAUTH_TOKEN='test-token'):
+            self.native_record(age=300)
+            opener = Mock(); opener.open.side_effect = u.urllib.error.HTTPError('url', 401, 'private body', {}, io.BytesIO(b'private'))
+            with patch.object(u.urllib.request, 'build_opener', return_value=opener), self.only('claude'):
+                snapshot = u.get(core, self.config, force=True)
+            row = snapshot['providers']['claude']
+            self.assertIn('oauth_http_401', row['diagnostics'])
+            self.assertEqual(row['status'], 'stale')
+            self.assertNotIn('private', json.dumps(u.public(snapshot)))
+
+    def test_usage_recorder_flags_work_through_the_real_entry_point_without_provider_access(self):
+        for flag, payload in (('--record-claude-statusline', json.dumps(self.statusline())),
+                              ('--record-claude-stream', self.stream())):
+            env = {'PATH': os.environ.get('PATH', ''), 'ALLOY_ROUTING_HOME': self.tmp.name,
+                   'ALLOY_CONFIG': '/dev/null', 'CLAUDE_CONFIG_DIR': str(self.home() / '.claude')}
+            done = subprocess.run([sys.executable, str(REPO / 'bin/alloy'), 'usage', flag], input=payload,
+                                  env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn('Claude 5h 94% left', done.stdout)
+        self.assertTrue(list((r.root() / 'claude-observations').glob('*/*.json')))
 
     def test_probe_is_opt_in_and_reads_the_rate_limit_event_once_per_ttl(self):
         calls = []
@@ -873,8 +1281,9 @@ class Lane4Tests(unittest.TestCase):
             return self.stream(five=.06, seven=.55)
         with self.claude_env(), patch.object(u, 'binary_for', return_value='/fake/claude'), patch.object(u, 'command', side_effect=fake):
             for options in ({}, {'claude_probe': False}):
-                with self.assertRaisesRegex(u.UsageError, 'keychain access disabled by policy'):
-                    u.fetch(core, 'claude', options)
+                result = u.fetch(core, 'claude', options)
+                self.assertEqual(result[1], [])
+                self.assertIn('oauth_credential_unavailable', result.diagnostics)
             self.assertEqual(calls, [])  # a usage read is never an inference call unless the operator opts in
             config = dict(self.config, usage=dict(self.config.get('usage', {}), claude_probe=True))
             row = self.get_claude(config, force=True)['providers']['claude']
@@ -939,129 +1348,6 @@ class Lane4Tests(unittest.TestCase):
         text = ' '.join(out.getvalue().split())
         self.assertRegex(text, r'no inference calls unless the opt-in usage\.claude_probe is set, which makes one small Claude call')
         self.assertIn('--record-claude-stream', text)
-
-    def test_stream_json_output_of_a_claude_run_is_recorded_without_a_probe(self):
-        noise = ['{"type":"system","subtype":"init","session_id":"secret-session","cwd":"/private/project"}',
-                 '{"type":"assistant","message":{"content":"private answer"}}',
-                 'plain text, not json but mentions rate_limit_event',
-                 '{"type":"result","result":"OK"}']
-        first = self.stream(five=.5, seven=.5).splitlines()[1]
-        latest = self.stream(five=.06, seven=.55).splitlines()[1]
-        text = '\n'.join(noise[:2] + [first] + noise[2:3] + [latest] + noise[3:]) + '\n'
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(u.record_claude_stream(core, io.StringIO(text)), 0)
-        self.assertEqual(out.getvalue().strip(), 'Claude 5h 94% left | 7d 45% left')  # the latest event wins
-        path = u.claude_snapshot_path(core)
-        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        saved = path.read_text()
-        for private in ('secret-session', '/private', 'private answer', 'session_id', 'overageStatus', 'rateLimitType'):
-            self.assertNotIn(private, saved)
-        self.assertEqual(set(json.loads(saved)), {'schema', 'observed_at', 'unifiedWindows'})
-        with self.claude_env(), self.sealed():  # read back as a fresh snapshot: no probe, no subprocess, no network
-            source, windows, observed = u.fetch(core, 'claude', {})
-            row = self.get_claude(self.config, force=True)['providers']['claude']
-        self.assertEqual(source, 'claude-rate-limit-snapshot')
-        self.assertAlmostEqual(windows[0]['remaining_fraction'], .94)
-        self.assertAlmostEqual(windows[1]['remaining_fraction'], .45)
-        self.assertEqual(row['status'], 'fresh')
-        # It feeds the same reserve rule as every other Claude reading.
-        self.enable('claude-large', 'codex-large')
-        self.snapshot['providers']['claude'] = row
-        self.assertNotIn('claude-large', self.reasons(self.resolve(self.snapshot)))
-        path.write_text(json.dumps(dict(schema=1, observed_at=time.time(), unifiedWindows={
-            'five_hour': {'utilization': .95, 'resetsAt': time.time() + 3600}})))
-        with self.claude_env(), self.sealed():
-            self.snapshot['providers']['claude'] = self.get_claude(self.config, force=True, forget=True)['providers']['claude']
-        self.assertEqual(self.reasons(self.resolve(self.snapshot))['claude-large'], 'live subscription quota reserve reached')
-
-    def test_stream_recording_never_fails_its_caller_and_writes_nothing_unusable(self):
-        path = u.claude_snapshot_path(core)
-        big = 'x' * (u.MAX_BYTES + 10)
-        for label, raw in (('empty', ''), ('no event', '{"type":"result"}\n'),
-                           ('event without windows', '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}\n'),
-                           ('invalid utilization', json.dumps({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
-                               "five_hour": {"utilization": float("nan"), "resetsAt": 1}}}}) + '\n'),
-                           ('negative', json.dumps({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": {
-                               "five_hour": {"utilization": -1, "resetsAt": 1}}}}) + '\n'),
-                           ('oversized line', 'rate_limit_event ' + big + '\n')):
-            with self.subTest(case=label):
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    self.assertEqual(u.record_claude_stream(core, io.StringIO(raw)), 0)
-                self.assertEqual(out.getvalue(), '')
-                self.assertFalse(path.exists())
-        # A long line before the event does not hide it, and is not held in memory.
-        text = big + '\n' + self.stream().splitlines()[1] + '\n'
-        with contextlib.redirect_stdout(io.StringIO()):
-            u.record_claude_stream(core, io.StringIO(text))
-        self.assertTrue(path.exists())
-        with patch.object(r, 'save', side_effect=OSError('read-only')), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(u.record_claude_stream(core, io.StringIO(self.stream())), 0)
-
-    def test_record_claude_stream_flag_is_a_working_command_and_touches_no_provider(self):
-        parser = argparse.ArgumentParser()
-        u.register(parser.add_subparsers(), core)
-        args = parser.parse_args(['usage', '--record-claude-stream'])
-        self.assertTrue(args.record_claude_stream)
-        for other in ('--refresh', '--cached', '--record-claude-statusline'):
-            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                parser.parse_args(['usage', '--record-claude-stream', other])
-        with self.sealed(), patch.object(u, 'get', side_effect=AssertionError('no provider read')), \
-             patch.object(sys, 'stdin', io.StringIO(self.stream())), contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(args.func(args), 0)
-        self.assertIn('Claude 5h 94% left', out.getvalue())
-        # The real entry point, fed by a stand-in claude run through a pipe. No HOME is set for the children.
-        u.claude_snapshot_path(core).unlink()
-        run = self.fake_claude('print(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"unifiedWindows": '
-                               '{"five_hour": {"utilization": 0.25, "resetsAt": now + 3600}}}}))')
-        env = {'PATH': os.environ.get('PATH', ''), 'ALLOY_ROUTING_HOME': self.tmp.name, 'ALLOY_CONFIG': '/dev/null'}
-        stream = subprocess.run([run], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL, env=env)
-        done = subprocess.run([sys.executable, str(REPO / 'bin/alloy'), 'usage', '--record-claude-stream'],
-                              input=stream.stdout, env=env, capture_output=True, text=True, timeout=60)
-        self.assertEqual((done.returncode, done.stdout.strip()), (0, 'Claude 5h 75% left'), done.stderr)
-        self.assertTrue(u.claude_snapshot_path(core).exists())
-
-    def test_probe_failure_keeps_a_stale_snapshot_and_never_raises_past_get(self):
-        config = dict(self.config, usage=dict(self.config.get('usage', {}), claude_probe=True))
-        self.snapshot_file(age=300)
-        for failure in (u.UsageError('Usage command failed; recheck provider login'), OSError('exec failed'),
-                        subprocess.TimeoutExpired('claude', 30)):
-            with self.subTest(failure=type(failure).__name__), self.claude_env(), \
-                 patch.object(u, 'binary_for', return_value='/fake/claude'), patch.object(u, 'command', side_effect=failure):
-                row = self.get_claude(config, force=True)['providers']['claude']
-                self.assertEqual((row['status'], row['source']), ('stale', 'claude-rate-limit-snapshot'))
-        u.claude_snapshot_path(core).unlink()
-        with self.claude_env(), patch.object(u, 'binary_for', return_value='/fake/claude'), \
-             patch.object(u, 'command', return_value='{"type":"result"}\n'):
-            row = self.get_claude(config, forget=True, force=True)['providers']['claude']
-            self.assertEqual((row['status'], row['windows']), ('unknown', []))
-        with self.claude_env(), patch.object(u, 'binary_for', side_effect=u.UsageError('Claude CLI not installed')):
-            self.assertEqual(self.get_claude(config, forget=True, force=True)['providers']['claude']['error'], 'Claude CLI not installed')
-
-    def test_a_failed_degraded_read_is_cached_for_the_ttl_not_retried_on_every_get(self):
-        """Stale snapshot as the last resort after a failed probe or OAuth attempt: the failure
-        is remembered for the TTL, so usage reads do not spawn claude or call the network each time."""
-        self.snapshot_file(age=300)
-        calls = []
-        def failing(argv, _core, timeout=15):
-            calls.append(argv)
-            raise u.UsageError('Usage command failed; recheck provider login')
-        config = dict(self.config, usage=dict(self.config.get('usage', {}), claude_probe=True))
-        with self.claude_env(), patch.object(u, 'binary_for', return_value='/fake/claude'), patch.object(u, 'command', side_effect=failing):
-            for _ in range(3):
-                self.assertEqual(self.get_claude(config)['providers']['claude']['status'], 'stale')
-            self.assertEqual(len(calls), 1)
-            self.get_claude(config, force=True)
-            self.assertEqual(len(calls), 2)
-        opener = Mock()
-        opener.open.side_effect = u.urllib.error.HTTPError('url', 401, 'x', {}, io.BytesIO(b''))
-        with self.claude_env(CLAUDE_CODE_OAUTH_TOKEN='test-token'), \
-             patch.object(u.urllib.request, 'build_opener', return_value=opener), patch.object(u, 'command', side_effect=AssertionError('no probe')):
-            self.assertEqual(self.get_claude(self.config, forget=True)['providers']['claude']['status'], 'stale')
-            for _ in range(2):
-                self.assertEqual(self.get_claude(self.config)['providers']['claude']['status'], 'stale')
-            self.assertEqual(opener.open.call_count, 1)
 
     def test_fetch_may_report_when_it_observed_and_two_tuples_still_work(self):
         old = time.time() - 500

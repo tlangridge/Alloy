@@ -28,7 +28,8 @@ An illustrative display (these percentages are examples):
 Every reported window appears separately, including model-specific windows. A
 bar fills with **remaining** capacity, not consumed capacity. A reset passing is
 not proof of replenishment; Alloy refreshes it. Failed refreshes keep the last
-reading visible as stale, with its original observation age.
+reading visible with its original observation age. Claude windows retain their own
+freshness, so a failed refresh does not renew or discard an observation.
 
 ## Session behavior
 
@@ -133,44 +134,102 @@ route context and manifests. Raw API bodies are not logged.
 
 ### Claude quota without the keychain
 
-On macOS, Claude Code stores its login in the keychain by default, and Alloy does
-not read it, so an existing credentials file may be absent there. Alloy tries
-these sources in order and uses the first that works:
+A Claude Code terminal session can run `alloy usage --cached` to inspect local
+observations without network access or a nested Claude process. `alloy usage`
+adds bounded provider reads when their cache expires. A new local observation
+appears immediately in both commands.
 
-1. **An existing credential.** `CLAUDE_CODE_OAUTH_TOKEN`, or `.credentials.json`
-   in the Claude configuration directory when the file exists. The token goes only
-   to Anthropic's usage endpoint and is never refreshed or rewritten.
-2. **A recorded rate-limit snapshot (opt-in).** Claude Code reports its own
-   five-hour and seven-day windows. Point its status-line command at
-   `alloy usage --record-claude-statusline` to record them whenever Claude Code
-   refreshes its status line:
+The available sources are:
+
+1. **An existing OAuth credential.** `CLAUDE_CODE_OAUTH_TOKEN`, or the existing
+   `.credentials.json` in `CLAUDE_CONFIG_DIR` (default `~/.claude`). Alloy calls
+   Anthropic's usage endpoint without refreshing, rewriting or extracting a login
+   from the keychain. This source can include model-specific weekly limits.
+2. **Claude Code's native status line, configured explicitly.** Keep the command
+   as a direct executable invocation:
 
    ```json
    {"statusLine": {"type": "command", "command": "alloy usage --record-claude-statusline"}}
    ```
 
-   Alloy installs nothing and never edits your Claude settings. The command
-   prints a one-line meter and never fails the status line. You can also record a
-   run's stream events with
-   `claude -p "..." --output-format stream-json --verbose | alloy usage --record-claude-stream`;
-   that command reads the stream and prints only the meter line, so it suits a
-   call made for that purpose. Claude runs that Alloy itself makes (the `claude`
-   panelist and managed Claude workers) print the same stream, and Alloy records
-   their rate-limit event into the same snapshot at no extra cost, unless usage is
-   off, `usage.enabled` is false, `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` is
-   set, or `ALLOY_CAPTURE_USAGE=1` switches those runs to plain `json` output,
-   which carries no rate-limit event. Alloy's `claude` runs use
-   `--output-format stream-json --verbose` otherwise. A snapshot older than `usage.ttl_seconds` is shown as stale and excluded
-   from quota calculations.
-3. **The probe (opt-in).** With `usage.claude_probe: true`, and only when neither
-   source above gave a fresh reading, Alloy runs one tiny `claude -p` call (Haiku,
-   no saved session, no MCP servers) and reads its rate-limit event; the result is
-   cached for the usage TTL unless you pass `--refresh`. This is a real model call that spends a very small amount of
-   Claude quota, so it is off by default.
+   Alloy leaves Claude settings alone. The recorder prints a short meter and
+   stores only normalized five-hour/seven-day quota, source/timing metadata,
+   hashed profile/session references and response-counter baselines outside the
+   repository. It does not store paths, prompts, conversation text or identities.
 
-If none of these applies, Claude quota is unknown and never blocks routing.
-`ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL` leaves it unknown, because that
-account's capacity may not be the subscription's.
+   Status-line redraws can happen without a new response. On Claude Code
+   v2.1.251+, Alloy uses the documented `prompt_cache.requests` counter to detect
+   progress within a session. A first-seen positive counter establishes an
+   **unverified** baseline; the next increase establishes an observation, even
+   when percentages are unchanged. A startup callback with explicit zero API
+   duration can establish the baseline before the first response. Missing
+   counters and unchanged or decreasing counters never renew freshness. After a
+   same-session counter reset, restart the session or wait until the counter
+   exceeds its previous high-water mark. Older Claude versions without the
+   counter provide display-only history through this recorder.
+
+   The preceding callback supplies a conservative time bound. The first response
+   after a long gap can therefore remain stale; a subsequent response establishes
+   a recent bound. Receipt time alone never makes quota fresh.
+3. **Rate events from an existing Claude run.** Alloy-owned Claude dispatches
+   capture their profile/auth binding and launch time before spawning the child.
+   Their quota events use that launch time as a conservative observation bound:
+   short runs can supply fresh data; long runs can supply stale data. A late
+   completion keeps its own bound. Overlapping responses retain their evidence
+   and enforce the tightest fresh constraint until a provably later response
+   supersedes them. No additional model call is
+   needed. `ALLOY_CAPTURE_USAGE=1` selects plain JSON output with no rate event.
+   Piping buffered output into `alloy usage --record-claude-stream` records
+   **unverified history**, because its response time cannot be established.
+4. **A standalone probe, explicitly enabled.** `usage.claude_probe: true` permits
+   a small Haiku inference call only when there is no fresh native reading. It
+   remains off by default and is throttled by the provider cache. Inside Claude
+   Code (`CLAUDECODE` set), Alloy skips this probe even on `--refresh`, preserving
+   Claude's nesting guard. Use native observations for self-inspection.
+
+Each `(pool, window)` keeps its own source, observation time, receipt time and
+freshness basis. New shared readings preserve known scoped limits at their
+original age; they cannot erase or rejuvenate a Sonnet, Opus or other scoped
+constraint. Expired resets do not imply replenishment. Partial data is labeled
+`partial`; fresh known exhaustion still blocks routing, while incomplete positive
+headroom remains unknown. JSON exposes per-window status and sanitized attempt
+reasons; Markdown explains missing sources, disabled probes and stale baselines.
+The observation frontier is bounded. If too many overlapping readings prevent
+complete retention, the window reports incomplete coverage and subscription
+routing pauses until a verified response begins after the retained interval.
+Known constraints never become spare capacity through truncation.
+If a tighter overlapping observation is stale only because its conservative time
+bound is old, an unpassed reset can still make it contradict a fresh, looser
+reading. Alloy labels that conflict and blocks subscription routing until a
+later verified observation resolves it or the conflicting reset passes. This
+does not renew the stale observation's age. All-stale data remains unknown.
+
+Observations are bound to the canonical Claude configuration directory and known
+credential settings at ingestion. This identifies a local profile, **not a
+verified account identity**. Switching accounts only inside the macOS keychain
+may be invisible. After such a switch, run:
+
+```sh
+alloy usage --invalidate-claude
+```
+
+Then restart Claude Code to establish a new native response baseline. Separate
+`CLAUDE_CONFIG_DIR` profiles provide clearer separation. Invalidation changes
+only the local observation generation, preserving credentials and settings.
+Legacy unbound snapshots remain unverified display history; a matching bound
+OAuth cache retains its original age. `--cached` performs no migration writes.
+API/proxy overrides leave subscription applicability unknown.
+Rewriting a credentials file, including a routine token refresh, starts a new
+baseline because Alloy cannot distinguish that rewrite from an account switch
+without inspecting identity. Old observation generations beyond the maximum
+one-hour TTL are pruned opportunistically, retaining four recent generations.
+Lock files remain in place to preserve exclusion between concurrent writers.
+
+The native field contract is documented in the
+[Claude Code status-line reference](https://code.claude.com/docs/en/statusline).
+The optional [mods API](https://code.claude.com/docs/en/plugins/mods/reference)
+exposes `session.usage()`, but its quota entries carry no observation timestamp;
+it is not used as a guaranteed server refresh.
 
 ### Cursor pools
 

@@ -30,10 +30,16 @@ Run the Alloy usage command and render its Markdown output in chat.
    If `--if-changed` returns nothing, say the usage snapshot is unchanged.
 
 This command reads cached or live provider billing data without model inference,
-except that a user who has set `usage.claude_probe: true` allows one small Claude
-call per cache lifetime. Alloy never reads the macOS keychain, so Claude may show
-unknown unless a credentials file, the opt-in status-line hook (`alloy usage
---record-claude-statusline`) or that probe is set up, and Cursor shows unknown
+except that a user who has set `usage.claude_probe: true` allows one small
+standalone Claude call per cache lifetime. Inside Claude Code, this probe is
+always skipped; use `alloy usage --cached` for local self-inspection. Native
+status-line readings need an established response-counter baseline, and redraws
+never renew freshness. After switching accounts within the same keychain-backed
+profile, run `alloy usage --invalidate-claude` and restart Claude Code.
+Alloy never reads the macOS keychain, so Claude may show unknown unless an
+existing OAuth source, the opt-in status-line hook (`alloy usage
+--record-claude-statusline`) or a standalone probe supplies an observation.
+See [usage](../docs/usage.md#claude-quota-without-the-keychain). Cursor shows unknown
 unless the user sets its two pools (`cursor:models`, `cursor:other`) by hand.
 Report unknown as unknown; never fill it in from the keychain.
 Do not dispatch a panel, invoke Jev, change subscriptions, or redeem reset credits.
