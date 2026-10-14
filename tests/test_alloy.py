@@ -1689,6 +1689,18 @@ if mode == "auth":
             st = self.dispatch()
         self.assertEqual(st["status"], "ok")
 
+    def test_failing_launch_instrumentation_never_prevents_dispatch_or_verifies_quota(self):
+        with self.mock.patch.object(self.f.routing.usage, "claude_context", side_effect=RuntimeError("bad profile")):
+            st = self.dispatch()
+        self.assertEqual(st["status"], "ok")
+        self.assertIsNone(self.snapshot())
+
+    def test_disabled_usage_never_captures_a_launch_context(self):
+        with self.mock.patch.object(self.f.routing.usage, "claude_context", side_effect=AssertionError("disabled capture")) as capture:
+            st = self.dispatch(ALLOY_USAGE="off")
+        self.assertEqual(st["status"], "ok")
+        capture.assert_not_called()
+
 
 class RedactionUnitTests(unittest.TestCase):
     """Drive redact_secrets / cap_chars / strip_ansi directly by importing the

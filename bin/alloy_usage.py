@@ -606,7 +606,7 @@ def local_claude(core, ctx, now, ttl):
             notes.append('legacy_snapshot_unverified')
     except (UsageError, OSError, ValueError):
         notes.append('native_observation_invalid')
-    selected = co.select(windows, now, ttl)
+    selected = [co.classify(w, now, ttl) for w in co.candidates(windows)]
     if not any(w.get('source') == 'claude-legacy-snapshot' for w in selected):
         notes = [n for n in notes if n != 'legacy_snapshot_unverified']
     return selected, notes
@@ -672,7 +672,7 @@ def claude_row(core, options, previous, now, ttl, force, cached, current_binding
     if core.setting('ANTHROPIC_API_KEY') or core.setting('ANTHROPIC_BASE_URL'):
         return dict(status='unknown', source=None, windows=[], binding=current_binding,
                     diagnostics=['subscription_inapplicable'], checked_at=now)
-    windows = previous.get('windows', [])
+    windows = list(previous.get('observation_candidates', previous.get('windows', [])))
     if previous.get('observation_schema') != co.SCHEMA:
         # Only a bound OAuth cache has established provenance across this migration.
         trusted = previous.get('source') == 'claude-oauth'
@@ -680,7 +680,7 @@ def claude_row(core, options, previous, now, ttl, force, cached, current_binding
                               'oauth-fetch' if trusted else 'unverified')
     checked = previous.get('checked_at', 0)
     reuse = finite(checked, 0, now) and now - checked < ttl
-    if any(w.get('status') == 'fresh' and w.get('resets_at') is not None and w['resets_at'] <= now for w in windows):
+    if any(w.get('status') == 'fresh' and w.get('resets_at') is not None and w['resets_at'] <= now for w in previous.get('windows', [])):
         reuse = False
     notes = list(previous.get('diagnostics', []))
     attempt = previous.get('last_attempt')
@@ -700,23 +700,28 @@ def claude_row(core, options, previous, now, ttl, force, cached, current_binding
             notes = ['usage_refresh_failed']
             attempt = dict(at=checked, outcome='failed', reasons=notes)
     local, local_notes = local_claude(core, ctx, time.time(), ttl)
-    windows = co.select(windows + local, time.time(), ttl)
+    candidates = co.candidates(windows + local)
+    windows = co.select(candidates, time.time(), ttl)
     if claude_context(core) != ctx:
         return dict(status='unknown', source=None, windows=[], checked_at=checked,
                     binding=binding(core, 'claude'), diagnostics=['native_profile_changed'])
     fresh = [w for w in windows if w['status'] == 'fresh']
-    complete = {w['window'] for w in fresh if w['pool'] == 'claude'} == {'5h', '7d'}
+    complete = ({w['window'] for w in fresh if w['pool'] == 'claude'} == {'5h', '7d'}
+                and not any(w.get('coverage_incomplete') for w in windows))
     status = ('fresh' if windows and len(fresh) == len(windows) and complete else 'partial' if fresh else
               'stale' if any(w['status'] == 'stale' for w in windows) else 'unverified' if windows else 'unknown')
     sources = {w.get('source') for w in windows}
     observed = [w['observed_at'] for w in windows if w.get('observed_at') is not None]
     notes = list(dict.fromkeys(notes + local_notes))
+    if any(w.get('coverage_incomplete') for w in windows):
+        notes.append('native_observation_overflow')
     if changed:
         notes.append('native_profile_changed')
     if complete:
         notes = [n for n in notes if n != 'waiting_for_native_response']
     return dict(status=status, source=next(iter(sources)) if len(sources) == 1 else 'claude-observations',
-                observation_schema=co.SCHEMA, windows=windows, observed_at=min(observed) if observed else None,
+                observation_schema=co.SCHEMA, windows=windows, observation_candidates=candidates,
+                observed_at=min(observed) if observed else None,
                 checked_at=checked, binding=current_binding, diagnostics=notes, last_attempt=attempt)
 
 
@@ -865,14 +870,14 @@ def headroom(profile, snapshot):
     row = snapshot.get('providers', {}).get(profile['adapter'], {})
     if profile['adapter'] == 'claude' and row.get('observation_schema') == co.SCHEMA:
         now = time.time()
-        selected = co.select([w for w in row.get('windows', []) if w.get('pool') in applicable(profile)],
+        selected = co.select([w for w in row.get('observation_candidates', row.get('windows', [])) if w.get('pool') in applicable(profile)],
                              now, snapshot.get('ttl_seconds', 120))
         fresh = [w for w in selected if w['status'] == 'fresh']
         # Known exhaustion remains authoritative even when another window is missing.
         if any(w['remaining_fraction'] == 0 for w in fresh):
             return 0.0
         common = {w['window'] for w in fresh if w['pool'] == 'claude'}
-        if common != {'5h', '7d'} or len(fresh) != len(selected):
+        if common != {'5h', '7d'} or len(fresh) != len(selected) or any(w.get('coverage_incomplete') for w in selected):
             return None
         return min(w['remaining_fraction'] for w in fresh)
     if row.get('status') != 'fresh':
@@ -904,9 +909,9 @@ def reserve_reached(profile, snapshot, reserve):
     row = snapshot.get('providers', {}).get('claude', {})
     if row.get('observation_schema') != co.SCHEMA:
         return False
-    windows = co.select([w for w in row.get('windows', []) if w.get('pool') in applicable(profile)],
+    windows = co.select([w for w in row.get('observation_candidates', row.get('windows', [])) if w.get('pool') in applicable(profile)],
                         time.time(), snapshot.get('ttl_seconds', 120))
-    return any(w['status'] == 'fresh' and w['remaining_fraction'] <= reserve for w in windows)
+    return any(w.get('coverage_incomplete') or w['status'] == 'fresh' and w['remaining_fraction'] <= reserve for w in windows)
 
 
 _WINDOW_UNITS = {'h': 3600, 'd': 86400, 'w': 7 * 86400}
@@ -932,7 +937,10 @@ def pacing(profile, snapshot):
     row = snapshot['providers'][profile['adapter']]
     pools = applicable(profile)
     pressure = []
-    for w in row.get('windows', []):
+    windows = row.get('windows', [])
+    if profile['adapter'] == 'claude' and row.get('observation_schema') == co.SCHEMA:
+        windows = co.select(row.get('observation_candidates', windows), now, snapshot.get('ttl_seconds', 120))
+    for w in windows:
         if w.get('pool') not in pools:
             continue
         if row.get('observation_schema') == co.SCHEMA and co.classify(w, now, snapshot.get('ttl_seconds', 120))['status'] != 'fresh':
@@ -986,6 +994,8 @@ def render(snapshot):
             # All provider text is escaped before entering Markdown.
             label = label.replace('|', '\\|').replace('\n', ' ')
             status = w.get('status', row.get('status', 'unknown'))
+            if w.get('coverage_incomplete'):
+                status += ' · incomplete coverage'
             observed = w.get('observed_at', row.get('observed_at'))
             if row.get('source') == 'operator-config':
                 status, observed = 'manual (operator-set)', None

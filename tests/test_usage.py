@@ -3,6 +3,7 @@ import argparse
 import ast
 import contextlib
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -959,6 +960,96 @@ class Lane4Tests(unittest.TestCase):
             final = u.get(core, self.config, cached=True)
             self.assertEqual(u.headroom(self.claude_profile('sonnet'), final), 0)
 
+    def test_overlapping_dispatches_preserve_a_tighter_late_completion(self):
+        with self.claude_env(), self.sealed():
+            base = time.time() - 100
+            ctx = u.claude_context(core)
+            for start, end, remaining in ((base + 5, base + 20, .4), (base, base + 60, .03)):
+                with patch.object(u.co.time, 'time', return_value=end):
+                    u.co.record_windows(core, ctx, [u.window('claude', '5h', remaining, base + 3600)],
+                                        start, lambda: u.claude_context(core))
+                snapshot = self.get_claude(self.config, cached=True)
+            chosen = snapshot['providers']['claude']['windows'][0]
+            self.assertAlmostEqual(chosen['remaining_fraction'], .03)
+            self.assertEqual(chosen['observed_at'], base)
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot, .1))
+            self.assertEqual(len(snapshot['providers']['claude']['observation_candidates']), 2)
+
+    def test_interval_frontier_is_independent_of_arrival_order(self):
+        base = time.time() - 30
+        def sample(start, end, remaining):
+            return u.co.observed([u.window('claude', '5h', remaining, base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        inputs = [sample(0, 10, .1), sample(5, 15, .2), sample(12, 20, .3)]
+        for order in itertools.permutations(inputs):
+            frontier = []
+            for incoming in order:
+                frontier = u.co.candidates(frontier + [incoming])
+            chosen = u.co.select(frontier, time.time(), 120)[0]
+            self.assertEqual(chosen['remaining_fraction'], .2)
+            self.assertEqual(chosen['observed_at'], base + 5)
+            self.assertEqual(len(frontier), 2)
+            later = u.co.candidates(frontier + [sample(21, 25, .8)])
+            self.assertEqual(u.co.select(later, time.time(), 120)[0]['remaining_fraction'], .8)
+            self.assertEqual(len(later), 1)
+
+    def test_different_future_resets_cannot_hide_an_overlapping_constraint(self):
+        now = time.time()
+        a = u.co.observed([u.window('claude', '5h', .02, now + 3600)],
+                          'claude-oauth', now - 20, 'oauth-fetch', now - 1)
+        b = u.co.observed([u.window('claude', '5h', .9, now + 7200)],
+                          'claude-stream', now - 10, 'dispatch-start-bound', now - 2)
+        self.assertEqual(u.co.select(a + b, now, 120)[0]['remaining_fraction'], .02)
+        a[0]['resets_at'] = now - 1
+        self.assertEqual(u.co.select(a + b, now, 120)[0]['remaining_fraction'], .9)
+
+    def test_frontier_overflow_stays_blocked_through_expiry_and_overlapping_updates(self):
+        base = time.time() - 200
+        def sample(start, end, remaining, window='5h'):
+            return u.co.observed([u.window('claude', window, remaining, base + 3600)],
+                                 'claude-stream', base + start, 'dispatch-start-bound', base + end)[0]
+        frontier = u.co.candidates([sample(i, 99, .02 + i * .02) for i in range(u.co.MAX_FRONTIER + 1)])
+        self.assertEqual(len(frontier), 1)
+        self.assertTrue(frontier[0]['coverage_incomplete'])
+        self.assertEqual(frontier[0]['observed_at'], base)
+        frontier = u.co.candidates(frontier + [sample(98, 139, .9), sample(98, 139, .9, '7d')])
+        snapshot = dict(ttl_seconds=120, providers={'claude': dict(observation_schema=u.co.SCHEMA,
+                        observation_candidates=frontier, windows=u.co.select(frontier, base + 140, 120))})
+        with patch.object(u.time, 'time', return_value=base + 140):
+            self.assertIsNone(u.headroom(self.claude_profile(), snapshot))
+            self.assertTrue(u.reserve_reached(self.claude_profile(), snapshot, .01))
+            self.assertFalse(u.reserve_reached(dict(self.claude_profile(), billing_mode='metered'), snapshot, .1))
+        frontier = u.co.candidates(frontier + [sample(141, 145, .9), sample(141, 145, .9, '7d')])
+        snapshot['providers']['claude']['observation_candidates'] = frontier
+        with patch.object(u.time, 'time', return_value=base + 146):
+            self.assertAlmostEqual(u.headroom(self.claude_profile(), snapshot), .9)
+            self.assertFalse(u.reserve_reached(self.claude_profile(), snapshot, .1))
+
+    def test_stale_binding_json_is_pruned_without_removing_epochs_or_locks(self):
+        with self.claude_env(), self.sealed():
+            directory = self.native_path().parent
+            directory.mkdir(parents=True)
+            old = []
+            for i in range(8):
+                item = directory / ('%064x.json' % i)
+                r.save(item, {})
+                os.utime(item, (time.time() - 7200 + i, time.time() - 7200 + i))
+                old.append(item)
+                item.with_suffix('.json.lock').touch()
+            epoch = directory / 'epoch.json'
+            r.save(epoch, dict(epoch='existing'))
+            self.native_record()
+            self.assertTrue(epoch.exists())
+            self.assertTrue(self.native_path().exists())
+            self.assertFalse(old[0].exists())
+            self.assertTrue(old[-1].exists())
+            self.assertEqual(len(list(directory.glob('*.json.lock'))), 9)
+
+    def test_observation_cleanup_failure_does_not_fail_recording(self):
+        with self.claude_env(), self.sealed(), patch.object(u.co.Path, 'iterdir', side_effect=OSError('unavailable')):
+            self.native_record()
+            self.assertTrue(self.native_path().exists())
+
     def test_partial_data_cannot_claim_full_headroom_but_fresh_exhaustion_still_blocks(self):
         with self.claude_env(), self.sealed():
             self.native_record(five=.9, only='5h')
@@ -1048,7 +1139,7 @@ class Lane4Tests(unittest.TestCase):
             self.native_record(age=30, five=.9)
             row = self.get_claude(self.config, cached=True)['providers']['claude']
             self.assertEqual(row['status'], 'fresh')
-            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .8)
+            self.assertAlmostEqual(row['windows'][0]['remaining_fraction'], .1)
 
     def test_stream_recording_discards_private_output_and_rejects_bad_or_oversized_events(self):
         with self.claude_env(), self.sealed(), contextlib.redirect_stdout(io.StringIO()):

@@ -14,6 +14,9 @@ All notable changes to Alloy are documented here. Format loosely follows
 - Skip inference probes inside Claude Code, expose sanitized source diagnostics,
   and add explicit observation invalidation after account switches. Keep unknown
   headroom conservative while honoring fresh known exhaustion.
+- Retain overlapping response evidence and apply the tightest fresh constraint.
+  Bound storage conservatively, prune stale credential generations, and keep
+  optional usage instrumentation from preventing a model dispatch.
 
 ## [0.14.0] - 2026-10-13
 

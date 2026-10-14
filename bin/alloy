@@ -4285,9 +4285,15 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 else:
                     stdin_f = fin if adapter.stdin_from_prompt else subprocess.DEVNULL
             if adapter.name == 'claude':
-                usage_core = types.SimpleNamespace(routing=routing, setting=lambda key, default=None: env.get(key, default))
-                ctx['_claude_usage_context'] = routing.usage.claude_context(usage_core)
-                ctx['_claude_usage_started_at'] = time.time()
+                try:
+                    if claude_quota_recording_enabled():
+                        usage_core = types.SimpleNamespace(routing=routing, setting=lambda key, default=None: env.get(key, default))
+                        ctx['_claude_usage_context'] = routing.usage.claude_context(usage_core)
+                        ctx['_claude_usage_started_at'] = time.time()
+                except Exception:
+                    # Quota instrumentation must never prevent the real work.
+                    ctx.pop('_claude_usage_context', None)
+                    ctx.pop('_claude_usage_started_at', None)
             proc = subprocess.Popen(
                 argv, stdin=stdin_f, stdout=stdout_f, stderr=stderr_f, cwd=cwd, env=env,
                 start_new_session=True,

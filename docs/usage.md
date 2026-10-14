@@ -175,7 +175,9 @@ The available sources are:
    capture their profile/auth binding and launch time before spawning the child.
    Their quota events use that launch time as a conservative observation bound:
    short runs can supply fresh data; long runs can supply stale data. A late
-   completion cannot overwrite a newer observation. No additional model call is
+   completion keeps its own bound. Overlapping responses retain their evidence
+   and enforce the tightest fresh constraint until a provably later response
+   supersedes them. No additional model call is
    needed. `ALLOY_CAPTURE_USAGE=1` selects plain JSON output with no rate event.
    Piping buffered output into `alloy usage --record-claude-stream` records
    **unverified history**, because its response time cannot be established.
@@ -192,6 +194,10 @@ constraint. Expired resets do not imply replenishment. Partial data is labeled
 `partial`; fresh known exhaustion still blocks routing, while incomplete positive
 headroom remains unknown. JSON exposes per-window status and sanitized attempt
 reasons; Markdown explains missing sources, disabled probes and stale baselines.
+The observation frontier is bounded. If too many overlapping readings prevent
+complete retention, the window reports incomplete coverage and subscription
+routing pauses until a verified response begins after the retained interval.
+Known constraints never become spare capacity through truncation.
 
 Observations are bound to the canonical Claude configuration directory and known
 credential settings at ingestion. This identifies a local profile, **not a
@@ -208,6 +214,11 @@ only the local observation generation, preserving credentials and settings.
 Legacy unbound snapshots remain unverified display history; a matching bound
 OAuth cache retains its original age. `--cached` performs no migration writes.
 API/proxy overrides leave subscription applicability unknown.
+Rewriting a credentials file, including a routine token refresh, starts a new
+baseline because Alloy cannot distinguish that rewrite from an account switch
+without inspecting identity. Old observation generations beyond the maximum
+one-hour TTL are pruned opportunistically, retaining four recent generations.
+Lock files remain in place to preserve exclusion between concurrent writers.
 
 The native field contract is documented in the
 [Claude Code status-line reference](https://code.claude.com/docs/en/statusline).
