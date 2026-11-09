@@ -91,7 +91,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX
     pwd = None
 
-ALLOY_VERSION = "0.14.1"
+ALLOY_VERSION = "0.14.2"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
