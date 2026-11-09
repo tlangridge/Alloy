@@ -4,9 +4,7 @@ description: >-
   Show remaining subscription quota and reset times across local AI providers.
   Use when the user types /alloy-usage or asks for Alloy usage meters.
 license: MIT
-allowed-tools:
-  - Bash
-  - Read
+allowed-tools: Bash Read
 ---
 
 # Alloy usage
@@ -41,5 +39,8 @@ existing OAuth source, the opt-in status-line hook (`alloy usage
 --record-claude-statusline`) or a standalone probe supplies an observation.
 See [usage](../docs/usage.md#claude-quota-without-the-keychain). Cursor shows unknown
 unless the user sets its two pools (`cursor:models`, `cursor:other`) by hand.
+These are Alloy compatibility labels. Current plans can share capacity with
+Grok and bill third-party models separately; confirm the actual plan and avoid
+double-counting shared headroom. Preserve existing billing and pool settings.
 Report unknown as unknown; never fill it in from the keychain.
 Do not dispatch a panel, invoke Jev, change subscriptions, or redeem reset credits.
