@@ -1,159 +1,92 @@
-# Methodology: how Alloy maps to "Fusion beats Frontier"
+# Evidence for Alloy workflows
 
-Alloy is a local reimplementation of the panel-of-models idea OpenRouter
-describes under the name **Fusion**. The core claim, from their write-up: *"synthesizing
-the results of multiple models can significantly outperform what individual
-models are capable of"* — and notably, a meaningful part of the lift comes from
-the **synthesis step itself**, not just from having more models.
+Alloy takes inspiration from OpenRouter Fusion's independent answers followed
+by comparison and synthesis. It also supports routed single-worker consults
+and a separate managed execution workflow. These have different costs and
+verification contracts; a panel is not the default for every task.
 
-## The three roles
+## Match the workflow to the question
 
-OpenRouter's hosted Fusion router has three roles. Alloy keeps the same shape
-but realizes them with local tools:
+Use one qualified read-only worker for ordinary consultation. Use an explicit
+panel when the request needs independent approaches or competing hypotheses.
+The host compares answers and synthesizes conclusions, preserving material
+disagreements and checking evidence. Panel breadth is a choice, not a promise
+that every installed CLI must run.
 
-| Fusion role | What it does | In Alloy |
-|---|---|---|
-| **Panel** (analysis models) | Up to 8 models answer the prompt **in parallel**, each with web search/fetch. | The **complete set** of local CLIs installed + authed (`codex`, `grok`, and a fresh `claude` instance), run in parallel by `bin/alloy` — read-only, web-search-enabled, and (by default) reading the user's repo so they ground answers in real code. |
-| **Judge** | Reads all panel answers and produces **structured analysis** — it *compares, it does not merge*: consensus, disagreements, partial coverage, unique insights, blind spots. | **The host** (whoever invoked `/alloy` — Claude, Grok, Codex, …), producing `judge.json`. |
-| **Calling / synthesis model** | Writes the final answer **grounded in the judge's analysis**. | **The host**, in its synthesis step. |
+Managed execute uses one Maker, local gates and an independent Checker. The
+host, Maker and Checker must have three distinct model provider families.
+A CLI hosting several providers does not become a new independent family.
+The Maker edits and tests in an owned worktree; the Checker reviews the exact
+revision read-only. The host judges integration, which is separate from a pass.
 
-The hosted router defaults to a 3-model panel (≈ Claude Opus + a GPT + Gemini
-Pro) and reports roughly 4–5× the cost of a single completion for that default.
-The practical advice that shaped Alloy's design:
+[Building effective agents](https://www.anthropic.com/research/building-effective-agents)
+recommends starting with simple workflows and adding orchestration where it
+improves the result. [Towards a Science of Scaling Agent Systems](https://arxiv.org/abs/2512.08296)
+finds that coordination benefits depend on task structure and that more agents
+can introduce overhead and propagate errors. These support Alloy's preference
+for bounded, task-specific orchestration. They do not establish a local quality
+improvement, a universal winning architecture or a subscription saving.
 
-- **Diversity over quantity.** Models from different families beat near-duplicates.
-  Alloy's default panel spans families on purpose — `codex` (GPT), `grok` (xAI),
-  plus a `claude` panelist — judged/synthesized by the host.
-- **Self-fusion still helps.** OpenRouter found that fusing a model *with itself*
-  added ~+6.7 points, so the panel deliberately includes a fresh, independent
-  instance of each available family, including the host's own. The judge must
-  treat that same-family panelist as one anonymized voice and never self-prefer
-  (see the bias section).
-- **Use the strongest model as the synthesizer.** Alloy makes the host — the
-  agent that already has the user's context — the judge and synthesizer.
-- **Fusion is for thinking, not for raw codegen.** Multi-model synthesis helps on
-  research, planning, review, and high-stakes decisions; it *dilutes* line-by-line
-  code generation. Alloy therefore uses the panel for the decision-heavy stages
-  and leaves code writing to the host.
-- **"If the cost of being wrong exceeds the cost of querying multiple models, use
-  Fusion."** That is the one-line decision rule for when to reach for `/alloy`.
+## Judge evidence rather than agreement
 
-**Web research, like Fusion.** Fusion enables `web_search`/`web_fetch` for every
-panelist. Alloy matches this: codex runs with `tools.web_search=true`, and grok and
-claude search the web in plan mode, so the panel can pull in current
-facts (e.g. "the latest release of X") instead of reasoning only from its training
-data. It stays read-only — search is a hosted tool, not local shell — and
-`ALLOY_WEB=0` turns it off (codex). This was the one place Alloy used to diverge
-from Fusion; it no longer does.
+Record concise conclusions and supporting evidence in `judge.json`, not private
+chains of thought. Attribute claims and contradictions to contributing workers.
+Compare the proposed explanation against source code, primary documentation,
+observable outputs and executable checks. Multiple workers can share incorrect
+assumptions, so a majority is insufficient proof.
 
-## Why "compare, don't merge" matters
+The host has useful task context but also its own framing and model biases.
+A fresh process from the host's family is another perspective; it does not
+supply independent cross-family verification. Judge answers on evidence, without
+preferring the host's family. Missing or failed responses are not votes.
+Cross-model agreement remains a recommendation for the user to assess.
 
-A naive multi-model wrapper averages answers and produces confident mush. The
-value is the opposite: a panel is most useful when it **disagrees**, because the
-disagreement is information. Alloy's judge step is required to attribute every
-consensus claim to named panelists and to keep contradictions visible, so you see
-"codex says X, grok says not-X, here's who's right and why" rather than a
-smoothed-over paragraph that hides the conflict.
+Optional debate is a single rebuttal round after a substantive disagreement on
+a checkable point, with at least two different families. Anonymize the initial
+answers and demand sources or concrete counterexamples. Prefer a direct test
+or authoritative source when it can settle the issue. Debate can also encourage
+conformity; neither persuasiveness nor convergence establishes correctness.
 
-## The host-as-judge bias (and the honest answer to "isn't this rigged?")
+## Keep execution and review bounded
 
-The host is the judge and the synthesizer here — and, since the panel includes a
-panelist of the host's own family, often a panelist too. It is *not* a neutral
-juror: an LLM judging a panel (one of whose answers may be its own type) and then
-writing the final answer can favor its own framing. Alloy handles this honestly
-rather than pretending the judge is neutral:
+Default managed execution permits an initial implementation and one correction
+within 45 active minutes per logical task, shared across relaunches and resumes.
+Each Checker review can retry transport failures twice on the same revision;
+these retries do not become implementation failures or authorize another Maker
+round. Malformed nonempty reviews fail closed.
 
-1. **The judge output is written to disk** (`judge.json` in the run directory),
-   so its reasoning is auditable, not hidden.
-2. **Anti-sycophancy is a standing rule:** panelist *agreement is not proof of
-   correctness* (shared training data → correlated errors). Thin-but-unanimous
-   consensus must be flagged, not rubber-stamped.
-3. **Disagreements are surfaced**, with attribution, so you can overrule the
-   host's read.
-4. The honest framing Alloy always ends on: **cross-model agreement is a
-   recommendation; you decide.**
-5. **No self-preference.** The same-family panelist is judged like any other —
-   anonymized, on its merits — and its agreement with the host's own view counts
-   as self-agreement, not consensus. The independent check comes from the other
-   families. A Grok host must not treat the `grok` seat as confirmation of itself;
-   a Claude host must not treat the `claude` seat that way.
+A review contains at most five evidence-backed findings. A blocker needs a
+reproduction or concrete expected/actual counterexample within the scoped
+change. No defect found is a valid outcome. The Maker verifies findings before
+changing code. Repeated blockers, no acceptance progress or budget expiry
+return the patch and open decisions; they do not trigger endless debate.
 
-A future `ALLOY_JUDGE=codex|grok` override will let the independence-minded
-rotate the judge role to a different model. It is intentionally *not* the default:
-rotating the judge adds latency, another auth dependency, and the CLI judges are
-weaker at structured comparison — and it is not truly independent anyway when all
-models saw the same prompt. The mitigation that actually works is structural
-discipline (the schema + attribution + anti-sycophancy rule above), not swapping
-which model holds the gavel.
+Successful local gates and independent review are process evidence. Hidden-test
+correctness, integration, deployment and user acceptance remain distinct
+outcomes. Cleanup requires proof of integration or a verified archive and must
+preserve unfinished work. See [managed execution](execution.md).
 
-## What Alloy is not
+## Measure the actual task
 
-- It is not local inference. Your prompts, your repo files the panel reads, and
-  any diffs are sent to the providers behind each CLI.
-- It is not an answer-merger. It is a disagreement surfacer.
-- Consult/review panels read your repo with provider read-only policies (Cursor
-  also has an OS write sandbox). Managed execute authorizes one Maker to edit
-  and test in an owned worktree; a different-family Checker reviews that revision,
-  and the host decides integration.
+Published scores and model cards are dated priors. Record model, adapter,
+effort, fast state and role; changing any of these changes the evaluation
+identity. Codex Ultra can add subagents and must not inherit single-worker
+measurements. API list prices do not establish subscription usage, and API tool
+support does not certify the CLI's actual tools or permission boundary.
 
-## On debate rounds (and the "bully effect")
+Compare representative tasks on the same harness and acceptance checks. Retain
+failures, corrections, latency and token usage, report sample sizes, and keep
+unknown success rates unknown. The small component samples in
+[benchmark results](../bench/RESULTS.md) do not qualify a small Checker for
+demanding reviews. Complete execute evaluation is separate, explicitly opt-in
+work; ordinary tests use mock CLIs and fake router transport.
 
-Alloy's optional `debate` round (a second pass where panelists critique each
-other's *anonymized* answers) is gated deliberately, because the research on
-multi-agent debate is mixed. It improves **objective** tasks — math, reasoning,
-factuality, code-correctness — especially with a **diverse** panel. But it can
-*lower* accuracy when a confident, persuasive-but-wrong agent pulls the others
-into agreement (sycophancy / conformity); a single such agent has been measured
-cutting group accuracy 10–40%. The mitigations Alloy uses — anonymizing answers,
-weighting evidence over assertiveness, keeping the host judge as the arbiter,
-triggering only on a genuine objective disagreement, and running a single round —
-come straight from that literature. That is why debate is off by default and used
-rarely.
+## Primary references
 
-## On execute mode (maker ≠ checker)
-
-`/alloy execute` is not Fusion. Fusion is *N answers → judge → synthesis*;
-execute is *one Maker → host gate → other-family Checker → host classification*.
-They share the thing that makes Alloy worth running: the independent check
-comes from a **different model family** than the one that did the work, and the
-host weighs evidence rather than merging opinions. What execute borrows from the
-evidence above:
-
-- **Same-family review is self-agreement** (bias section). So the Checker panel
-  always excludes the Maker's family, and a checker of the host's own family is
-  a voice, not the independent check.
-- **Fusion is for thinking, not raw codegen** (roles section). So execute does
-  *not* fuse the implementation: one qualified Maker writes the diff. The panel is
-  used for what it is good at — proving a concrete diff fails a concrete spec —
-  and is asked for at most five labeled finding cards, not a rewrite.
-- **A confident wrong voice can drag a group** (debate section). So Checker
-  cards are classified by the host against a fixed rule (`CONFIRMED` + high
-  severity + locus inside the diff + fix fits the blast radius), not by how
-  forcefully they are worded. Default execution permits an initial implementation
-  and one correction within 45 active minutes, shared across relaunches/resumes.
-
-The Maker has explicit edit/test permissions in the task worktree. Consult and
-review panels remain read-only. The Checker reads that same worktree without
-copying it and acknowledges the packet hash and exact reviewed revision. Family
-diversity and role separation reduce correlated errors; they do not eliminate them.
-
-Executable review has a bounded purpose: one plan-review pass and one focused
-correction, then implementation and tests. A blocking finding must provide a
-failing reproduction or a concrete counterexample with expected and actual
-behavior; "no defect found" is a valid result. Confidence or vote count does not
-replace evidence. The Maker verifies claims before changing code. Repeated
-blockers, no acceptance progress or cumulative budget expiry stop the loop and
-return the patch, reproduction and open decisions to the owner. Reports count
-implementation rounds separately from Checker transport retries: an empty output,
-timeout or provider error retries the unchanged revision at most twice and never
-means another implementation round failed.
-
-## Sources
-
-- OpenRouter, *Fusion beats Frontier* — https://openrouter.ai/blog/announcements/fusion-beats-frontier/
-- OpenRouter docs, *Fusion router* — https://openrouter.ai/docs/guides/routing/routers/fusion-router
-- Digital Applied, *OpenRouter Fusion: multi-model AI responses guide* —
-  https://www.digitalapplied.com/blog/openrouter-fusion-multi-model-ai-responses-guide
-- Du et al., *Improving Factuality and Reasoning in Language Models through Multiagent Debate* — https://arxiv.org/abs/2305.14325
-- *Talk Isn't Always Cheap: Understanding Failure Modes in Multi-Agent Debate* — https://arxiv.org/abs/2509.05396
-- *Measuring and Mitigating Identity Bias in Multi-Agent Debate via Anonymization* — https://arxiv.org/abs/2510.07517
+- [OpenRouter Fusion design](https://openrouter.ai/blog/announcements/fusion-beats-frontier/)
+  and [router documentation](https://openrouter.ai/docs/guides/routing/routers/fusion-router)
+- [Improving Factuality and Reasoning in Language Models through Multiagent Debate](https://arxiv.org/abs/2305.14325)
+- [Talk Isn't Always Cheap: Understanding Failure Modes in Multi-Agent Debate](https://arxiv.org/abs/2509.05396)
+- [Agent Skills specification](https://agentskills.io/specification) and
+  [Codex skill guidance](https://learn.chatgpt.com/docs/build-skills): concise
+  entrypoints with mode-specific references loaded as needed

@@ -156,6 +156,8 @@ class InternalNameTests(unittest.TestCase):
 DOCS_CHANGED_IN_0_11_0 = (
     "README.md", "SKILL.md", "alloy-execute/SKILL.md", "alloy-usage/SKILL.md", "alloy.config.example",
     "SECURITY.md", "docs/adding-a-panelist.md", "docs/execution.md", "docs/routing.md", "docs/usage.md")
+SKILL_REFERENCES = (
+    "references/routing.md", "references/panels.md", "references/execute.md", "references/usage-and-updates.md")
 RELEASE = "0.11.0"
 RELEASE_HEADING = "## [0.11.0] - 2026-09-29"
 
@@ -524,7 +526,17 @@ DOC_FILES = {
 
 
 def document(key):
-    return changelog_section() if key == "CHANGELOG" else read(DOC_FILES[key])
+    if key == "CHANGELOG":
+        return changelog_section()
+    text = read(DOC_FILES[key])
+    if key == "SKILL":
+        # The execute runbook carries role-specific grants after progressive disclosure.
+        # Missing linkage must still fail rather than finding an orphaned document.
+        relative = "references/execute.md"
+        if "(" + relative + ")" not in text:
+            raise AssertionError("SKILL.md must link the execute runbook")
+        text += "\n" + read(relative)
+    return text
 
 
 def load_alloy_module():
@@ -610,7 +622,7 @@ class ReleaseWordingTests(unittest.TestCase):
     def test_no_unsupported_claim_in_the_0_11_0_changelog_entry_or_the_changed_docs(self):
         found = []
         found.extend(("CHANGELOG 0.11.0", n, s) for n, s in unsupported_claims(changelog_section()))
-        for rel in DOCS_CHANGED_IN_0_11_0:
+        for rel in DOCS_CHANGED_IN_0_11_0 + SKILL_REFERENCES:
             found.extend((rel, n, s) for n, s in unsupported_claims(read(rel)))
         self.assertEqual(found, [])
 

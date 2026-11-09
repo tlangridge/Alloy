@@ -235,15 +235,21 @@ it is not used as a guaranteed server refresh.
 
 Cursor's CLI has no usage command or quota API, and the token counts in a call's
 JSON output are not subscription capacity, so Alloy reads no Cursor usage and
-never derives quota from per-call tokens. Cursor has two subscription pools:
+never derives quota from per-call tokens. Alloy retains two manual,
+legacy-compatible pool labels:
 
 | Pool | Models | Note |
 | --- | --- | --- |
 | `cursor:models` (Cursor Models) | `composer-*` and `cursor-grok-*` | Cursor's own models |
-| `cursor:other` (Other Models) | Every other model served through Cursor: Claude, GPT, Gemini and `grok-*` models | Draws the more expensive pool |
+| `cursor:other` (Other Models) | Every other model served through Cursor: Claude, GPT, Gemini and `grok-*` models | Adapter classification; confirm actual billing |
 
-Prefer Cursor-native models. Every other model through Cursor draws the more
-expensive pool.
+Prefer Cursor-native models when appropriate. These labels describe Alloy's
+adapter mapping, not every current subscription. [Current Cursor plans](https://cursor.com/docs/models-and-pricing)
+share weekly native-model capacity with Grok and bill third-party models from
+prepaid credit; legacy plans have different pools. Confirm the actual plan,
+model ID and effort restrictions before enabling profiles. Do not double-count
+shared Grok/Cursor capacity or assume third-party tokens are included. Preserve
+existing billing settings and manual pool entries unless explicitly migrating.
 
 Both pools are `unknown`, and unknown does not block routing, unless you describe
 them in `routing.json`:

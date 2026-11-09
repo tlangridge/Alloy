@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "revision": "2026-10-13-quality",
-  "reviewed_at": "2026-10-13",
+  "revision": "2026-11-09-maintenance",
+  "reviewed_at": "2026-11-09",
   "expires_at": "2026-12-16",
   "models": [
     {
@@ -27,8 +27,7 @@
         "medium",
         "high",
         "xhigh",
-        "max",
-        "ultra"
+        "max"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability",
       "api_pricing": {
@@ -39,7 +38,8 @@
         "reviewed_at": "2026-09-22",
         "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
-      }
+      },
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -63,8 +63,7 @@
       "applicable_efforts": [
         "high",
         "xhigh",
-        "max",
-        "ultra"
+        "max"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability",
       "api_pricing": {
@@ -75,7 +74,8 @@
         "reviewed_at": "2026-09-22",
         "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
-      }
+      },
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -103,8 +103,7 @@
       "applicable_efforts": [
         "high",
         "xhigh",
-        "max",
-        "ultra"
+        "max"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability",
       "api_pricing": {
@@ -145,8 +144,7 @@
         "medium",
         "high",
         "xhigh",
-        "max",
-        "ultra"
+        "max"
       ],
       "basis": "editorial prior from published evidence; not calibrated success probability",
       "api_pricing": {
@@ -157,7 +155,8 @@
         "reviewed_at": "2026-09-22",
         "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances. Above 272K input tokens, input is 2x and output 1.5x; cache writes billed separately."
-      }
+      },
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -194,7 +193,8 @@
         "reviewed_at": "2026-09-22",
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
-      }
+      },
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -230,7 +230,8 @@
         "reviewed_at": "2026-09-22",
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
-      }
+      },
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -250,11 +251,14 @@
         "frontend"
       ],
       "strengths": "Strong difficult debugging, agentic scientific work and application building.",
-      "limitations": "Separate subscription quota; published harness and effort settings may differ from local CLI; no local quality benchmark yet.",
+      "limitations": "Separate account access and usage-credit billing can apply. Noninteractive Claude Code can charge credits without a consent prompt; the new starter profile is disabled until explicit opt-in. Published harness and effort settings differ from local CLI; no local quality benchmark.",
       "sources": [
-        "https://www.anthropic.com/claude-fable-and-mythos-5-1"
+        "https://platform.claude.com/docs/en/models/overview",
+        "https://code.claude.com/docs/en/model-config"
       ],
       "applicable_efforts": [
+        "low",
+        "medium",
         "high",
         "xhigh",
         "max"
@@ -268,7 +272,9 @@
         "reviewed_at": "2026-09-22",
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "notes": "Direct API standard text pricing; excludes tools, taxes, fast/batch tiers and subscription allowances."
-      }
+      },
+      "reviewed_at": "2026-11-09",
+      "effort_guidance": "Start at high for demanding work. Access and usage-credit rules are account-dependent; exact CLI outcomes are unmeasured."
     },
     {
       "models": [
@@ -295,7 +301,8 @@
         "high",
         "xhigh"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -355,7 +362,8 @@
       "applicable_efforts": [
         "high"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -380,7 +388,8 @@
       "applicable_efforts": [
         "high"
       ],
-      "basis": "editorial prior from published evidence; not calibrated success probability"
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-10-13"
     },
     {
       "models": [
@@ -406,16 +415,18 @@
       "limitations": "Vendor evidence, not local success probabilities. Main benchmark table mostly uses max; TerminalBench uses xhigh. Astra leads reported science and automation results. API task savings do not measure subscription quota savings.",
       "sources": [
         "https://www.anthropic.com/claude-opus-5-5",
-        "https://claude.dev/blog/spending-your-effort/"
+        "https://claude.dev/blog/spending-your-effort/",
+        "https://code.claude.com/docs/en/model-config"
       ],
       "applicable_efforts": [
+        "low",
         "medium",
         "high",
         "xhigh",
         "max"
       ],
       "basis": "conservative editorial prior from vendor benchmarks; not calibrated success probability",
-      "reviewed_at": "2026-10-13",
+      "reviewed_at": "2026-11-09",
       "api_pricing": {
         "input_per_million": 4,
         "output_per_million": 20,
@@ -448,7 +459,7 @@
         "architecture"
       ],
       "strengths": "Officially positioned for complex coding and agentic workflows; lower standard API token price than GPT-5.6 Sol.",
-      "limitations": "No local quality or subscription efficiency benchmark. API price is not a subscription quota multiplier. Model and effort availability depend on the CLI account: Codex with ChatGPT-account sign-in rejects gpt-6-sol (verified 2026-09-25), so its starter profile ships disabled; use gpt-5.6-sol there.",
+      "limitations": "No local quality or subscription efficiency benchmark. API price is not a quota multiplier. Historical Codex ChatGPT-account rejection was observed 2026-09-25; current account access must be verified. The retained legacy starter stays disabled, with GPT-6.1 Sol available as a separate current profile.",
       "sources": [
         "https://developers.openai.com/api/docs/models/gpt-6-sol"
       ],
@@ -490,18 +501,28 @@
       "strengths": "Broad complex coding and agentic work; a current OpenAI candidate for implementation and independent verification.",
       "limitations": "Official model and API tool specifications are priors, not local CLI outcomes. The API image tool does not certify a Codex CLI generator.",
       "sources": [
-        "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+        "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+        "https://learn.chatgpt.com/docs/models"
       ],
       "applicable_efforts": [
+        "low",
         "medium",
         "high",
         "xhigh",
         "max"
       ],
       "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
-      "reviewed_at": "2026-10-13",
-      "api_pricing": null,
-      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "reviewed_at": "2026-11-09",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 10,
+        "cached_input_per_million": 0.1,
+        "currency": "USD",
+        "reviewed_at": "2026-11-09",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+        "notes": "Direct API Standard text pricing for prompts up to 272K input tokens. Above that threshold, input/cache rates are 2x and output 1.5x for the request. Cache writes, tools, speed tiers and regional charges are separate. Does not measure subscription consumption."
+      },
+      "effort_guidance": "Medium is the API default; Codex defaults may differ. Compare exact CLI roles at a chosen effort. Ultra uses subagents and is outside this single-worker evidence.",
       "input_modalities": [
         "text",
         "image"
@@ -528,7 +549,8 @@
       "strengths": "Strong bounded engineering, visual polish and everyday artifact work in the current Sonnet family.",
       "limitations": "No current Alloy comparative rendered-UI or exact-effort benchmark. Retain Opus as a candidate for difficult sustained judgment.",
       "sources": [
-        "https://www.anthropic.com/claude-sonnet-5-5"
+        "https://www.anthropic.com/claude-sonnet-5-5",
+        "https://code.claude.com/docs/en/model-config"
       ],
       "applicable_efforts": [
         "low",
@@ -538,9 +560,17 @@
         "max"
       ],
       "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
-      "reviewed_at": "2026-10-13",
-      "api_pricing": null,
-      "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "reviewed_at": "2026-11-09",
+      "api_pricing": {
+        "input_per_million": 2,
+        "output_per_million": 10,
+        "cached_input_per_million": 0.1,
+        "currency": "USD",
+        "reviewed_at": "2026-11-09",
+        "source": "https://www.anthropic.com/claude-sonnet-5-5",
+        "notes": "Direct API Standard text rates; cache writes, tools, batch/fast tiers and provider charges are separate. Subscription consumption differs."
+      },
+      "effort_guidance": "Claude Code defaults to medium for agentic coding; the API default is high. Existing Alloy high-effort profiles remain unchanged. Compare efforts on representative tasks before changing them.",
       "input_modalities": [
         "text",
         "image"
@@ -654,6 +684,143 @@
       "reviewed_at": "2026-10-13",
       "api_pricing": null,
       "effort_guidance": "Use documented task-appropriate effort. Higher effort is not automatically better and cannot resolve missing acceptance criteria.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "gpt-6-luna"
+      ],
+      "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
+      "suggested_tier": "small",
+      "preferred_tasks": [
+        "implementation",
+        "testing",
+        "documentation"
+      ],
+      "strengths": "Efficient focused coding and repeatable transformations with clear acceptance checks.",
+      "limitations": "No local Alloy outcome measurements. Bounded-task evidence does not qualify demanding independent review. API vision/tools do not establish CLI permissions.",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "https://learn.chatgpt.com/docs/models"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-11-09",
+      "api_pricing": {
+        "input_per_million": 0.1,
+        "output_per_million": 0.5,
+        "cached_input_per_million": 0.01,
+        "currency": "USD",
+        "reviewed_at": "2026-11-09",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+        "notes": "Direct API Standard text pricing for prompts up to 272K input tokens. Above that threshold, input/cache rates are 2x and output 1.5x for the request. Cache writes, tools, speed tiers and regional charges are separate. Does not measure subscription consumption."
+      },
+      "effort_guidance": "The API default is medium; current Codex guidance starts Luna at high. The starter uses high for bounded work without promoting its tier.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "gpt-6.1-terra"
+      ],
+      "family": "openai",
+      "adapters": [
+        "codex"
+      ],
+      "fast": false,
+      "suggested_tier": "medium",
+      "preferred_tasks": [
+        "implementation",
+        "documentation",
+        "image_understanding"
+      ],
+      "strengths": "Scoped code fixes, visual interpretation and concise writing.",
+      "limitations": "Codex CLI 0.159.0+ is documented for this ID; account access still needs verification. No exact-harness outcome benchmark or qualification for large reviews. API image generation support does not prove a CLI generator.",
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+        "https://developers.openai.com/api/docs/guides/model-selection",
+        "https://learn.chatgpt.com/docs/models"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-11-09",
+      "api_pricing": {
+        "input_per_million": 1,
+        "output_per_million": 5,
+        "cached_input_per_million": 0.05,
+        "currency": "USD",
+        "reviewed_at": "2026-11-09",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+        "notes": "Direct API Standard text pricing for prompts up to 272K input tokens. Above that threshold, input/cache rates are 2x and output 1.5x for the request. Cache writes, tools, speed tiers and regional charges are separate. Does not measure subscription consumption."
+      },
+      "effort_guidance": "Medium is a conservative starter choice; compare with Sol at equal effort on representative scoped tasks. Higher effort does not promote the role tier. Ultra uses subagents and has separate evidence requirements.",
+      "input_modalities": [
+        "text",
+        "image"
+      ]
+    },
+    {
+      "models": [
+        "claude-haiku-5-5"
+      ],
+      "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
+      "suggested_tier": "small",
+      "preferred_tasks": [
+        "implementation",
+        "testing",
+        "documentation"
+      ],
+      "strengths": "Efficient bounded coding, extraction and short tool workflows with explicit checks.",
+      "limitations": "No local Alloy outcomes or large-review qualification. Low effort can skip discovery or checks on long agent prompts. Above 100K prompt tokens, API rates increase fivefold; subscription usage is separate.",
+      "sources": [
+        "https://platform.claude.com/docs/en/models/haiku-5-5/overview",
+        "https://platform.claude.com/docs/en/build-with-claude/effort",
+        "https://code.claude.com/docs/en/model-config"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "Conservative editorial suitability prior from official documentation; not a measured task-success probability.",
+      "reviewed_at": "2026-11-09",
+      "api_pricing": {
+        "input_per_million": 0.1,
+        "output_per_million": 0.5,
+        "cached_input_per_million": 0.01,
+        "currency": "USD",
+        "reviewed_at": "2026-11-09",
+        "source": "https://platform.claude.com/docs/en/models/haiku-5-5/overview",
+        "notes": "Direct API Standard rates for prompts up to 100K tokens. Above 100K, input/output/cache-read rates are $0.50/$2.50/$0.05 per million for the request. Cache writes, tools and provider tiers are separate; not subscription rates."
+      },
+      "effort_guidance": "Start at medium for bounded coding; consider high for verification. Use xhigh/max only when evaluation shows a gain and compare total task cost against Sonnet. Claude Code 2.1.293 maps the haiku alias to 5.5; use the explicit ID.",
       "input_modalities": [
         "text",
         "image"

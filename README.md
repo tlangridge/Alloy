@@ -62,8 +62,11 @@ alloy outcomes  # local process receipts; correctness and user acceptance stay u
 ```
 
 Migration makes a backup and preserves existing profiles, pins, billing and
-quota pools. Refresh adds profiles for Muse Wonder Full, Gemini 4 Argon,
-Claude Sonnet 5.5 and Opus 5.5 xhigh without replacing configured IDs.
+quota pools. Refresh adds profiles for GPT-6 Luna, GPT-6.1 Terra, Claude Haiku
+5.5 and Fable 5.1 alongside Muse Wonder Full, Gemini 4 Argon and the existing
+frontier profiles, without replacing configured IDs. The [model research](docs/model-research.md)
+records availability limits and dated evidence; model announcements alone do
+not establish CLI access.
 
 ## Find code with Jevgrep
 
@@ -226,9 +229,9 @@ Now, inside Claude Code:
 | `/alloy ask <q>` | Route one read-only consultation; use an explicit panel when competing approaches need comparison. |
 | `/alloy debate <q>` | A rare, evidence-gated second round — only for objective questions where the panel genuinely disagrees (anonymized, evidence-weighted, one round). |
 | `/alloy review [target]` | Panel reviews your current diff, read-only → consolidated pass/fail + findings. |
-| `/alloy plan <task>` | Research + plan rounds → one synthesized plan, presented for approval. |
+| `/alloy plan <task>` | Research and synthesize one plan; stop before implementation. |
 | `/alloy execute <task>` (alias `/alloy-execute <task>`) | **Managed Maker/Checker loop.** A qualified other-family Maker edits and tests in an owned worktree; an independent Checker reviews; Alloy permits one correction by default within 45 active minutes. The host judges and integrates, with archived cleanup after verified integration. |
-| `/alloy <task>` | Full lifecycle: research → plan → collaborate → implement → test. |
+| `/alloy <task>` | Research → plan → implement → verify, with consultations at useful decision points and existing authorization preserved. |
 
 Consult/review panels stay read-only. In managed `execute`, the Maker writes
 and tests in an isolated Git worktree while the Checker stays read-only. Alloy
@@ -248,22 +251,20 @@ the panel with no repo access at all (pure web research / maximum caution).
 
 ## Why a *local* version?
 
-OpenRouter's hosted Fusion is web-UI only — there is no API for it, so you cannot
-drop it into a coding workflow. Alloy gets you the same panel→judge→synthesize
-shape against the CLIs you already pay for, right inside Claude Code, with the
-run captured to disk so you can audit exactly what each model said.
+Alloy applies the panel→judge→synthesize pattern through authenticated local
+CLIs, alongside single-worker routing and managed execution. The host retains
+task context, provider accounts remain under the user's control, and run
+artifacts support inspection of decisions and outcomes.
 
 ## When Alloy helps (and when it doesn't)
 
-Multi-model panels shine on **high-stakes thinking**: architecture decisions,
-research, planning, debugging triage, security/correctness review — *"if the cost
-of being wrong is higher than the cost of asking three models, fuse."* They are a
-**poor** fit for raw line-by-line code generation (synthesis dilutes a model's
-distinctive voice and just adds latency and cost). That is why Alloy uses the
-panel for comparing ideas. Managed `execute` delegates implementation and
-testing to one qualified Maker. A separate
-model family challenges the result against the spec; the same Maker handles
-corrections before the host receives the result.
+Panels can compare competing explanations, architecture choices and review
+findings when independent evidence is useful. Routine tasks usually need one
+qualified worker. More agents or unanimous answers do not guarantee better
+results; evaluate the actual acceptance criteria. Managed `execute` delegates
+implementation and testing to one Maker, with another model family checking the
+revision. The same Maker handles bounded corrections before the host judges
+the result. See [methodology and evidence limits](docs/methodology.md).
 
 ## Safety model
 
@@ -357,8 +358,9 @@ the repository. Model refresh queries providers and the optional update check
 contacts GitHub for release metadata and uses Git to install updates. Each regular Alloy round makes
 **one model call per ready panelist**, in parallel, billed to **your** provider
 accounts through your CLIs — your prompts and diffs are sent to those providers.
-A panel of 3 is roughly 3–5× the cost of one call; the full lifecycle is several
-rounds. Alloy shows a cost preflight before multi-round runs. You are
+Actual cost depends on selected models, effort, tool use, context and retries;
+API token rates do not measure subscription consumption. Alloy shows a call
+preflight before multi-round runs. You are
 responsible for each CLI's terms of service regarding automated use.
 
 ## Configuration

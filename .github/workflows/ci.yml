@@ -11,7 +11,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.8", "3.12"]
+        python: ["3.12"]
+        # Python 3.8 has no Ubuntu 26.04 or macOS arm64 distribution.
+        # Keep minimum-version coverage on images with supported x64 builds.
+        include:
+          - os: ubuntu-24.04
+            python: "3.8"
+          - os: macos-15-intel
+            python: "3.8"
     runs-on: ${{ matrix.os }}
     env:
       # Hosted runners cannot have the Cursor CLI, so the gate that starts the REAL Cursor runtime

@@ -3,6 +3,19 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.14.2] - 2026-11-09
+
+- Shorten the skill entrypoint and load mode-specific runbooks on demand.
+  Preserve operating constraints while clarifying review targets, existing
+  authorization, bounded retries, plan-specific capacity and the separate
+  Codex Ultra workflow.
+- Add GPT-6 Luna, GPT-6.1 Terra, Claude Haiku 5.5 and Fable 5.1 profiles
+  without replacing existing choices. Refresh dated model evidence and API
+  reference prices; keep restricted releases out of the runnable catalog.
+  Fable remains opt-in because noninteractive usage can charge additional credits.
+- Keep Python 3.8 compatibility checks on supported Linux and Intel macOS images,
+  while current-version checks continue to use the latest runner images.
+
 ## [0.14.1] - 2026-10-14
 
 - Make new Claude observations visible immediately, including cached reads.

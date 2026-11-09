@@ -1,4 +1,4 @@
-# Model evidence — October 13, 2026
+# Model evidence — November 9, 2026
 
 Alloy optimizes for work quality and fewer revisions. Model cards provide
 conservative task priors, not probabilities of finishing a local task. Tool
@@ -6,10 +6,46 @@ access, model availability, family independence, pins, billing and quota reserve
 are checked separately. The objective is `quality_first` for new setups; older
 configurations require explicit migration.
 
-## Current frontier profiles
+## Maintenance findings
+
+The November review checked official model specifications, CLI model guidance,
+Agent Skills guidance and agent-workflow research before changing the skill.
+The resulting changes are additive profiles, updated evidence, a shorter skill
+entrypoint and linked mode runbooks. Existing IDs, efforts, disabled profiles,
+model pins, billing and quota settings remain preserved by refresh.
+
+Current OpenAI documentation and Codex model metadata support GPT-6 Luna and
+GPT-6.1 Terra alongside Sol and Astra. Anthropic documents Haiku 5.5 in Claude
+Code and Fable 5.1 for demanding work. Gemini 4 Carbon's October 28 announcement
+restricts rollout to selected defenders/partners before general product access;
+no Carbon AGY ID is assumed or shipped. Grok 4.7, Argon and Muse Wonder remain
+relevant existing options rather than being replaced for novelty.
+
+Meta's November 6 update describes specialized models for its Muse and Meta AI
+products without supplying new Muse Code IDs in that announcement. Keep the
+existing Wonder Full CLI profile rather than inventing identifiers. Cursor
+still lists Composer 2.5, but its current plans use weekly native-model capacity
+shared with Grok; legacy plans retain different pools. Check the actual plan,
+effort restrictions and prepaid third-party billing before enabling profiles.
+Alloy's manual Cursor pool names are compatibility labels, not a statement that
+every account has two independent included allowances.
+
+The [Agent Skills specification](https://agentskills.io/specification) and
+[Codex skill guidance](https://learn.chatgpt.com/docs/build-skills) recommend a
+compact entrypoint with references loaded as needed. Shared constraints remain
+in SKILL.md; detailed routing, panel, usage and execute workflows are linked
+there. Review targets must come from the intended base rather than a guessed
+previous commit. Implementation stays within existing authorization, and extra
+panel rounds need a specific evidence gap instead of a fixed ceremony.
+
+## Current profiles
 
 | Model and harness | Useful prior | Important limit |
 | --- | --- | --- |
+| GPT-6 Luna in Codex | Focused coding, tests and repeatable transformations | Small tier; no promotion to difficult independent reviews. Starter effort is high following Codex guidance, not the API's medium default. |
+| GPT-6.1 Terra in Codex | Scoped coding, concise writing and image understanding | Medium tier; Codex CLI 0.159.0+ is documented. Vision still needs verified CLI attachment support. |
+| Claude Haiku 5.5 | Bounded coding and short tool tasks | Small tier; start medium, consider high for verification. Low can skip checks in long prompts. Prompts above 100K have different API rates. |
+| Claude Fable 5.1 | Demanding reasoning and long-running engineering | Disabled pending explicit account/billing opt-in. Noninteractive Claude Code can charge usage credits without prompting. High starter effort; no local outcome advantage is claimed. |
 | GPT-6.1 Sol in Codex | Implementation, debugging, software architecture, orchestration | API image tools do not prove image generation in a CLI session. Medium Maker and high review are defaults, not universal optima. |
 | Claude Opus 5.5 | Software design, debugging, UI design, independent review | Published results use several efforts and harnesses. The xhigh profile is an option for difficult work, not an automatic override of pins. |
 | Claude Sonnet 5.5 | Implementation, debugging and routine verification | A distinct model identity with separate evidence; preserve existing Sonnet profiles. |
@@ -24,16 +60,49 @@ unavailable ID; stale or advisory discovery cannot.
 
 Primary sources:
 
+- [Codex model selection and CLI access](https://learn.chatgpt.com/docs/models)
+- [GPT-6 Luna specification](https://developers.openai.com/api/docs/models/gpt-6-luna)
+- [GPT-6.1 Terra specification](https://developers.openai.com/api/docs/models/gpt-6.1-terra)
 - [GPT-6.1 Sol specification](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
 - [Claude Opus 5.5 model and evaluation methodology](https://www.anthropic.com/claude-opus-5-5)
 - [Claude Sonnet 5.5 model](https://www.anthropic.com/claude-sonnet-5-5)
+- [Haiku 5.5 specification and tiered API pricing](https://platform.claude.com/docs/en/models/haiku-5-5/overview)
+- [Claude model lineup, including Fable 5.1](https://platform.claude.com/docs/en/models/overview)
+- [Claude Code model and effort settings](https://code.claude.com/docs/en/model-config)
+- [Claude API effort guidance](https://platform.claude.com/docs/en/build-with-claude/effort)
 - [Gemini 4 Argon specification](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon)
+- [Carbon announcement and restricted rollout](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-carbon/)
+- [Grok models](https://docs.x.ai/developers/models)
 - [Argon in Antigravity](https://www.antigravity.google/blog/gemini-4-argon-in-google-antigravity)
 - [AGY headless protocol](https://www.antigravity.google/docs/cli/headless/)
 - [Muse Wonder release](https://research.meta.ai/blog/muse-wonder)
+- [Meta specialized-model rollout](https://research.meta.ai/blog/specialized-models-for-muse-and-metaai)
 - [Muse Wonder model card](https://research.meta.ai/static/muse-wonder-model-card)
-- [Agent scaling research](https://arxiv.org/abs/2601.07206)
+- [Cursor current models, plans and legacy differences](https://cursor.com/docs/models-and-pricing)
+- [Agent scaling research](https://arxiv.org/abs/2512.08296)
+- [LLM routing benchmark](https://arxiv.org/abs/2601.07206)
 - [TypeSafe API](https://docs.typesafe.ai/api)
+
+## API reference prices reviewed November 9
+
+USD per million tokens, direct Standard text rates. These are evidence fields,
+not automatic billing configuration or subscription consumption estimates.
+
+| Model | Input | Output | Cached input | Context condition |
+| --- | ---: | ---: | ---: | --- |
+| GPT-6.1 Sol | 2.00 | 10.00 | 0.10 | Up to 272K prompt tokens |
+| GPT-6.1 Terra | 1.00 | 5.00 | 0.05 | Up to 272K prompt tokens |
+| GPT-6 Luna | 0.10 | 0.50 | 0.01 | Up to 272K prompt tokens |
+| Claude Sonnet 5.5 | 2.00 | 10.00 | 0.10 | Standard text rates |
+| Claude Haiku 5.5 | 0.10 | 0.50 | 0.01 | Up to 100K prompt tokens |
+| Claude Haiku 5.5 | 0.50 | 2.50 | 0.05 | Above 100K prompt tokens |
+
+OpenAI requests above 272K input tokens charge twice the input/cache rates and
+1.5 times the output rate for the full request. Cache writes, tools, speed
+modes, regional processing and other provider charges are additional. See the
+exact model sources above before configuring metered prices. Older catalog
+prices retain their earlier review dates; the catalog revision does not reverify
+them or extend its existing expiry.
 
 ## Policy interpretation
 
