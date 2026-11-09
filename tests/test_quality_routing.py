@@ -233,8 +233,71 @@ class QualityRoutingTests(RoutingCase):
         config = r.starter(core)
         self.assertEqual(config['policy']['objective'], 'quality_first')
         models = {p['model']: p for p in config['profiles']}
-        for name in ('gpt-6.1-sol', 'claude-sonnet-5-5', 'gemini-4-argon-high', 'muse-wonder-full-1.0'):
+        for name in ('gpt-6.1-sol', 'claude-sonnet-5-5', 'gemini-4-argon-high', 'muse-wonder-full-1.0',
+                     'gpt-6-luna', 'gpt-6.1-terra', 'claude-haiku-5-5', 'claude-fable-5-1'):
             self.assertEqual(r.evidence.assessment(models[name], r.evidence.catalog())['status'], 'matched')
+
+    def test_new_bounded_profiles_cannot_review_large_tasks(self):
+        self.args.mode = 'review'
+        for model in ('gpt-6-luna', 'gpt-6.1-terra', 'claude-haiku-5-5'):
+            with self.subTest(model=model):
+                p = next(p for p in r.starter(core)['profiles'] if p['model'] == model)
+                p.update(effort='max', tier_by_mode={'review': 'large'})
+                self.config['profiles'] = [p]
+                with self.assertRaisesRegex(r.RoutingError, 'below required tier'):
+                    self.select(kind='review', tier='large')
+
+    def test_new_profile_selection_requires_account_availability(self):
+        self.config = r.starter(core)
+        self.args.profile = 'codex-medium-gpt-6-1-terra'
+        self.assertEqual(self.select(kind='implementation', tier='medium')['model'], 'gpt-6.1-terra')
+        self.available['codex'].update(models=['gpt-6.1-sol'], authoritative=True)
+        with self.assertRaisesRegex(r.RoutingError, 'authoritative'):
+            self.select(kind='implementation', tier='medium')
+
+    def test_catalog_refresh_preserves_existing_small_and_medium_choices(self):
+        old = r.starter(core)
+        additions = {'gpt-6-luna', 'gpt-6.1-terra', 'claude-haiku-5-5', 'claude-fable-5-1'}
+        old['profiles'] = [p for p in old['profiles'] if p['model'] not in additions]
+        old['profiles'][0].update(enabled=False, effort='low', billing_mode='subscription', cost_rank=12)
+        old['quota_pools'] = {'codex': {'reserve_fraction': .4}}
+        before = copy.deepcopy(old)
+        r.refresh_defaults(core, old)
+        self.assertEqual(old['profiles'][:len(before['profiles'])], before['profiles'])
+        self.assertEqual(old['quota_pools'], before['quota_pools'])
+        self.assertTrue(additions <= {p['model'] for p in old['profiles']})
+
+    def test_ultra_does_not_borrow_single_worker_evidence(self):
+        p = next(p for p in r.starter(core)['profiles'] if p['model'] == 'gpt-6.1-sol')
+        self.assertEqual(r.evidence.assessment(p, r.evidence.catalog())['status'], 'matched')
+        p['effort'] = 'ultra'
+        assessed = r.evidence.assessment(p, r.evidence.catalog())
+        self.assertEqual(assessed['status'], 'effort-unverified')
+        self.assertEqual(assessed['preferred_tasks'], [])
+
+    def test_refresh_cannot_silently_select_usage_credit_fable(self):
+        self.config = r.starter(core)
+        additions = {'gpt-6-luna', 'gpt-6.1-terra', 'claude-haiku-5-5', 'claude-fable-5-1'}
+        self.config['profiles'] = [p for p in self.config['profiles'] if p['model'] not in additions]
+        for p in self.config['profiles']:
+            if p['adapter'] == 'claude':
+                p['billing_mode'] = 'subscription'
+        for name in self.available:
+            if name != 'claude':
+                self.available[name].update(status='not_installed', compatible=False)
+        before = self.select(kind='research')['profile']
+        r.refresh_defaults(core, self.config)
+        fable = next(p for p in self.config['profiles'] if p['id'] == 'claude-fable-5-1')
+        self.assertFalse(fable['enabled'])
+        self.assertEqual(self.select(kind='research')['profile'], before)
+
+    def test_refresh_preserves_explicit_fable_billing_opt_in(self):
+        self.config = r.starter(core)
+        fable = next(p for p in self.config['profiles'] if p['id'] == 'claude-fable-5-1')
+        fable.update(enabled=True, billing_mode='metered', input_per_million=10, output_per_million=50)
+        before = copy.deepcopy(fable)
+        r.refresh_defaults(core, self.config)
+        self.assertEqual(next(p for p in self.config['profiles'] if p['id'] == fable['id']), before)
 
     def test_outcomes_do_not_confuse_review_with_correctness(self):
         task = dict(id='fake-quality', state='ready', maker=dict(model='frontier', task_kind='implementation'),

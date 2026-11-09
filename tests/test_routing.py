@@ -65,7 +65,9 @@ class RoutingCase(unittest.TestCase):
         self.config['policy']['objective'] = 'cost_first'
         for p in self.config['profiles']:
             if p['id'] in ('claude-sonnet-5-5', 'claude-opus-5-5-xhigh',
-                            'antigravity-argon-medium', 'antigravity-argon-high', 'muse-wonder-full'):
+                            'antigravity-argon-medium', 'antigravity-argon-high', 'muse-wonder-full',
+                            'codex-small-gpt-6-luna', 'codex-medium-gpt-6-1-terra',
+                            'claude-small-haiku-5-5', 'claude-fable-5-1'):
                 p['enabled'] = False
             if p['id'] in ('codex-small', 'antigravity-small'):
                 p['tier_by_mode'] = {'review': 'large'}
@@ -98,7 +100,7 @@ class RouterTests(RoutingCase):
         self.args.mode = 'make'; self.args.host_family = 'openai'
         maker = r.resolve(core, self.config, response('large')['answers'], self.available, self.args)
         self.assertEqual(maker['effort'], 'low')
-        self.assertEqual(maker['model_evidence']['status'], 'effort-unverified')
+        self.assertEqual(maker['model_evidence']['status'], 'matched')
         self.args.mode = 'review'; self.args.exclude_family = 'openai'
         review = r.resolve(core, self.config, response('large')['answers'], self.available, self.args)
         self.assertEqual(review['effort'], 'high')

@@ -13,6 +13,19 @@ for a subprocess invocation. Gemini 4 Argon supports low/medium/high; high is
 its documented maximum. Muse Wonder Full uses `--reasoning-effort`, while
 Claude uses `--effort`. Neither flag grants additional tools.
 
+Current Codex and Claude Code defaults can differ from API defaults. Codex
+recommends high for Luna; Claude Code defaults Opus/Sonnet/Haiku 5.5 to medium,
+while the Sonnet API defaults to high. Existing Alloy efforts remain deliberate
+profile choices. The new Luna profile uses high, Terra medium/high by role,
+Haiku medium/high by role, and Fable high. No higher effort promotes their tier.
+See [Codex models](https://learn.chatgpt.com/docs/models) and
+[Claude Code settings](https://code.claude.com/docs/en/model-config).
+
+Codex Ultra can use subagents. It changes orchestration rather than simply
+extending the single worker's reasoning budget, so ordinary model-effort
+measurements and API effort settings cannot certify it. Do not route to Ultra
+automatically; an explicit selection needs its own cost and capability evidence.
+
 ## Configure the roles
 
 A profile can retain its default effort and override individual modes:

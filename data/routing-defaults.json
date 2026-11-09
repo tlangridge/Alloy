@@ -52,7 +52,7 @@
       "enabled": false,
       "billing_mode": "unknown",
       "quota_pool": "codex",
-      "evidence": "Codex rejects gpt-6-sol under ChatGPT-account sign-in (verified 2026-09-25); enable only with API-key billing"
+      "evidence": "Legacy opt-in profile. ChatGPT-account rejection was observed 2026-09-25, not a current availability guarantee; verify account access before enabling. Existing disabled state is preserved."
     },
     {
       "id": "codex-large-gpt-6-1-sol",
@@ -65,7 +65,7 @@
       "enabled": true,
       "billing_mode": "unknown",
       "quota_pool": "codex",
-      "evidence": "Codex CLI 0.159.0 accepts gpt-6.1-sol under ChatGPT-account sign-in (verified 2026-09-29); stronger and faster than gpt-6-sol and gpt-5.6-sol, so the default effort is one step lower, never below high for review; billing is your account choice (alloy setup --billing codex=subscription); not benchmarked",
+      "evidence": "Current official Codex documentation lists gpt-6.1-sol. Medium implementation/high review are editorial role choices, not measured outcomes; configure billing for the actual account.",
       "effort_by_mode": {
         "review": "high"
       }
@@ -336,6 +336,64 @@
       "enabled": true,
       "billing_mode": "unknown",
       "evidence": "Dated official task prior; exact CLI/model/effort outcomes have not been measured locally."
+    },
+    {
+      "id": "codex-small-gpt-6-luna",
+      "adapter": "codex",
+      "model": "gpt-6-luna",
+      "family": "openai",
+      "tier": "small",
+      "effort": "high",
+      "cost_rank": 0.75,
+      "enabled": true,
+      "billing_mode": "unknown",
+      "quota_pool": "codex",
+      "evidence": "Official model/CLI documentation reviewed 2026-11-09; editorial tier and cost rank, not measured local outcomes. Verify account access and billing."
+    },
+    {
+      "id": "codex-medium-gpt-6-1-terra",
+      "adapter": "codex",
+      "model": "gpt-6.1-terra",
+      "family": "openai",
+      "tier": "medium",
+      "effort": "medium",
+      "cost_rank": 1.5,
+      "enabled": true,
+      "billing_mode": "unknown",
+      "quota_pool": "codex",
+      "evidence": "Official model/CLI documentation reviewed 2026-11-09; editorial tier and cost rank, not measured local outcomes. Verify account access and billing.",
+      "effort_by_mode": {
+        "review": "high"
+      }
+    },
+    {
+      "id": "claude-small-haiku-5-5",
+      "adapter": "claude",
+      "model": "claude-haiku-5-5",
+      "family": "anthropic",
+      "tier": "small",
+      "effort": "medium",
+      "cost_rank": 1,
+      "enabled": true,
+      "billing_mode": "unknown",
+      "quota_pool": "claude",
+      "evidence": "Official model/CLI documentation reviewed 2026-11-09; editorial tier and cost rank, not measured local outcomes. Verify account access and billing.",
+      "effort_by_mode": {
+        "review": "high"
+      }
+    },
+    {
+      "id": "claude-fable-5-1",
+      "adapter": "claude",
+      "model": "claude-fable-5-1",
+      "family": "anthropic",
+      "tier": "large",
+      "effort": "high",
+      "cost_rank": 4,
+      "enabled": false,
+      "billing_mode": "unknown",
+      "quota_pool": "claude",
+      "evidence": "Official documentation reviewed 2026-11-09. Disabled until account access and billing are explicitly configured: noninteractive Claude Code may charge usage credits without prompting. No measured local outcomes."
     }
   ],
   "quota_pools": {},
