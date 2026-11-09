@@ -13,6 +13,8 @@ All notable changes to Alloy are documented here. Format loosely follows
   without replacing existing choices. Refresh dated model evidence and API
   reference prices; keep restricted releases out of the runnable catalog.
   Fable remains opt-in because noninteractive usage can charge additional credits.
+- Keep Python 3.8 compatibility checks on supported Linux and Intel macOS images,
+  while current-version checks continue to use the latest runner images.
 
 ## [0.14.1] - 2026-10-14
 
