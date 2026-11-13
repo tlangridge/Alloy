@@ -60,6 +60,22 @@ Checker output, timeout or provider error gets at most two retries of the same
 revision and packet, without another Maker, commit or gate round. Malformed
 nonempty verdicts and mismatched context receipts fail closed.
 
+Recovery patches include allowed, nonignored new files using a temporary Git index
+and object store; the worktree's staging and shared objects are unchanged. If new
+files cannot be indexed, the patch falls back to current tracked changes with a
+`recovery_warning` in the task record. A successful snapshot atomically replaces
+the saved patch. If the current snapshot fails, the previous patch is retained
+and marked stale; status reports its freshness or a null diff path when none exists.
+Archives of missing or invalid worktrees also keep `saved-changes.patch`, so a
+surviving branch cannot hide earlier uncommitted work. Changed symlinks must resolve inside
+the owned worktree and allowed paths. Provider failures retain a bounded redacted
+reason. Exhausted Checker transport attempts stay exhausted across resume for
+that packet. Codex stderr can contain generated prose, so it never independently
+authorizes an auth retry. Resume does not reset the review cap or acceptance budget. CLI
+version changes name both versions and retain the work for a new reviewed task.
+Busy local AGY home leases use the existing Checker transport retry budget;
+permission and boundary refusals remain permanent failures.
+
 Every task records an `owner`, `logical_task_id`, attempt ID and lease heartbeat.
 The default logical identity is the remote repository plus exact specification
 hash; supply `--logical-task-id issue-123` when the specification may change across

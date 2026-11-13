@@ -3,6 +3,27 @@
 All notable changes to Alloy are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.15.0] - 2026-11-13
+
+- Consolidate provider metadata, effort mapping, Maker argument construction,
+  model-family parsing, Git policy and bounded terminal-event selection.
+  Preserve Cursor's existing OS sandbox gateway and independent review controls.
+- Add Carbon, Hydrogen and fixed-effort Orchestrator profiles, plus opt-in
+  Fable 5.2 profiles. Validate effort suffixes, CLI versions, account listings
+  and model-specific usage-credit consent without replacing existing settings.
+- Restrict Claude read-only roles to file/search tools; keep shell, editing,
+  agents, skills and MCP out. Preserve separate Maker edit/test permissions.
+- Isolate AGY settings by permission grants and lease explicitly pinned homes.
+  Retain provider model/mode receipts and reject reported write-capable review modes.
+- Fail on structured Claude error results, retain redacted provider diagnostics,
+  and classify nonzero auth failures for the existing bounded retry.
+- Include scoped new files in recovery patches without changing staging or shared
+  objects, with visible tracked-only fallback; reject changed
+  symlinks escaping task scope. Harden updater Git calls against ambient repository
+  overrides and command-valued fsmonitor. Keep transport and version-change stops.
+- Expose evidence-expiry warnings, make catalog tests independent of the calendar,
+  and refresh skill guidance, provider documentation and release consistency checks.
+
 ## [0.14.2] - 2026-11-09
 
 - Shorten the skill entrypoint and load mode-specific runbooks on demand.

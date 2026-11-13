@@ -194,7 +194,7 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(p["status"], "timeout")
         self.assertIn(p["session_id"], p["resume_hint"])
         self.assertIn("--resume", p["resume_hint"])
-        self.assertIn("--permission-mode plan", p["resume_hint"])   # still read-only
+        self.assertIn("--permission-mode dontAsk", p["resume_hint"])   # still read-only
         self.assertIn("resume", _proc.stderr)
 
     def test_status_reads_a_finished_run_from_disk(self):
@@ -462,15 +462,15 @@ class AlloyTests(unittest.TestCase):
         cmd = " ".join(by_name(m, "grok")["command"])
         self.assertIn("-m grok-4.5", cmd)
 
-    def test_claude_uses_plan_and_print(self):
-        # The host's own model as a panelist: headless (-p), read-only (plan),
+    def test_claude_uses_read_tools_and_print(self):
+        # The host's own model as a panelist: headless (-p), read-only tools,
         # never a bypass flag.
         _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"],
                          env_extra={"ALLOY_BIN_CLAUDE": MOCK, "ANTHROPIC_API_KEY": "x"})
         cmdlist = by_name(m, "claude")["command"]
         self.assertIn("-p", cmdlist)                       # headless print mode
         cmd = " ".join(cmdlist)
-        self.assertIn("--permission-mode plan", cmd)       # read-only
+        self.assertIn("--permission-mode dontAsk", cmd)       # read-only
         self.assertNotIn("--dangerously-skip-permissions", cmd)
         self.assertNotIn("bypassPermissions", cmd)
 
@@ -482,7 +482,7 @@ class AlloyTests(unittest.TestCase):
         self.assertNotIn("--setting-sources", cmd)  # retain user deny rules and hooks
         _proc, m = panel(self.tmp, extra_args=["--panelists", "claude"], env_extra={"ALLOY_CLAUDE_LEAN": "0"})
         cmd = " ".join(by_name(m, "claude")["command"])
-        self.assertNotIn("--strict-mcp-config", cmd)
+        self.assertIn("--strict-mcp-config", cmd)
         self.assertNotIn("--setting-sources", cmd)
 
     def test_claude_model_override(self):
@@ -535,7 +535,7 @@ class AlloyTests(unittest.TestCase):
         self.assertNotIn("--output-format text", cmd)
         self.assertNotIn("--verbose", cmd)      # json + verbose would print the whole transcript
         self.assertNotIn("stream-json", cmd)
-        self.assertIn("--permission-mode plan", cmd)
+        self.assertIn("--permission-mode dontAsk", cmd)
         self.assertEqual(p["usage"], {"input_tokens": 5, "cache_read_tokens": 2000,
             "cache_write_tokens": 3000, "output_tokens": 60, "reasoning_tokens": 25,
             "reported_cost_usd": 0.05, "turns": 4, "source": "claude-json"})
@@ -583,7 +583,10 @@ class AlloyTests(unittest.TestCase):
             return json.load(f)
 
     def _shared_agy_home(self):
-        return os.path.join(self.tmp, "state", "alloy", "agy-home")
+        from pathlib import Path
+        root = Path(self.tmp) / 'state/alloy/agy-home'
+        homes = [p for p in root.glob('*') if p.is_dir()]
+        return str(max(homes, key=lambda p: p.stat().st_mtime)) if homes else str(root)
 
     def test_antigravity_refused_on_old_cli(self):
         # agy < 1.1.0 auto-EXECUTES tools in headless mode instead of denying
@@ -641,9 +644,10 @@ class AlloyTests(unittest.TestCase):
         args = p["command"]
         add_dirs = [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--add-dir"]
         self.assertEqual(add_dirs, [os.path.abspath(os.path.dirname(staged)), os.path.abspath(repo)])
-        allow = self._agy_settings(self._shared_agy_home())["permissions"]["allow"]
+        home = os.path.join(os.path.dirname(p["stdout_path"]), "agy_home")
+        allow = self._agy_settings(home)["permissions"]["allow"]
         self.assertEqual(allow, ["read_file(%s)" % d for d in add_dirs])
-        deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
+        deny = self._agy_settings(home)["permissions"]["deny"]
         self.assertEqual(deny, ["command(*)", "write_file(*)"])
         with open(stdin_dump) as f:
             self.assertEqual(f.read(), "0")
@@ -669,11 +673,12 @@ class AlloyTests(unittest.TestCase):
                 pin = os.path.join(os.path.dirname(p["stdout_path"]), "prompt_in")
                 self.assertEqual(add_dirs, [os.path.abspath(d)
                                            for d in (pin, repo, gitdir, common)])
-                permissions = self._agy_settings(self._shared_agy_home())["permissions"]
+                home = os.path.join(os.path.dirname(p["stdout_path"]), "agy_home")
+                permissions = self._agy_settings(home)["permissions"]
                 self.assertEqual(permissions["allow"],
                                  ["read_file(%s)" % d for d in add_dirs])
                 self.assertEqual(permissions["deny"], ["command(*)", "write_file(*)"])
-                self.assertNotIn(self._shared_agy_home(), add_dirs)
+                self.assertNotIn(home, add_dirs)
                 self.assertNotIn("--dangerously-skip-permissions", args)
 
     def test_antigravity_isolated_home_with_readonly_allowlist(self):
@@ -682,9 +687,11 @@ class AlloyTests(unittest.TestCase):
         dump = os.path.join(self.tmp, "child_home.txt")
         _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
                          env_extra=self._agy_env(MOCK_ENV_DUMP=dump))
+        home = os.path.join(os.path.dirname(by_name(m, "antigravity")["stdout_path"]), "agy_home")
+        self.assertFalse(os.path.exists(self._shared_agy_home()))
         with open(dump) as f:
-            self.assertEqual(f.read(), self._shared_agy_home())
-        s = self._agy_settings(self._shared_agy_home())
+            self.assertEqual(f.read(), home)
+        s = self._agy_settings(home)
         self.assertIn("read_file", s["permissions"]["allow"])
         self.assertIn("write_file", s["permissions"]["deny"])
         self.assertIn("command", s["permissions"]["deny"])
@@ -707,7 +714,7 @@ class AlloyTests(unittest.TestCase):
         self.assertEqual(s["permissions"]["allow"][8:],
                          ["read_file(%s)" % d for d in add_dirs])
         for d in add_dirs:
-            self.assertFalse(d.startswith(self._shared_agy_home()))
+            self.assertFalse(d.startswith(home))
         # toolPermission:"strict" would override the allow-list and deny the READ
         # tools too, leaving a panelist that can never answer. Never set it.
         self.assertNotIn("toolPermission", s)
@@ -725,9 +732,10 @@ class AlloyTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self._shared_agy_home()))
 
     def test_antigravity_web_off_denies_web_tools(self):
-        _proc, _m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
+        _proc, m = panel(self.tmp, extra_args=["--panelists", "antigravity"],
                           env_extra=self._agy_env(ALLOY_WEB="0"))
-        deny = self._agy_settings(self._shared_agy_home())["permissions"]["deny"]
+        home = os.path.join(os.path.dirname(by_name(m, "antigravity")["stdout_path"]), "agy_home")
+        deny = self._agy_settings(home)["permissions"]["deny"]
         self.assertIn("search_web", deny)
         self.assertIn("read_url(*)", deny)
 
@@ -1336,7 +1344,8 @@ class ClaudeStreamUnitTests(unittest.TestCase):
     # -- argv ------------------------------------------------------------------ #
     def test_default_argv_is_stream_json_with_verbose_and_still_read_only(self):
         args = self.ad.build_args("p", "l", "consult", {"session_id": "sid"})
-        self.assertEqual(args[:6], ["-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"])
+        self.assertEqual(args[:3], ["-p", "--permission-mode", "dontAsk"])
+        self.assertEqual(args[args.index("--tools") + 1], "Read,Glob,Grep,WebSearch,WebFetch")
         self.assertNotIn("text", args)
         self.assertIn("--session-id", args)
         self.assertNotIn("bypassPermissions", args)
@@ -1619,7 +1628,7 @@ if mode == "auth":
         argv = self.argv()
         self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
         self.assertIn("--verbose", argv)
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
         self.assertRegex(self.read(st, "result_path"), r"^ANSWER \[REDACTED[^\]]*\] end$")
         for name in ("result_path", "stdout_path"):
             self.assertNotIn("sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123", self.read(st, name))

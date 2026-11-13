@@ -12,10 +12,13 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 import alloy_lifecycle as storage
+import alloy_git as git_policy
+import alloy_providers as providers
 import alloy_artifacts as artifacts
 
 SCHEMA = 1
@@ -35,23 +38,19 @@ def home(core):
 # off, stdin is detached, output is bounded and there is a deadline. This mirrors the
 # contract of bin/alloy's `_git` (which this module cannot import); a test pins the two
 # together. Repository `alias.*` entries cannot shadow the built-in commands used here.
-GIT_HARDENING = ('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false')
-GIT_STRIPPED_ENV = ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
-                    'GIT_EXTERNAL_DIFF', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS')
+GIT_HARDENING = git_policy.HARDENING
+GIT_STRIPPED_ENV = git_policy.STRIPPED_ENV
 GIT_TIMEOUT = 60
 GIT_STDOUT_CAP = 128 << 20      # a patch larger than this is a task to split, not to truncate
 GIT_STDERR_CAP = 1 << 20
 
 
 def git_env():
-    env = {k: v for k, v in os.environ.items() if k not in GIT_STRIPPED_ENV}
-    env['GIT_CONFIG_NOSYSTEM'] = '1'
-    env['GIT_OPTIONAL_LOCKS'] = '0'
-    return env
+    return git_policy.environment()
 
 
 def git_argv(repo, *args):
-    return ['git', '-C', str(repo), *GIT_HARDENING, *args]
+    return git_policy.argv(repo, *args)
 
 
 def _kill_git(proc):
@@ -62,10 +61,17 @@ def _kill_git(proc):
             pass
 
 
-def run_git(argv, timeout=GIT_TIMEOUT):
+def run_git(argv, timeout=GIT_TIMEOUT, index_file=None, object_dir=None, alternate_objects=None):
     """Run one Git command with detached stdin and bounded, drained output."""
+    env = git_env()
+    if index_file is not None:
+        env['GIT_INDEX_FILE'] = str(Path(index_file).resolve())
+    if object_dir is not None:
+        env['GIT_OBJECT_DIRECTORY'] = str(Path(object_dir).resolve())
+    if alternate_objects is not None:
+        env['GIT_ALTERNATE_OBJECT_DIRECTORIES'] = str(Path(alternate_objects).resolve())
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=git_env(), start_new_session=True)
+                            stderr=subprocess.PIPE, env=env, start_new_session=True)
     bufs, over = (bytearray(), bytearray()), threading.Event()
 
     def pump(stream, buf, cap):
@@ -205,6 +211,52 @@ def scope(task):
     bad = [p for p in paths if p and not in_scope(p, task['allow_paths'])]
     if bad:
         raise ExecutionError('Changes outside allowed scope: ' + ', '.join(bad[:10]))
+    root = Path(task['worktree']).resolve()
+    for name in filter(None, paths):
+        path = root / name
+        if not path.is_symlink():
+            continue
+        try:
+            target = path.resolve().relative_to(root).as_posix()
+        except (ValueError, RuntimeError, OSError):
+            raise ExecutionError('Changed symlink escapes the owned worktree: ' + name) from None
+        if not in_scope(target, task['allow_paths']):
+            raise ExecutionError('Changed symlink points outside allowed scope: ' + name)
+
+
+def recovery_diff(task):
+    """Recover allowed changes with private index/objects; degrade visibly to tracked files."""
+    repo = task['worktree']
+    paths = [':(literal)' + path for path in task['allow_paths']]
+    task.pop('recovery_warning', None)
+    with tempfile.TemporaryDirectory(prefix='alloy-recovery-index-') as directory:
+        index = Path(directory) / 'index'
+        objects = Path(directory) / 'objects'
+        objects.mkdir()
+        source_objects = git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+        try:
+            def recover_git(*args):
+                result = run_git(git_argv(repo, *args), index_file=index,
+                                 object_dir=objects, alternate_objects=source_objects)
+                if result.returncode:
+                    raise ExecutionError(result.stderr.decode(errors='replace')[-1000:])
+                return result.stdout
+            recover_git('read-tree', task['base'])
+            # Intersect literal scope roots with the base index and nonignored
+            # files. An absent or ignored sibling must not discard other new work.
+            names = recover_git('ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', *paths)
+            names = list(dict.fromkeys(filter(None, names.split(b'\0'))))
+            if names:
+                pathspec = Path(directory) / 'paths'
+                pathspec.write_bytes(b'\0'.join(b':(literal)' + name for name in names) + b'\0')
+                recover_git('add', '--all', '--pathspec-from-file=' + str(pathspec), '--pathspec-file-nul')
+            return recover_git('diff', '--cached', '--binary', '--no-ext-diff', '--no-textconv', task['base'], '--', *paths)
+        except ExecutionError as exc:
+            task['recovery_warning'] = 'Untracked files omitted from recovery patch; worktree retained: ' + str(exc)
+    result = run_git(git_argv(repo, 'diff', '--binary', '--no-ext-diff', '--no-textconv', task['base'], '--', *paths))
+    if result.returncode:
+        raise ExecutionError('Cannot prepare tracked recovery patch: ' + result.stderr.decode(errors='replace')[-1000:])
+    return result.stdout
 
 
 # What a Cursor role may write, reported (not merely implied) in every task record. The
@@ -230,13 +282,13 @@ def permissions(adapter, write=False):
                      write_allowlist=list(CURSOR_MAKER_WRITES if write else CURSOR_CHECKER_WRITES),
                      cursor_mode='agent_default' if write else 'ask', approval_bypass=False,
                      sensitive_reads_denied=True, setup_scripts_skipped=True)
+    perms.update(adapter.permission_overrides(write))
     return perms
 
 
-# Every provider with an explicit Maker branch in worker_adapter(). A provider outside this
-# tuple is refused, and a branch-less member reaches the final `else` and is refused too:
-# nothing inherits another provider's Maker permissions by falling through.
-MANAGED_WRITERS = ('codex', 'claude', 'grok', 'antigravity', 'cursor')
+# Certified providers own an explicit adapter.maker_args() implementation. Providers
+# outside this contract are refused; the base adapter also refuses managed writes.
+MANAGED_WRITERS = tuple(n for n, c in providers.CONTRACTS.items() if c.get('writer'))
 
 
 # Claude Code deny rules for direct rm binaries and common wrappers. Plain `rm` is not listed:
@@ -298,58 +350,15 @@ def worker_adapter(core, decision, write=False):
         raise ExecutionError('No managed write adapter for ' + ad.name)
     # A per-instance subclass also overrides Antigravity's dynamic property.
     ad.__class__ = type("Managed" + type(ad).__name__, (type(ad),), {"read_only": False})
+    ad.managed_write = True
     original = ad.build_args
     def build(prompt, last, mode, ctx=None):
         argv = original(prompt, last, mode, ctx)
-        if ad.name == 'codex':
-            argv[argv.index('-s') + 1] = 'workspace-write'
-            argv += ['-c', 'approval_policy="never"']
-        elif ad.name in ('claude', 'grok'):
-            argv[argv.index('--permission-mode') + 1] = 'acceptEdits'
-            argv += ['--allowedTools' if ad.name == 'claude' else '--allow', 'Bash']
-            if ad.name == 'grok':
-                # Headless grok (1.0.30) cancels the turn at the first edit under
-                # acceptEdits alone; edits need explicit allow rules too. The
-                # read-only panel toolset is replaced by the Maker's below.
-                while '--tools' in argv:
-                    i = argv.index('--tools')
-                    del argv[i:i + 2]
-                argv += ['--allow', 'Edit', '--allow', 'Write']
-            argv += ['--tools', 'Read,Glob,Grep,Edit,Write,Bash']
-        elif ad.name == 'cursor':
-            # Nothing is added or relaxed here. The instance's read_only is False, so bin/alloy's
-            # build_args already emitted the closed Maker form (no --mode, --sandbox enabled,
-            # --skip-worktree-setup, staged-file instruction); a force/auto-approval, session,
-            # plugin or worktree control appended by ANY later rewrite is refused by the spawn
-            # gateway, which parses the final argv before sandbox-exec starts.
-            pass
-        elif ad.name == 'antigravity':
-            argv[argv.index('--mode') + 1] = 'accept-edits'
-            if '-p' in argv:
-                staged = Path(ctx['pdir']) / 'prompt_in' / 'prompt.md'
-                task_prompt = str(staged) if staged.exists() else prompt
-                argv[argv.index('-p') + 1] = ('Read ' + json.dumps(task_prompt) + ' for your task. Implement it ONLY in ' + json.dumps(ctx['repo']) +
-                    '. Run the specified tests there. Do not edit any other checkout or Git metadata.')
-            argv += ['--sandbox']
-        else:
-            raise ExecutionError('No managed write adapter for ' + ad.name)
-        return argv
+        try:
+            return ad.maker_args(argv, dict(ctx or {}, prompt_path=prompt))
+        except core.AdapterError as exc:
+            raise ExecutionError(str(exc)) from None
     ad.build_args = build
-    if ad.name == 'antigravity':
-        def settings(ctx=None):
-            if ad._agy_version() and ad._agy_version() >= (1, 3, 4):
-                repo = str(Path(ctx['repo']).resolve())
-                read_dirs = list(dict.fromkeys([repo] + (ctx or {}).get('agy_add_dirs', [])))
-                deny = ['execute_url(*)']
-                for target in (git(repo, 'rev-parse', '--path-format=absolute', '--git-dir'),
-                               git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')):
-                    deny.append('write_file(%s)' % target)
-                return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
-                            permissions=dict(allow=['read_file(%s)' % d for d in read_dirs] +
-                            ['write_file(%s)' % repo, 'command(*)'] + (['read_url(*)'] if core.web_enabled() else []), deny=deny))
-            return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
-                        permissions=dict(allow=list(ad.READ_TOOLS) + list(ad.WRITE_TOOLS) + ['command(*)'], deny=[]))
-        ad._settings = settings
     ad.resume_hint = lambda ctx=None: None  # Resume through Alloy so bounds and review cannot be bypassed.
     return ad
 
@@ -415,6 +424,8 @@ def check_decision(core, decision):
 
 def probe(core, decision, write):
     ad = core.ADAPTERS[decision['cli']]
+    if write and ad.name == 'antigravity' and decision['model'] in providers.AGY_WORKFLOWS:
+        raise ExecutionError('Orchestrator has no certified managed Maker contract')
     if ad.name == 'cursor':
         return probe_cursor(core, ad, write)
     if ad.auth_state() != 'ready' or not ad.read_only:
@@ -425,8 +436,7 @@ def probe(core, decision, write):
         return
     argv = [ad.resolved_bin()] + (['exec', '--help'] if ad.name == 'codex' else ['--help'])
     cp = subprocess.run(argv, capture_output=True, text=True, timeout=15, env=core.routing.clean_env())
-    expected = {'codex': ['workspace-write'], 'claude': ['acceptEdits', '--allowedTools', '--disallowedTools', '--tools'],
-                'grok': ['acceptEdits', '--allow', '--tools'], 'antigravity': ['accept-edits', '--sandbox']}
+    expected = providers.WRITE_PROBE_FLAGS
     if cp.returncode or not all(x in cp.stdout + cp.stderr for x in expected.get(ad.name, ['UNSUPPORTED'])):
         raise ExecutionError('CLI write-mode compatibility check failed: ' + ad.name)
 
@@ -494,7 +504,7 @@ def readiness(core, args, repo):
                 model_availability='Configured profiles and local CLI checks; provider entitlement is confirmed only on dispatch')
 
 
-NATIVE_SESSION_ADAPTERS = ('claude', 'grok')
+NATIVE_SESSION_ADAPTERS = tuple(n for n, c in providers.CONTRACTS.items() if c.get('native_session'))
 
 
 def worker_session(core, task, role):
@@ -639,7 +649,12 @@ def revalidate(core, task, role):
         prior_failures=decision.get('retry_context', {}).get('verified_quality_failures', 0),
         failed_profile=decision.get('retry_context', {}).get('failed_profiles', []),
         max_estimated_usd=task.get('max_estimated_usd'))
-    current = r.resolve(core, config, task['maker']['answers'], r.inventory(core), args, r.usage.get(core, config))
+    available = r.inventory(core)
+    observed_version = available.get(decision.get('cli'), {}).get('version')
+    if decision.get('cli_version') is not None and observed_version != decision['cli_version']:
+        raise ExecutionError('Worker CLI version changed: %s -> %s; retained work requires a new reviewed task' %
+                             (decision['cli_version'], observed_version or 'unknown'))
+    current = r.resolve(core, config, task['maker']['answers'], available, args, r.usage.get(core, config))
     # The stored decision and the fresh one are both re-derived; a Cursor decision must also keep
     # the exact effective model (which carries its effort and fast state) it was reviewed with.
     check_decision(core, decision)
@@ -649,6 +664,9 @@ def revalidate(core, task, role):
         keys += ('cli_version',)
     if decision.get('cli') == 'cursor':
         keys += ('effective_model', 'cursor_fast')
+    if current.get('cli_version') != decision.get('cli_version') and 'cli_version' in keys:
+        raise ExecutionError('Worker CLI version changed: %s -> %s; retained work requires a new reviewed task' %
+                             (decision.get('cli_version'), current.get('cli_version')))
     if any(current.get(k) != decision.get(k) for k in keys):
         raise ExecutionError('Worker profile or billing changed; start a new reviewed task')
 
@@ -921,8 +939,8 @@ def tamper_checked(core, task, verify, result, before):
 
 
 def worker_failure(task, role, result, text):
-    """Failure text; a Cursor role's own (already redacted, value-free) refusal reason is included."""
-    detail = result.get('error') if cursor_worker(task, role) else None
+    """Include the dispatcher's bounded, redacted reason for every provider."""
+    detail = result.get('error')
     return text + (' (' + str(detail)[:300] + ')' if detail else '')
 
 
@@ -1125,6 +1143,8 @@ def run_attempt(core, task):
             fd = os.open(str(directory / 'changes.patch'), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, 'wb') as out:
                 out.write(diff.encode('utf-8', errors='surrogateescape'))
+            task.pop('recovery_patch_stale', None)
+            task.pop('recovery_warning', None)
             task['blocking_step'] = 'review_context'
             save(core, task)
             packet, packet_id = review_packet(core, task, record, tip, diff, spec)
@@ -1142,15 +1162,16 @@ def run_attempt(core, task):
         save(core, task)
         raise
     save(core, task)
-    # A stopped task always returns its current patch, failing reproduction and
-    # unresolved decisions, even when gates failed before a commit was made.
+    # Snapshot stopped work, including changes before a failed gate or commit.
+    # If the tree is unavailable, preserve the prior snapshot and mark it stale.
+    patch = directory / 'changes.patch'
     try:
-        diff = git(task['worktree'], 'diff', '--binary', '--no-ext-diff', '--no-textconv', task['base'])
-        patch = directory / 'changes.patch'
-        patch.write_bytes(diff.encode(errors='surrogateescape'))
-        patch.chmod(0o600)
-    except (ExecutionError, OSError):
-        pass
+        diff = recovery_diff(task)
+        core.write_atomic(str(patch), diff)
+        task.pop('recovery_patch_stale', None)
+    except (ExecutionError, OSError) as exc:
+        task['recovery_patch_stale'] = patch.is_file()
+        task['recovery_warning'] = 'Current recovery patch unavailable; any previous snapshot is retained: ' + str(exc)
     task['open_decisions'] = [task.get('error', 'Host decision required')]
     save(core, task)
     return task
@@ -1378,7 +1399,7 @@ def finish(core, task):
     if task.get('rounds'):
         record_outcome(core, task)
     # Host sees a compact packet; detailed logs stay on disk.
-    out = {k: task[k] for k in ('id', 'owner', 'logical_task_id', 'state', 'repo', 'worktree', 'branch', 'tip', 'integration', 'archive', 'closure', 'light', 'light_reason', 'active_seconds', 'budget_seconds', 'implementation_rounds', 'open_decisions', 'error', 'cleanup_eligible') if k in task}
+    out = {k: task[k] for k in ('id', 'owner', 'logical_task_id', 'state', 'repo', 'worktree', 'branch', 'tip', 'integration', 'archive', 'closure', 'light', 'light_reason', 'active_seconds', 'budget_seconds', 'implementation_rounds', 'open_decisions', 'error', 'cleanup_eligible', 'recovery_warning', 'recovery_patch_stale') if k in task}
     out['record'] = str(taskdir(core, task['id']) / 'task.json')
     if 'rounds' in task:
         out['blocking_step'] = task.get('blocking_step')
@@ -1401,7 +1422,9 @@ def finish(core, task):
         out['rounds'] = len(task['rounds'])
         out['maker'] = task['maker']['model']
         out['checker'] = task['checker']['model']
-        out['diff'] = str(taskdir(core, task['id']) / 'changes.patch')
+        patch = taskdir(core, task['id']) / 'changes.patch'
+        out['diff'] = str(patch) if patch.is_file() else None
+        out['diff_is_current'] = bool(out['diff']) and not task.get('recovery_patch_stale', False)
         out['failing_reproduction'] = task.get('feedback') or '\n'.join(task['tests'])
         if task['rounds']:
             latest = task['rounds'][-1]

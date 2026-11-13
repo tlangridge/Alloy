@@ -44,6 +44,9 @@ the exact revision. Model provider family can differ from CLI family.
   `ALLOY_ALLOW_UNSANDBOXED` on the user's behalf. `allowed-tools` metadata is
   host-dependent and does not constrain child processes. There is no force or
   auto-approval flag in any Cursor role.
+- **Claude read-only roles expose only file/search tools.** Shell, editing,
+  subagents, skills and MCP are excluded. `dontAsk` denies operations that need
+  approval; user deny rules and hooks remain loaded. Maker permissions are separate.
 - **Routing is opt-in.** Preserve model/effort pins, disabled models, billing,
   quota reserves and existing objectives. New setups use `quality_first`;
   migration must be intentional. Do not change private account settings as part
@@ -145,12 +148,17 @@ constraints. Price arithmetic, eligibility and permissions remain code-enforced.
 
 New profiles supplement existing IDs. GPT-6 Luna and Haiku 5.5 are candidates
 for bounded work; GPT-6.1 Terra for scoped coding and visual understanding;
-GPT-6.1 Sol, Opus/Sonnet 5.5, Fable 5.1, Astra and AGY Argon cover different
+GPT-6.1 Sol, Opus/Sonnet 5.5, Fable 5.2, Astra and AGY Carbon/Argon cover different
 complex work. These are editorial priors, not measured winners.
 Fable ships disabled until account access and usage-credit billing are explicitly
 configured; noninteractive Claude Code can charge credits without prompting.
-Announcements alone do not establish a usable account/model ID. Do not guess IDs for restricted
-releases such as Gemini 4 Carbon.
+Verify account access with `models refresh`: Carbon is plan-gated and its new
+profiles require a fresh authoritative listing. Hydrogen supports low through
+xhigh; model suffix and effort must agree. Orchestrator mixes a planner with
+Hydrogen at fixed effort, ships disabled, and is not a managed Maker.
+Fable 5.2 needs Claude Code 2.1.321+; enabling its new profile requires explicit
+usage-credit acknowledgement or configured metered prices. Existing profiles
+are preserved. See the routing runbook for the opt-in command.
 
 Choose implementation and verification effort separately. An effort label is
 not comparable across models, products or generations. Higher effort cannot

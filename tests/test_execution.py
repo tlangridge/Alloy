@@ -763,7 +763,7 @@ else:
         self.assertTrue(task['open_decisions'])
         self.assertEqual([role for role, _ in self.calls], ['maker'])
 
-    def test_checker_transport_retries_same_revision_without_implementation_rounds(self):
+    def test_checker_transport_retries_busy_and_timeout_same_revision_without_implementation_rounds(self):
         original = e.dispatch.side_effect
         attempts = []
         def retry(core, task, role, prompt, folder):
@@ -772,6 +772,7 @@ else:
                 attempts.append(task['rounds'][-1]['packet'].copy())
                 if len(attempts) == 1:
                     Path(result['result_path']).write_text('')
+                    result.update(status='error', failure_kind='busy', error='busy: Antigravity HOME lease is held')
                 elif len(attempts) == 2:
                     result.update(status='error', timed_out=True)
             return result
@@ -786,6 +787,28 @@ else:
         with contextlib.redirect_stdout(output):
             e.finish(core, task)
         self.assertEqual(json.loads(output.getvalue())['metrics']['review_transport_retries'], 2)
+
+    def test_lost_worktree_resume_preserves_and_archives_last_uncommitted_snapshot(self):
+        self.args.max_fix_rounds = 0
+        self.args.test = ['exit 1']
+        code, task = self.create()
+        self.assertEqual(code, 3)
+        saved = e.taskdir(core, task['id']) / 'changes.patch'
+        before = saved.read_bytes()
+        self.assertIn(b'+new', before)
+        shutil.rmtree(task['worktree'])
+        self.assertEqual(self.action(task, 'resume'), 3)
+        current = e.load(core, task['id'])
+        self.assertEqual(saved.read_bytes(), before)
+        self.assertTrue(current['recovery_patch_stale'])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            e.finish(core, current)
+        self.assertFalse(json.loads(output.getvalue())['diff_is_current'])
+        archive, manifest = e.storage.archive(core, current)
+        self.assertEqual((archive / 'saved-changes.patch').read_bytes(), before)
+        self.assertIn('saved-changes.patch', manifest['files'])
+        e.storage.verify_archive(core, current, archive)
 
     def test_checker_transport_exhaustion_never_runs_another_maker_on_resume(self):
         original = e.dispatch.side_effect

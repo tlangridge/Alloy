@@ -16,6 +16,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import alloy_providers as providers
 import alloy_usage as usage
 import alloy_evidence as evidence
 import alloy_quality as quality
@@ -25,24 +26,14 @@ SCHEMA = 2
 RUBRIC_VERSION = 6
 # adapter -> family. Cursor's family is derived per model (see family()); its entry
 # only registers the adapter and admits `cursor` (Composer) as a family value.
-FAMILIES = {"codex": "openai", "claude": "anthropic", "grok": "xai", "antigravity": "google",
-            "cursor": "cursor", "muse": "meta"}
+FAMILIES = providers.FAMILIES
 MODEL_KEYS = {n: "ALLOY_" + n.upper() + "_MODEL" for n in FAMILIES}
 EFFORT_KEYS = {n: "ALLOY_" + n.upper() + "_EFFORT" for n in FAMILIES}
-# Deprecated spellings still read when the canonical key is unset (canonical wins).
-ADAPTER_ALIASES = {"cursor-agent": "cursor"}
+ADAPTER_ALIASES = providers.ALIASES
 LEGACY_KEYS = {"cursor": {"model": "ALLOY_CURSOR_AGENT_MODEL", "effort": "ALLOY_CURSOR_AGENT_EFFORT"}}
-CURSOR_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-# Adapters whose CLI takes the routed effort as `--effort`. Codex has its own `-c` form and
-# Cursor rewrites `--model`; an adapter in neither list gets no guessed flag (fail closed).
-EFFORT_FLAG_ADAPTERS = ("claude", "grok", "antigravity")
-# Help flags each adapter's CLI must document before it can route (metadata probe only).
-PROBE_FLAGS = {"codex": ["--sandbox", "--model"],
-               "claude": ["--permission-mode", "--model", "--output-format"],
-               "grok": ["--permission-mode", "--model", "--prompt-file"],
-               "antigravity": ["--model", "--mode", "--print", "--add-dir"],
-               "cursor": ["--print", "--output-format", "--mode", "--model", "--list-models"],
-               "muse": ["--model", "--reasoning-effort", "--prompt-file", "--disable-write", "--disable-shell"]}
+CURSOR_EFFORTS = providers.CURSOR_EFFORTS
+EFFORT_FLAG_ADAPTERS = tuple(n for n, c in providers.CONTRACTS.items() if c['effort'] == '--effort')
+PROBE_FLAGS = {n: list(c['probe']) for n, c in providers.CONTRACTS.items()}
 # Routing subprocesses never inherit a router or Cursor credential/endpoint override.
 SCRUBBED_ENV = ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "CURSOR_API_KEY", "CURSOR_API_ENDPOINT")
 TIERS = ["small", "medium", "large"]
@@ -96,44 +87,11 @@ def normalize(config):
 
 
 def _cursor_split(model):
-    """`base[k=v,...]` -> (base, {k: v}); None for a malformed or duplicate control."""
-    m = re.match(r"^([^\[\]]*)(?:\[([^\[\]]*)\])?$", model or "")
-    if not m:
-        return None
-    fields = {}
-    bracket = m.group(2)
-    for part in bracket.split(",") if bracket else ():
-        k, sep, v = part.partition("=")
-        k, v = k.strip(), v.strip()
-        if not sep or not k or not v or k in fields:
-            return None
-        fields[k] = v
-    return m.group(1).strip(), fields
+    return providers.cursor_split(model)
 
 
 def cursor_model_family(model):
-    """Family of a Cursor model ID after removing bracket overrides and a trailing
-    `-fast`; None for `auto`, an empty ID or any unknown prefix (never routable).
-    Mirrors the spawn gateway's cursor_model_family in bin/alloy."""
-    parts = _cursor_split(model) if isinstance(model, str) else None
-    if parts is None:
-        return None
-    base = parts[0]
-    if base.endswith("-fast"):
-        base = base[:-len("-fast")]
-    if not base or base == "auto" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", base):
-        return None
-    if base.startswith("claude-"):
-        return "anthropic"
-    if base.startswith("gpt-") or base == "codex" or base.startswith("codex-"):
-        return "openai"
-    if base.startswith("gemini-"):
-        return "google"
-    if base.startswith(("grok-", "cursor-grok-")):
-        return "xai"
-    if base.startswith("composer-"):
-        return "cursor"
-    return None
+    return providers.cursor_family(model)
 
 
 def family(profile):
@@ -166,12 +124,8 @@ def profile_problem(p):
         if derived and claimed and claimed != derived:
             return 'model family does not match the explicit model identity'
         effort = p.get('effort')
-        if adapter == 'antigravity' and model.startswith('gemini-'):
-            suffix = model.rsplit('-', 1)[-1]
-            if suffix in ('low', 'medium', 'high') and effort is not None and effort != suffix:
-                return 'Gemini model suffix conflicts with effort'
-            if model.startswith('gemini-4-argon') and effort not in (None, 'low', 'medium', 'high'):
-                return 'Gemini 4 Argon supports low, medium and high effort'
+        if adapter == 'antigravity':
+            return providers.agy_model_problem(model, effort)
         return None
     derived = cursor_model_family(p.get("model"))
     if derived is None:
@@ -311,6 +265,11 @@ def validate(config):
             raise RoutingError("Invalid billing_mode")
         if type(p.get("enabled", True)) is not bool or not number(p.get("cost_rank", 1)):
             raise RoutingError("Invalid enabled/cost_rank")
+        for flag in ('requires_listing', 'billing_ack_required', 'usage_credits_acknowledged'):
+            if type(p.get(flag, False)) is not bool:
+                raise RoutingError(flag + ' must be boolean')
+        if p.get('min_cli_version') is not None and not re.fullmatch(r'\d+\.\d+\.\d+', str(p['min_cli_version'])):
+            raise RoutingError('min_cli_version must be a three-part version')
         efforts = p.get("effort_by_mode", {})
         if not isinstance(efforts, dict) or any(m not in MODES or e not in EFFORTS for m, e in efforts.items()):
             raise RoutingError("effort_by_mode maps consult/review/make/debate to supported effort names or null")
@@ -429,7 +388,7 @@ def refresh_defaults(core, config):
         # Only inherit unambiguous subscription billing; never infer metered rates.
         modes = {old['billing_mode'] for old in config['profiles']
                  if old['adapter'] == p['adapter']}
-        if modes == {'subscription'}:
+        if modes == {'subscription'} and not p.get('billing_ack_required'):
             p['billing_mode'] = 'subscription'
         base = p['id']
         suffix = 2
@@ -483,7 +442,7 @@ def reset_defaults(core, old):
         if len(modes) == 1:
             mode = modes.pop()
             for p in config["profiles"]:
-                if p["adapter"] == name:
+                if p["adapter"] == name and not p.get('billing_ack_required'):
                     p["billing_mode"] = mode
     return config
 
@@ -567,9 +526,11 @@ def model_context(core, config, available, snapshot, retry, mode="consult"):
             effective = effective_profile(core, p, mode)
         except RoutingError:
             continue  # an auto/unknown-family or otherwise undispatchable profile gets no card
+        if profile_gate(effective, available.get(name, {})):
+            continue
         assessment = evidence.assessment(evidence_view(effective), data)
-        cards.append(dict(profile=p['id'], model=p['model'],
-            effective_model=effective.get('effective_model', p['model']), family=effective['family'],
+        cards.append(dict(profile=p['id'], model=effective['model'],
+            effective_model=effective.get('effective_model', effective['model']), family=effective['family'],
             effort=effective.get('effort'), effort_source=effective['effort_source'], mode=mode,
             configured_tier=role_tier(p, mode),
             billing_mode=p['billing_mode'], relative_cost_rank=p['cost_rank'],
@@ -607,7 +568,8 @@ def fit_questions(cards, prefix="fit_", state_key="models", mode="consult"):
         'and permissions; this answer cannot authorize execution. Higher effort may help '
         'with missed edge cases, but cannot guarantee a correct approach; do not equate '
         'effort labels across model families.' % (state_key, i, mode)))
-        for i in range(len(cards))}
+        for i, card in enumerate(cards) if card['evidence_status'] == 'matched' or
+            (card['evidence_status'] == 'user-configured' and card['preferred_tasks'])}
 
 
 def model_fits(response, cards, prefix="fit_"):
@@ -825,10 +787,17 @@ def role_profile(core, profile, mode):
     p['effort_source'] = 'mode' if mode in p.get('effort_by_mode', {}) else 'profile'
     override = setting_for(core, p['adapter'], 'effort')
     if override:
-        if p['adapter'] == 'cursor':
+        if p['adapter'] in ('cursor', 'antigravity'):
             override = override.lower()
         p['effort'] = None if override in ('inherit', 'default') else override
         p['effort_source'] = 'override'
+        if p['adapter'] == 'antigravity' and not setting_for(core, 'antigravity', 'model'):
+            # Effort-only overrides select the corresponding known seat. An
+            # explicit model pin keeps its exact identity and conflicting pins refuse.
+            for base, levels in providers.AGY_EFFORTS.items():
+                if p['model'] in tuple(base + '-' + level for level in levels) and p['effort'] in levels:
+                    p['model'] = base + '-' + p['effort']
+                    break
     return p
 
 
@@ -846,6 +815,25 @@ def effective_profile(core, profile, mode):
             raise RoutingError(problem)
     p['family'] = family(p)
     return p
+
+
+def profile_gate(profile, listing):
+    if profile.get('billing_ack_required') and not profile.get('usage_credits_acknowledged'):
+        priced = profile.get('billing_mode') == 'metered' and all(
+            profile.get(k) is not None and number(profile[k]) for k in ('input_per_million', 'output_per_million'))
+        if not priced:
+            return 'usage-credit billing requires explicit acknowledgement or metered prices'
+    models = listing.get('models')
+    if profile.get('requires_listing') and (listing.get('authoritative') is not True or
+                                           not isinstance(models, list) or profile['model'] not in models):
+        return 'model requires a fresh authoritative account listing; run alloy models refresh'
+    if profile.get('min_cli_version'):
+        version = listing.get('version')
+        found = re.search(r'(\d+)\.(\d+)\.(\d+)', version) if isinstance(version, str) else None
+        minimum = tuple(map(int, profile['min_cli_version'].split('.')))
+        if not found or tuple(map(int, found.groups())) < minimum:
+            return 'model requires CLI ' + profile['min_cli_version'] + ' or later'
+    return None
 
 
 def role_tier(profile, mode):
@@ -913,6 +901,8 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
             checker = effective_profile(core, other, "review")  # auto/unknown never a Checker
         except RoutingError:
             return False
+        if profile_gate(checker, available.get(name, {})):
+            return False
         if (not other.get("enabled", True) or other["id"] in retry["failed_profiles"] or checker["family"] in exclude
             or checker["family"] == maker_family
             or available.get(name, {}).get("status") != "ready"
@@ -957,6 +947,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
         why = None
         if not p.get("enabled", True): why = "disabled"
         elif problem: why = problem  # auto/unknown family, reserved family, unsupported effort or fast
+        elif profile_gate(p, available.get(name, {})): why = profile_gate(p, available.get(name, {}))
         elif p["id"] in retry["failed_profiles"]: why = "failed profile excluded for this task"
         elif pin and p["id"] != pin: why = "different explicit profile"
         elif allowed and name not in allowed: why = "outside explicit panelists"
@@ -1072,7 +1063,7 @@ def resolve(core, config, answers, available, args, usage_snapshot=None, model_f
                 model_evidence=chosen['model_evidence'],
                 jev_task_fit=chosen['jev_task_fit'],
                 evidence_revision=research.get('revision'), evidence_sha256=research.get('sha256'),
-                evidence_status=research['status'], cheapest_eligible=cheapest['id'],
+                evidence_status=research['status'], evidence_warning=evidence.warning(research), cheapest_eligible=cheapest['id'],
                 objective=quality.objective(config), quality=chosen['quality'],
                 capabilities=chosen['capabilities'], required_capabilities=required,
                 recommendations=[recommendation(p) for p in ranked[:3]],
@@ -1216,7 +1207,7 @@ def setup(core, args):
             billing[name] = value
         if name in billing:
             for p in config["profiles"]:
-                if p["adapter"] == name:
+                if p["adapter"] == name and not p.get('billing_ack_required'):
                     p["billing_mode"] = billing[name]
     # Cursor routing is opt-in: the flag enables the shipped profiles non-interactively; a
     # guided run asks (default no) when it detects Cursor. Installing the CLI enables nothing.
@@ -1287,6 +1278,8 @@ def register(sub, core):
     p.add_argument("action", choices=["list", "refresh", "advise", "context", "add", "disable", "enable"], default="list", nargs="?")
     p.add_argument("--mode", choices=MODES, default="consult", help="role for models context")
     p.add_argument("--id", help="profile ID to add/update/disable")
+    p.add_argument('--acknowledge-usage-credits', action='store_true',
+                   help='explicitly allow this model profile to charge usage credits when enabled')
     p.add_argument("--cli", choices=sorted(FAMILIES), type=normalize_adapter, help="adapter (the legacy name cursor-agent means cursor)")
     p.add_argument("--model")
     p.add_argument("--tier", choices=TIERS)
@@ -1351,6 +1344,10 @@ def routed_adapter(core, decision):
         raise RoutingError("Routing decision names an unknown CLI")
     ad = copy.copy(base)
     ad.model = lambda: decision["model"]
+    if ad.name == 'antigravity':
+        problem = providers.agy_model_problem(decision['model'], decision.get('effort'))
+        if problem:
+            raise RoutingError(problem)
     effective = None
     if ad.name == "cursor":
         effective = cursor_dispatch_model(core, decision)
@@ -1375,14 +1372,11 @@ def routed_adapter(core, decision):
         if ad.name == "cursor":
             result = cursor_model_argv(result, effective, ctx)  # effort travels inside --model
         elif decision.get("effort"):
-            if ad.name == "codex":
-                result += ["-c", "model_reasoning_effort=" + decision["effort"]]
-            elif ad.name in EFFORT_FLAG_ADAPTERS:
-                result += ["--effort", decision["effort"]]
-            elif ad.name == 'muse':
-                result += ['--reasoning-effort', decision['effort']]
-            else:
-                raise RoutingError("No effort mapping for adapter " + str(ad.name))
+            try:
+                builder = getattr(ad, 'effort_args', None)
+                result += builder(decision['effort']) if builder else providers.effort_args(ad.name, decision['effort'])
+            except ValueError as exc:
+                raise RoutingError(str(exc)) from None
         return result
     ad.build_args = build_args
     return ad
@@ -1410,6 +1404,8 @@ def models_command(core, args):
         if existing is None:
             raise RoutingError("Unknown profile ID")
         existing["enabled"] = args.action == "enable"
+        if getattr(args, 'acknowledge_usage_credits', False):
+            existing['usage_credits_acknowledged'] = True
     else:
         profile = copy.deepcopy(existing or dict(id=args.id, enabled=True, billing_mode="unknown",
             cost_rank=1, evidence="user configured", effort=None))

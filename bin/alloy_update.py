@@ -1,4 +1,5 @@
 """Stable-release updates for official, clean Git installations (stdlib only)."""
+import alloy_git as git_policy
 import fcntl
 import json
 import os
@@ -14,9 +15,8 @@ STABLE = re.compile(r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')
 
 
 def git(root, *args):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
-    result = subprocess.run(['git', '-C', str(root), '-c', 'core.hooksPath=/dev/null',
-                             *args], capture_output=True, text=True, timeout=15,
+    env = git_policy.environment()
+    result = subprocess.run(git_policy.argv(root, *args), capture_output=True, text=True, timeout=15,
                             stdin=subprocess.DEVNULL, env=env)
     if result.returncode:
         raise ValueError('Git operation failed')

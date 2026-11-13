@@ -143,3 +143,19 @@ class UpdateTests(unittest.TestCase):
         self.git(self.remote, 'tag', '-f', 'v1.1.0')
         self.assertIn('UNAVAILABLE', self.check())
         self.assertIn('1.0.0', (self.root / 'bin/alloy').read_text())
+
+    def test_ambient_repository_overrides_cannot_redirect_update(self):
+        with patch.dict('os.environ', GIT_DIR=str(self.remote / '.git'),
+                        GIT_WORK_TREE=str(self.remote), GIT_INDEX_FILE=str(self.remote / '.git/index')):
+            self.assertEqual(Path(self.git(self.root, 'rev-parse', '--show-toplevel')).resolve(), self.root.resolve())
+            self.assertIn('UPDATED', self.check())
+        self.assertEqual(self.git(self.root, 'rev-parse', 'HEAD'), self.git(self.remote, 'rev-parse', 'v1.1.0'))
+
+    def test_update_git_disables_command_valued_fsmonitor(self):
+        marker = Path(self.tmp.name) / 'fsmonitor-ran'
+        script = Path(self.tmp.name) / 'fsmonitor'
+        script.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\n')
+        script.chmod(0o700)
+        self.git(self.root, 'config', 'core.fsmonitor', str(script))
+        self.git(self.root, 'status', '--porcelain')
+        self.assertFalse(marker.exists())

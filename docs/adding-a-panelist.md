@@ -1,10 +1,10 @@
 # Adding a panelist
 
 A panelist is one CLI Alloy can dispatch to. Adding one is a small, well-defined
-adapter in `bin/alloy`. The goal is that supporting a new CLI is a ~30-line pull
-request, not a reverse-engineering project.
+adapter in `bin/alloy`. Register metadata in `bin/alloy_providers.py`; keep invocation and permission
+behavior in its adapter. A verified boundary needs executable tests, not just an argv string.
 
-## The 5-function adapter contract
+## The adapter contract
 
 Every adapter answers five questions. They map to methods on the `Adapter` base
 class in `bin/alloy`:
@@ -26,7 +26,7 @@ class in `bin/alloy`:
    **after** the binary, including the CLI's read-only flag. The engine feeds the
    prompt on **stdin**, so most adapters need nothing for input. If your CLI reads
    its prompt from a **file** instead (e.g. Grok's `--prompt-file`), pass the
-   `prompt_path` argument. If it accepts neither (agy and Cursor), set
+   `prompt_path` argument. AGY 1.3.4+ instead uses framed stream-json stdin. For staged-file CLIs (legacy agy and Cursor), set
    `stdin_from_prompt = False`, copy the prompt to an owner-only staged file, give
    the CLI read access to just that file, and put a short instruction with the
    file's path on argv. Whichever way, never put the prompt text in argv.
@@ -49,7 +49,7 @@ class in `bin/alloy`:
    override it. That is a separate fact from `read_only`, which only describes the
    role. See the Cursor example below.
 
-There is also an optional sixth hook: **`prepare_env(ctx)`**, returning env
+The environment hook is **`prepare_env(ctx)`**, returning env
 overrides for the child process. Use it when a CLI's only real safety control is
 its own config file — point `HOME` at an alloy-owned directory holding settings
 you generated, rather than mutating the user's dotfiles. `AntigravityAdapter` is
@@ -106,7 +106,9 @@ ADAPTERS = {
     "mytool": MyToolAdapter(),     # <-- add here
     "antigravity": AntigravityAdapter(),
 }
-DEFAULT_PANEL_ORDER = ["codex", "grok", "mytool"]   # if it should run by default
+
+# default_panel_names() includes ready non-experimental read-only adapters.
+# Routing additionally requires a reviewed CONTRACTS/FAMILIES entry in alloy_providers.py.
 ```
 
 ## Verify it
@@ -201,8 +203,8 @@ never enough.
 
 Read-only panel support does not automatically grant managed-write support.
 `bin/alloy_execution.py` explicitly supports write modes for Codex, Claude, Grok,
-Antigravity and Cursor (each has its own branch; an unknown adapter is refused
-rather than inheriting another's permissions), checks the installed help flags,
+Antigravity and Cursor (each implements `maker_args`; the base method refuses
+unknown writers), checks the installed help flags,
 and uses per-dispatch adapter copies. Adding a new CLI requires a reviewed write policy and mock lifecycle
 coverage; do not route unsupported CLIs into a writable worktree by default.
 
@@ -241,3 +243,13 @@ Capability claims belong to the exact model, effort, CLI version and tool
 mapping. Adding a read-only adapter does not certify its managed writer, image
 generator, browser or quota source. Cover the new transport with fake CLIs,
 including oversized output, errors, cancellation and late terminal records.
+
+Shared contracts define probe flags, effort argv, managed-writer eligibility and
+native-session support. Implement `maker_args(argv, ctx)` only with a reviewed
+write policy; routing must not infer write permissions from read-only support.
+Use `output_error` for failed terminal envelopes even when the exit status is zero,
+`failure_kind` for diagnostics, and `provider_meta` for observed model/mode receipts.
+`alloy_streams.select` bounds JSONL records and keeps terminal results after long
+logs; `alloy_git` supplies the common environment/argv policy for parent Git calls.
+Cover protocol versions, web on/off, conflicting pins, failure envelopes, noisy
+output and unchanged user billing with mock CLIs before enabling a provider.

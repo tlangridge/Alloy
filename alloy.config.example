@@ -8,7 +8,7 @@
 # Which adapters form the panel (comma-separated, in order).
 # LEAVE UNSET to use the default: the COMPLETE SET of available models -- every
 # verified read-only CLI that is installed + authenticated (codex, grok,
-# antigravity/Gemini on agy >= 1.1, a fresh `claude` instance, and `cursor` on
+# antigravity/Gemini on agy >= 1.1, a fresh `claude` instance, Muse, and `cursor` on
 # macOS once its OS sandbox self-test passes). Set this only to pin a narrower/
 # cheaper panel. `llm` is read-only but experimental (opt-in); opencode (and an
 # agy older than 1.1) have no real read-only mode and are skipped unless
@@ -41,7 +41,7 @@ ALLOY_MAX_CHARS=200000
 ALLOY_MAX_PROMPT_BYTES=4000000
 
 # Web research: panelists may search the web (codex tools.web_search; grok and
-# claude search the web in plan mode). On by default; set to 0 to disable (codex).
+# Claude uses explicit read/search tools). On by default; set to 0 to disable web tools.
 ALLOY_WEB=1
 
 # Repo access (ON by default): read-only panelists run in your real working tree
@@ -63,11 +63,14 @@ ALLOY_WEB=1
 
 # Optional model overrides (leave unset to use each CLI's default model).
 # ALLOY_CODEX_MODEL=gpt-6.1-sol
-# ALLOY_ANTIGRAVITY_MODEL=gemini-3.1-pro-high  # unset -> gemini-3.6-flash-high; `agy models` lists the rest
-# ALLOY_ANTIGRAVITY_EFFORT=high        # agy reasoning effort (low|medium|high)
-# ALLOY_ANTIGRAVITY_HOME=run           # throwaway agy HOME per run instead of the shared alloy-owned one
-# ALLOY_GROK_MODEL=grok-4.5            # unset -> grok's default, now grok-4.6
-# ALLOY_CLAUDE_MODEL=opus              # alias (opus/sonnet/fable) or a full id
+# ALLOY_ANTIGRAVITY_MODEL=gemini-4-carbon-high  # unset -> gemini-4-argon-high; verify account IDs with `agy models`
+# ALLOY_ANTIGRAVITY_EFFORT=high        # match model suffix; Hydrogen also supports xhigh; unset for Orchestrator
+# ALLOY_ANTIGRAVITY_HOME=run           # private agy HOME per run; default homes are keyed by read grants
+# ALLOY_GROK_MODEL=grok-4.7            # explicit model pin
+# ALLOY_CLAUDE_MODEL=claude-fable-5-2  # may charge usage credits; explicit opt-in only
+# ALLOY_CLAUDE_EFFORT=high
+# ALLOY_GROK_EFFORT=high
+# ALLOY_CONFIG=/absolute/path/config  # optional alternative user config file
 
 # Cursor (`cursor`; the executable is `cursor-agent`). Log in with
 # `cursor-agent login`. Every Cursor call names one explicit model; `auto` and
