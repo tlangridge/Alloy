@@ -361,7 +361,7 @@ Profiles beyond the card limit remain eligible through deterministic policy.
 
 One independent Noul question per card assesses supported task fit. This adds
 questions and input tokens but no second network round trip. These are advisory
-judgments, not measured task success probabilities. Fits at or above .75 promote
+judgments, not measured task success probabilities. In cost-first routing, fits at or above .75 promote
 task preference; at or below .25 remove it; intermediate or absent answers retain
 the dated prior. Thresholds require offline/live evaluation on representative
 work before any claim of improved accuracy. Malformed probabilities fail closed.
@@ -465,3 +465,7 @@ calibration or rewrites policy from outcome records.
 Native model aliases retain the native adapter's family. Explicit known model
 prefixes can identify another provider family, but opaque identities on a
 multi-family adapter cannot establish independent review and are refused.
+
+New Fable 5.2 profiles require explicit usage-credit acknowledgement or configured
+metered prices; bulk CLI billing settings do not fill them. Carbon profiles
+require a fresh authoritative account listing. See the [setup runbook](../references/routing.md#new-model-availability-and-billing).

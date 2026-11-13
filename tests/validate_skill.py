@@ -6,6 +6,8 @@ description is scoped (not so broad it hijacks every task), and that the safety-
 critical standing rules are present in the body.
 """
 import os
+import ast
+import json
 from pathlib import Path
 import re
 import sys
@@ -20,6 +22,20 @@ def fail(msg):
 
 
 def main():
+    version = (Path(REPO) / 'VERSION').read_text().strip()
+    source = ast.parse((Path(REPO) / 'bin/alloy').read_text())
+    declared = next((n.value.value for n in source.body if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == 'ALLOY_VERSION' for t in n.targets)
+                     and isinstance(n.value, ast.Constant)), None)
+    latest = re.search(r'^## \[([^\]]+)\]', (Path(REPO) / 'CHANGELOG.md').read_text(), re.MULTILINE)
+    if version != declared or latest is None or latest.group(1) != version:
+        fail('VERSION, CLI version and latest changelog heading must agree')
+    defaults = json.loads((Path(REPO) / 'data/routing-defaults.json').read_text())
+    for profile in defaults['profiles']:
+        if profile.get('billing_ack_required') and (profile.get('enabled') or profile.get('billing_mode') != 'unknown'):
+            fail('Usage-credit opt-in profiles must ship disabled with unknown billing')
+        if profile['model'].startswith('gemini-pro-orchestrator') and (profile.get('enabled') or profile.get('effort') is not None):
+            fail('Orchestrator must ship disabled with fixed effort')
     with open(SKILL, encoding="utf-8") as f:
         text = f.read()
 
@@ -137,7 +153,7 @@ def main():
     if "you are the maker" in sbody.lower():
         fail("alias shim must not duplicate the Maker prompt / execute runbook")
 
-    print("OK: skill metadata, linked runbooks, standing rules, execute mode, and alias shim validated")
+    print("OK: release metadata, opt-in defaults, skill runbooks and operating constraints validated")
 
 
 if __name__ == "__main__":

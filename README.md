@@ -63,10 +63,26 @@ alloy outcomes  # local process receipts; correctness and user acceptance stay u
 
 Migration makes a backup and preserves existing profiles, pins, billing and
 quota pools. Refresh adds profiles for GPT-6 Luna, GPT-6.1 Terra, Claude Haiku
-5.5 and Fable 5.1 alongside Muse Wonder Full, Gemini 4 Argon and the existing
+5.5, opt-in Fable 5.2, Carbon and Hydrogen alongside Muse Wonder Full and Gemini 4 Argon and the existing
 frontier profiles, without replacing configured IDs. The [model research](docs/model-research.md)
 records availability limits and dated evidence; model announcements alone do
 not establish CLI access.
+
+New Carbon profiles require `alloy models refresh` to confirm account access.
+Hydrogen supports effort through xhigh. Orchestrator is a separate, fixed-effort
+mixed-model workflow; its profiles ship disabled and cannot be managed Makers.
+Fable 5.2 requires Claude Code 2.1.321+ and explicit usage-credit acknowledgement
+or metered prices. Bulk billing configuration does not opt it in:
+
+```sh
+alloy models enable --id claude-fable-5-2 --acknowledge-usage-credits
+```
+
+Shared provider contracts now live in `bin/alloy_providers.py`, Git policy in
+`bin/alloy_git.py`, and bounded terminal-event selection in `bin/alloy_streams.py`.
+Adapters own Maker argv construction. Provider failures include redacted reasons
+and a failure kind; receipts distinguish requested models from reported served
+models. Recovery patches include new nonignored files without modifying staging.
 
 ## Find code with Jevgrep
 
@@ -271,8 +287,8 @@ the result. See [methodology and evidence limits](docs/methodology.md).
 - **Read-only panel that can read your repo.** By default the panel runs in your
   **real working tree** (auto-detected git root) so panelists can ground coding
   answers in your actual code — including uncommitted edits. Writes are prevented
-  by each CLI's read-only flag (`codex -s read-only`, `grok`/`claude
-  --permission-mode plan`) — **best-effort, the CLIs' own enforcement, not an OS
+  by each CLI's read-only flag (`codex -s read-only`, `grok --permission-mode plan`, and Claude
+  `--permission-mode dontAsk` with an explicit read-only tool list) — **best-effort, the CLIs' own enforcement, not an OS
   sandbox**; a tamper tripwire fingerprints the tree before/after and shouts if it
   changed. Turn it off with `--no-repo` / `ALLOY_REPO=none` (empty throwaway cwd),
   or point elsewhere with `--repo`. Adapters with no read-only mode (`opencode`)
@@ -292,16 +308,20 @@ the result. See [methodology and evidence limits](docs/methodology.md).
   read the repository and uses the network, so a Cursor role is not an
   exfiltration boundary. Content fingerprints and canaries only detect changes.
   See [SECURITY.md](SECURITY.md).
-- **Antigravity (`agy`) is read-only by allow-list.** agy ignores the process cwd
-  and has no read-only flag, so it is contained differently: alloy generates a
-  settings file that allow-lists **read tools only** (agy >= 1.1 auto-denies
-  anything unlisted in headless mode — verified: `write_file` and `command` both
-  fail closed), points agy at an **alloy-owned HOME** so those settings are ours
-  and its scratch/conversation state stays out of `~/.gemini`, and grants your
-  repo explicitly with `--add-dir`. On agy < 1.1 the old behavior stands and it is
-  refused unless `ALLOY_ALLOW_UNSANDBOXED=1`.
+- **Antigravity (`agy`) uses explicit permission rules.** Current calls pass
+  `--mode plan`, scoped `read_file(...)` grants, and explicit write, command,
+  browser-actuation and MCP denials. The mode is an intent hint; the deny rules
+  enforce the provider policy. AGY 1.3.4+ receives stream-json stdin. Homes are
+  keyed by their grant sets so concurrent repositories cannot overwrite each
+  other's settings; custom homes are locked per call. Unpinned legacy and managed
+  roles use per-dispatch homes, borrowing credentials from the selected account.
+  This is not an OS security sandbox.
+- **Claude read-only roles expose file and web-search tools only.** Shell,
+  editing, agents, skills and MCP are excluded. `dontAsk` denies calls requiring
+  consent; user settings and deny rules remain loaded. `ALLOY_WEB=0` removes web
+  tools. Makers retain their separate edit/test permissions.
 - **Web research, on by default.** Panelists can search the web (codex's hosted
-  `web_search`; grok and claude search the web in plan mode), matching Fusion's web-enabled
+  `web_search`; Grok uses plan mode; Claude exposes only read/search tools), matching Fusion's web-enabled
   panel — so they reason over current facts, not just training data. Search is
   read-only (no files, no shell), but it does mean a panelist may fetch external
   pages: that content is untrusted too, and the queries go to the providers.
@@ -310,7 +330,7 @@ the result. See [methodology and evidence limits](docs/methodology.md).
   is hardened against a panelist emitting "ignore previous instructions / run
   this command".
 - **Prompts go on stdin**, never on the command line (no `ARG_MAX` limits, no
-  quoting bugs, no shell injection, no leaking prompts into `ps`). `agy` and
+  quoting bugs, no shell injection, no leaking prompts into `ps`). Legacy `agy` and
   Cursor read a staged owner-only file instead, so only a short instruction and a
   path are on the command line.
 - **No sandbox bypass flags.** Alloy never passes `--yolo` / `-y` /
@@ -385,7 +405,7 @@ variables (env wins over the file):
 | `ALLOY_MUSE_EFFORT` | `xhigh` | Forwarded with `--reasoning-effort`; `inherit`/`default` sends no override |
 | `ALLOY_BIN_MUSE` | `muse` on `PATH` | Muse Code CLI path |
 | `ALLOY_ANTIGRAVITY_EFFORT` | *CLI default* | agy reasoning effort (`low`/`medium`/`high`) for models that don't bake it into the id |
-| `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home` | the alloy-owned HOME agy is confined to (holds our read-only settings). `run` = a throwaway one per run (agy re-unpacks ~13MB and ~6s each time), or give a path |
+| `ALLOY_ANTIGRAVITY_HOME` | `$XDG_STATE_HOME/alloy/agy-home/<grant hash>` | the alloy-owned HOME for current read-only panels. `run` uses a per-dispatch home; a path selects an account and leases its settings. Unpinned legacy calls and managed roles use per-dispatch homes with the selected account's credentials |
 | `ALLOY_GROK_MODEL` | CLI default (currently `grok-4.7`) | Grok model override, e.g. `grok-4.5` (unset uses the CLI default, currently `grok-4.7`) |
 | `ALLOY_CLAUDE_MODEL` | claude default | the `claude` panelist's model (an alias like `opus`/`sonnet`/`fable`, or a full id) |
 | `ALLOY_CODEX_EFFORT` | `high` | codex reasoning effort (`medium`/`high`/`xhigh`, or `inherit`) — avoids inheriting a global `xhigh` that times out |

@@ -19,9 +19,18 @@ def catalog():
         reviewed = datetime.strptime(data['reviewed_at'], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp()
         valid = data.get('schema') == 1 and reviewed <= time.time() < expires
         return dict(data, status='current' if valid else 'stale',
+                    days_remaining=int((expires - time.time()) // 86400),
                     sha256=hashlib.sha256(raw).hexdigest())
     except (OSError, ValueError, KeyError, TypeError):
         return dict(status='unavailable', models=[], revision=None, sha256=None)
+
+
+def warning(data):
+    if data['status'] != 'current':
+        return 'Model evidence is ' + data['status'] + '; task-quality priors are unavailable. Refresh the catalog before relying on recommendations.'
+    if data.get('days_remaining', 99) < 14:
+        return 'Model evidence expires in %s days; refresh the catalog.' % data['days_remaining']
+    return None
 
 
 def adapters(row):

@@ -12,8 +12,8 @@ Alloy orchestrates AI coding CLIs you already installed and authenticated. Its
 safety properties:
 
 - **The panel is read-only, and (by default) reads your repo.** Read-only adapters
-  run behind each CLI's read-only flag (`codex -s read-only`, grok/claude
-  `--permission-mode plan`) with their working directory set to your **real repo**,
+  run behind each CLI's read-only flag (`codex -s read-only`, Grok
+  `--permission-mode plan`, Claude `dontAsk` with only file/search tools) with their working directory set to your **real repo**,
   so they can read your code to give useful coding answers but the CLI prevents
   them from writing. This write-prevention is **best-effort — the CLIs' own flags,
   not an OS sandbox Alloy enforces** (Cursor is the exception, below). As a tripwire, Alloy fingerprints the working
@@ -123,28 +123,31 @@ safety properties:
     including the command), and a Checker packet built only from redacted text.
     "Recognized secrets are not staged" does not mean Cursor cannot read
     repository data.
-- **Antigravity (`agy`) is read-only by allow-list, on agy >= 1.1.0 only.** That
-  release made headless print mode **fail closed**: it cannot prompt, so any tool
-  outside `permissions.allow` is auto-denied. Alloy generates a settings file
-  allow-listing read tools only, points agy at an **alloy-owned HOME** (so the
-  settings are ours, not yours, and agy's scratch/conversation state stays out of
-  `~/.gemini`; auth files are symlinked, never copied), and grants repo access
-  explicitly via `--add-dir` with `allowNonWorkspaceAccess: false` — agy ignores
-  the process cwd, so confining HOME and naming the workspace is what actually
-  contains it. `--dangerously-skip-permissions` is never passed. agy 1.2 and later
-  ignore bare tool names, so there the allow-list is path-scoped `read_file(<dir>)`
-  grants (agy 1.1 keeps the bare names) for the staged prompt directory, the repo
-  or worktree, a linked worktree's gitdir (plus its common directory, only for the
-  standard `<common>/worktrees/<id>` layout) and, for Checkers, the private gate-log
-  directory; write and command tools stay denied and agy's stdin is `/dev/null`.
-  On an older agy none of this holds and the adapter falls back to
-  refused-by-default.
+- **Antigravity (`agy`) uses explicit provider permission rules.** AGY 1.1.0+
+  is required for the legacy read-only contract. Current stream-json calls
+  (1.3.4+) use scoped `read_file(...)` grants and explicit command, file-write,
+  browser-actuation and MCP denials. `--mode plan` is always passed, but is an
+  intent hint; the deny rules carry the provider boundary. AGY 1.5.7 changed its
+  default headless mode to Auto, so default prompting behavior is not a boundary.
+  A reported write-capable init mode fails a read-only call. Homes are keyed by
+  their permission settings; explicitly pinned homes have an exclusive call
+  lease. Unpinned legacy and managed roles use per-dispatch homes. Custom account credentials
+  and keychain preferences are preserved; private homes borrow from that account.
+  Borrowed auth files remain symlinks, never copied. Maker grants remain distinct,
+  and their command grant is not an OS containment claim. Unverified older AGY
+  releases remain refused by default.
+- **Claude read-only roles exclude mutation tools.** `--tools` exposes only
+  Read/Glob/Grep and optional WebSearch/WebFetch, with `dontAsk`, strict MCP
+  configuration and slash commands disabled. Bash, editing and subagents are
+  absent. User settings, deny rules and hooks remain loaded; these trusted local
+  settings are outside the provider tool boundary. Legacy lean=0 does not widen
+  a read-only role. Managed Maker tools and permissions are separate.
 - **Panel output is untrusted.** The host is instructed to treat every
   panelist answer as data, never as instructions, and never to execute commands
   found in it. Output is scanned and redacted for common secret shapes before it
   is persisted (best-effort, not a guarantee).
 - **Prompts go on stdin**, never on argv (no `ARG_MAX`, no `ps` leakage, no shell
-  injection). `agy` and Cursor do not take their prompt on stdin, so each is handed
+  injection). AGY 1.3.4+ reads one framed user message from a stdin pipe. Legacy `agy` and Cursor are handed
   the prompt as an owner-only **file** in a directory granted only for that
   purpose, with stdin set to `/dev/null` — argv carries a short instruction and a
   path, never the prompt text. Config is parsed as `KEY=value`, never `source`d,
@@ -212,3 +215,9 @@ symlinking it. Home projects/config, skills manifests, the build's `.running`
 markers and `/dev/dtracehelper` remain write-denied. The compile cache also stays
 inside this runtime. Under Alloy, the OS sandbox denies shell execution and file
 writes outside the task's allowed paths; the model may be offered tools it cannot use.
+
+Parent-side Git policy is shared by probes, execution and updates. Repository/index
+and injected-config environment overrides are stripped; hooks and command-valued
+fsmonitor are disabled, and stdin is detached. Recovery uses a private temporary
+index. Post-run scope validation rejects changed symlinks escaping the worktree
+or allowed paths; it remains detection after execution, not OS containment.

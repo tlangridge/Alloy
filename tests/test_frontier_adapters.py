@@ -292,7 +292,7 @@ class MuseAdapterTests(FrontierCase):
 
     def test_no_terminal_record_or_no_output_is_empty_never_ok(self):
         # A stream that never reached its terminal record (crash, kill) keeps nothing,
-        # exactly as Claude's stream without a `result`: the shared empty classification.
+        # Muse's parser preserves the shared empty classification for this protocol.
         for mode in ("no_terminal", "empty"):
             with self.subTest(mode=mode):
                 st = self.dispatch(self.ad, FAKE_MUSE=mode, FAKE_BULK="3")
@@ -328,7 +328,7 @@ class ClaudeEffortTests(FrontierCase):
                 efforts, args = self.effort_args(ALLOY_CLAUDE_EFFORT=value, ALLOY_CLAUDE_MODEL="opus")
                 self.assertEqual(efforts, [value])            # no alias, no lowering, no case change
                 self.assertEqual(args[args.index("--model") + 1], "opus")
-                self.assertEqual(args[args.index("--permission-mode") + 1], "plan")
+                self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
 
     def test_unset_inherit_and_default_send_no_effort(self):
         for value in ("", "inherit", "default", "INHERIT"):
@@ -408,11 +408,11 @@ class AgyStreamTests(AgyCase):
         self.assertEqual(args[args.index("--model") + 1], "gemini-4-argon-high")
         self.assertTrue(self.ad.stream_input)
         self.assertFalse(self.ad.stdin_from_prompt)
-        with mock.patch.dict(os.environ, {"ALLOY_ANTIGRAVITY_EFFORT": "high",
+        with mock.patch.dict(os.environ, {"ALLOY_ANTIGRAVITY_EFFORT": "low",
                                           "ALLOY_ANTIGRAVITY_MODEL": "gemini-4-argon-low"}):
             args = self.ad.build_args(self.prompt, "", "consult", dict(ctx))
         self.assertEqual(args[args.index("--model") + 1], "gemini-4-argon-low")
-        self.assertEqual(args[args.index("--effort") + 1], "high")
+        self.assertEqual(args[args.index("--effort") + 1], "low")
 
     def test_stdin_payload_is_one_documented_user_message(self):
         line = self.ad.stdin_payload(self.prompt_text)
@@ -426,11 +426,11 @@ class AgyStreamTests(AgyCase):
         self.ad.build_args(self.prompt, "", "consult", ctx)
         perms = self.settings(ctx)["permissions"]
         self.assertEqual(perms["allow"], ["read_file(%s)" % self.repo, "read_url(*)"])
-        self.assertEqual(perms["deny"], ["command(*)", "write_file(*)", "execute_url(*)"])
+        self.assertEqual(perms["deny"], ["command(*)", "write_file(*)", "execute_url(*)", "mcp(*)"])
         with mock.patch.dict(os.environ, {"ALLOY_WEB": "0"}):
             perms = self.settings(ctx)["permissions"]
         self.assertEqual(perms["allow"], ["read_file(%s)" % self.repo])
-        self.assertEqual(perms["deny"], ["command(*)", "write_file(*)", "execute_url(*)", "read_url(*)"])
+        self.assertEqual(perms["deny"], ["command(*)", "write_file(*)", "execute_url(*)", "mcp(*)", "read_url(*)"])
         # Grants are canonical even when a caller hands over a non-canonical root.
         odd = {"agy_add_dirs": [os.path.join(self.repo, "..", "repo"), self.repo]}
         self.assertEqual(self.ad._settings(odd)["permissions"]["allow"][:-1], ["read_file(%s)" % self.repo])
@@ -476,7 +476,7 @@ class AgyStreamTests(AgyCase):
         self.assertNotIn("-p", seen["argv"])
         self.assertNotIn("line two", " ".join(st["command"]))
         stdout = self.read(st, "stdout_path")
-        self.assertEqual([json.loads(ln)["event"] for ln in stdout.strip().split("\n")], ["result"])
+        self.assertEqual([json.loads(ln)["event"] for ln in stdout.strip().split("\n")], ["init", "result"])
         with open(self.prompt, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), self.prompt_text)          # the run prompt is untouched
 
@@ -505,7 +505,7 @@ class AgyStreamTests(AgyCase):
         for mode in ("no_result", "empty"):
             with self.subTest(mode=mode):
                 st = self.dispatch(self.ad, FAKE_AGY=mode, FAKE_BULK="3")
-                self.assertEqual(st["status"], "empty")
+                self.assertEqual(st["status"], "error" if mode == "no_result" else "empty")
                 self.assertEqual(self.read(st, "result_path"), "")
 
 

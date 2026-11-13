@@ -1,51 +1,21 @@
 #!/usr/bin/env python3
-"""Alloy - a local, multi-CLI implementation of the "Fusion beats Frontier" idea.
+"""Alloy: opt-in local CLI routing, read-only panels and managed Maker/Checker work.
 
-Dispatches one prompt to every available AI-coding CLI panelist IN PARALLEL,
-strictly read-only, and captures each panelist's answer into a run directory
-with a machine-readable manifest. The host model (Claude, running the /alloy
-skill) then reads the manifest, JUDGES the answers (compares, does not merge:
-consensus / contradictions / unique insights / blind spots), and SYNTHESIZES a
-final answer that surfaces disagreement rather than hiding it.
+Provider invocations use stdin, framed stdin or private prompt files, never prompt
+text in argv. Read-only adapters inspect the live repository; unsupported writable
+adapters receive disposable copies only with explicit operator opt-in. Managed
+Makers use owned worktrees and independent, revision-bound Checkers.
 
-This script is the mechanical, hardened core. It does no judging or synthesis
-itself. The PANELISTS never touch your repository: they run read-only, in a
-throwaway temporary working directory, with stdin fed from the prompt file. The
-dispatcher writes run artifacts (the prompt, redacted CLI output, a manifest) to
-a run directory OUTSIDE your repo by default (under XDG_STATE_HOME; override with
-ALLOY_RUN_ROOT).
-
-Design notes (why it is the way it is):
-  * Python stdlib only, Python 3.8+. macOS / Linux (Windows via WSL).
-  * Prompts are passed on STDIN, never on argv -- avoids ARG_MAX limits,
-    quoting/escaping breakage, leaking prompts into `ps`, and shell injection.
-    agy >= 1.3.4 reads it as one stream-json message from a stdin pipe; older
-    agy ignores stdin in headless mode and gets the prompt as a FILE it is
-    pointed at, as do CLIs with a prompt-file flag. It never lands on argv.
-  * Each panelist runs in its own process group (start_new_session=True) so a
-    hung CLI and all of its children can be killed as a group on timeout.
-  * Panelist stdin is the prompt file (not a TTY); a CLI that wants to prompt
-    for interactive auth hits EOF and fails fast instead of hanging the panel.
-  * Output is captured to per-panelist files, capped at a codepoint-safe limit,
-    and scanned for secrets before being persisted, so a runaway or leaky
-    panelist cannot blow up the host's context or commit a key.
-  * Configuration is read from environment variables and an optional
-    KEY=value file at ~/.config/alloy/config. It NEVER `source`s a file from
-    the project directory (that would let a hostile repo run code).
-
-No API keys live here and Alloy sends no telemetry. Opt-in Jev routing sends
-the task to TypeSafe/OpenRouter; optional Jevgrep search sends eligible source to
-its saved provider. Panel prompts go to the selected CLI providers. Explicit
-model refreshes query CLI providers. Cached subscription reads use native provider
-usage interfaces; ALLOY_USAGE=off disables them. The optional git update check can be
-disabled with ALLOY_NO_UPDATE_CHECK=1.
+Provider contracts, Git policy and bounded event selection live in companion
+stdlib modules. Cursor's validated OS gateway remains in this module. Artifacts
+stay outside repositories by default. File-backed provider output is redacted at
+completion; Cursor output is captured in bounded memory before persistence.
 """
 
 from __future__ import annotations
 
 import argparse
 import atexit
-import collections
 import hashlib
 import io
 import json
@@ -82,6 +52,9 @@ if __name__ == '__main__':
         if len(sys.argv) > 1 and sys.argv[1] == 'update-check':
             print('UPDATE_SKIPPED (installation lock unavailable)')
             sys.exit(0)
+import alloy_providers as providers
+import alloy_git as git_policy
+import alloy_streams as streams
 import alloy_routing as routing
 import alloy_execution as execution
 import alloy_search as search
@@ -91,7 +64,7 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX
     pwd = None
 
-ALLOY_VERSION = "0.14.2"
+ALLOY_VERSION = "0.15.0"
 MANIFEST_SCHEMA = 1
 
 DEFAULT_TIMEOUT_S = 300            # generous; a panel runs in parallel, so this is the max, not the sum
@@ -137,14 +110,15 @@ def _chmod(path: str, mode: int) -> None:
         pass
 
 
-def write_atomic(path: str, data: str) -> None:
+def write_atomic(path: str, data: "str | bytes") -> None:
     # mkstemp, not a fixed path+".tmp": two alloy processes sharing a state dir
     # (panel + doctor, or two concurrent panels) would otherwise open the SAME
     # tmp file and the loser writes through the renamed inode -- a torn file.
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".",
                                prefix=os.path.basename(path) + ".")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        binary = isinstance(data, bytes)
+        with os.fdopen(fd, 'wb' if binary else 'w', **({} if binary else dict(encoding='utf-8'))) as f:
             f.write(data)
         _chmod(tmp, 0o600)  # run artifacts may hold prompt/diff text; replace preserves mode
         os.replace(tmp, path)
@@ -267,51 +241,12 @@ _JSONL_FINAL_LINES = 5
 
 
 def jsonl_event(line: str, key: str) -> "dict | None":
-    """One JSONL line as an event (a JSON object whose `key` is a string), else None."""
-    line = line.strip()
-    if not line.startswith("{"):
-        return None
-    try:
-        obj = json.loads(line)
-    except ValueError:
-        return None
-    return obj if isinstance(obj, dict) and isinstance(obj.get(key), str) else None
+    return streams.event(line, key)
 
 
 def read_jsonl_final(path: str, cap: int, key: str, final) -> str:
-    """The newest lines of a JSONL sidecar whose event satisfies final(event), read
-    line by line in bounded memory; a longer line is skipped, never buffered. A file
-    whose first line is not an event is read exactly as before (its first `cap` bytes)."""
-    limit = cap * 4 + 4096      # one JSON-escaped line
-    kept: "collections.deque[str]" = collections.deque(maxlen=_JSONL_FINAL_LINES)
-    first = True
-    try:
-        with open(path, "rb") as f:
-            while True:
-                raw = f.readline(limit + 1)
-                if not raw:
-                    break
-                oversized = len(raw) > limit and not raw.endswith(b"\n")
-                while oversized:            # drop the rest of the line without holding it
-                    rest = f.readline(1 << 16)
-                    oversized = bool(rest) and not rest.endswith(b"\n")
-                if len(raw) > limit and first:
-                    return read_text(path, cap)     # the first line cannot be classified
-                if len(raw) > limit or not raw.strip():
-                    continue
-                line = raw.decode("utf-8", errors="replace")
-                event = jsonl_event(line, key)
-                if first:
-                    if event is None:
-                        return read_text(path, cap)
-                    first = False
-                if event is not None and final(event):
-                    kept.append(line if line.endswith("\n") else line + "\n")
-    except FileNotFoundError:
-        return ""
-    if first:
-        return read_text(path, cap)
-    return "".join(kept)
+    return streams.select(path, cap, lambda line: jsonl_event(line, key),
+                          [(final, _JSONL_FINAL_LINES, None)], read_text)
 
 
 def redact_jsonl(text: str) -> "tuple[str, int]":
@@ -531,6 +466,10 @@ def setting_int(key: str, default: int) -> int:
 # observe_output() (a side channel over the finished stdout, e.g. Claude quota).
 # See docs/adding-a-panelist.md for the full contract and a template.
 # --------------------------------------------------------------------------- #
+class AdapterError(Exception):
+    """A provider invocation cannot meet its requested contract."""
+
+
 class Adapter:
     name = "base"
     bin = "base"
@@ -644,6 +583,15 @@ class Adapter:
         # None = the CLI keeps no resumable session alloy can name.
         return None
 
+    def effort_args(self, effort) -> list:
+        return providers.effort_args(self.name, effort)
+
+    def maker_args(self, argv, ctx):
+        raise AdapterError('No managed write adapter for ' + self.name)
+
+    def failure_kind(self, reason) -> str:
+        return providers.failure_kind(reason)
+
     def capabilities(self) -> dict:
         return {
             "read_only": self.read_only,
@@ -704,6 +652,10 @@ class CodexAdapter(Adapter):
     name = "codex"
     bin = "codex"
     read_only = True
+
+    def maker_args(self, argv, ctx):
+        argv[argv.index('-s') + 1] = 'workspace-write'
+        return argv + ['-c', 'approval_policy="never"']
     install_hint = "npm install -g @openai/codex"
     auth_hint = "codex login   (or set CODEX_API_KEY / OPENAI_API_KEY)"
 
@@ -820,7 +772,7 @@ _AGY_ARGV_PROMPT = (
 
 
 class AntigravityAdapter(Adapter):
-    # Google's Antigravity CLI (the `agy` binary), running Gemini 3.x.
+    # Google's Antigravity CLI (`agy`), with versioned permission and input contracts.
     #
     # Read-only is ENFORCED BY THE CLI, not by asking the model nicely, via three
     # layers -- all verified live against agy 1.1.7:
@@ -863,12 +815,14 @@ class AntigravityAdapter(Adapter):
     # command/write/execute_url always denied. A run succeeds only on a final
     # `result` event with status SUCCESS; exit 0 with ERROR is a failure.
     name = "antigravity"
+    kill_group_on_exit = True
     bin = "agy"
     stdin_from_prompt = False   # agy treats a file on stdin as a denied read_file target
     install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
     auth_hint = "run `agy` once to sign in   (or set ANTIGRAVITY_API_KEY)"
 
-    # Latest Gemini family seat at high effort. agy also lists Claude / GPT-OSS;
+    # Unpinned default remains Argon high. Carbon/Hydrogen are explicit catalog choices.
+    # agy also lists Claude / GPT-OSS;
     # those would duplicate the claude / codex seats. `agy models` lists the rest.
     # An installed agy older than 1.3.4 keeps the seat it was verified with.
     # Override: ALLOY_ANTIGRAVITY_MODEL.
@@ -948,7 +902,9 @@ class AntigravityAdapter(Adapter):
             return True
         # agy keeps its CLI state under ~/.gemini/antigravity-cli but shares the
         # Google OAuth login with ~/.gemini/oauth_creds.json.
-        gdir = os.path.join(os.path.expanduser("~"), ".gemini")
+        pinned = (setting('ALLOY_ANTIGRAVITY_HOME') or '').strip()
+        auth_home = pinned if pinned and pinned.lower() != 'run' else '~'
+        gdir = os.path.join(os.path.expanduser(auth_home), ".gemini")
         for name in ("oauth_creds.json", "google_accounts.json"):
             if os.path.isfile(os.path.join(gdir, name)):
                 return True
@@ -976,8 +932,14 @@ class AntigravityAdapter(Adapter):
     def model(self) -> "str | None":
         ver = self._agy_version()
         legacy = ver is not None and ver < _AGY_STREAM_INPUT
-        return setting("ALLOY_ANTIGRAVITY_MODEL",
-                       self.legacy_default_model if legacy else self.default_model)
+        pinned = setting('ALLOY_ANTIGRAVITY_MODEL')
+        if pinned:
+            return pinned
+        model = self.legacy_default_model if legacy else self.default_model
+        effort = (setting('ALLOY_ANTIGRAVITY_EFFORT') or '').lower()
+        if effort in ('low', 'medium', 'high'):
+            model = model.rsplit('-', 1)[0] + '-' + effort
+        return model
 
     # -- sandbox: an isolated HOME holding our settings.json ------------------ #
     # Files symlinked (not copied) from the real ~/.gemini so agy finds the
@@ -1041,6 +1003,8 @@ class AntigravityAdapter(Adapter):
                 "</dict>\n</plist>\n")
 
     def _settings(self, ctx: "dict | None" = None) -> dict:
+        if getattr(self, 'managed_write', False):
+            return self._maker_settings(ctx)
         dirs = ["read_file(%s)" % d for d in (ctx or {}).get("agy_add_dirs", [])]
         ver = self._agy_version()
         if ver and ver >= _AGY_STREAM_INPUT:
@@ -1049,12 +1013,13 @@ class AntigravityAdapter(Adapter):
             roots = list(dict.fromkeys(os.path.realpath(d)
                                        for d in (ctx or {}).get("agy_add_dirs", [])))
             allow = ["read_file(%s)" % d for d in roots]
-            deny = list(self.WRITE_GRANTS) + ["execute_url(*)"]
+            deny = list(self.WRITE_GRANTS) + ["execute_url(*)", "mcp(*)"]
             if web_enabled():
                 allow.append("read_url(*)")
             else:
                 deny.append("read_url(*)")
             return {
+                "allowNonWorkspaceAccess": False,
                 "enableTerminalSandbox": True,
                 "showTips": False,
                 "showFeedbackSurvey": False,
@@ -1086,18 +1051,68 @@ class AntigravityAdapter(Adapter):
             "permissions": {"allow": list(self.READ_TOOLS) + dirs, "deny": deny},
         }
 
+    def _maker_settings(self, ctx):
+        if self._agy_version() and self._agy_version() >= _AGY_STREAM_INPUT:
+            repo = os.path.realpath(ctx['repo'])
+            roots = list(dict.fromkeys([repo] + ctx.get('agy_add_dirs', [])))
+            deny = ['execute_url(*)', 'mcp(*)']
+            for option in ('--git-dir', '--git-common-dir'):
+                target = execution.git(repo, 'rev-parse', '--path-format=absolute', option)
+                deny.append('write_file(%s)' % target)
+            if not web_enabled():
+                deny.append('read_url(*)')
+            return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
+                permissions=dict(allow=['read_file(%s)' % d for d in roots] +
+                    ['write_file(%s)' % repo, 'command(*)'] + (['read_url(*)'] if web_enabled() else []), deny=deny))
+        return dict(allowNonWorkspaceAccess=False, enableTerminalSandbox=True,
+                    permissions=dict(allow=list(self.READ_TOOLS) + list(self.WRITE_TOOLS) + ['command(*)'], deny=[]))
+
+    def maker_args(self, argv, ctx):
+        if self.model() in providers.AGY_WORKFLOWS:
+            raise AdapterError('Orchestrator has no certified managed Maker contract')
+        argv[argv.index('--mode') + 1] = 'accept-edits'
+        if '-p' in argv:
+            staged = os.path.join(ctx['pdir'], 'prompt_in', 'prompt.md')
+            prompt = staged if os.path.exists(staged) else ctx['prompt_path']
+            argv[argv.index('-p') + 1] = ('Read ' + json.dumps(prompt) + ' for your task. Implement it ONLY in ' +
+                json.dumps(ctx['repo']) + '. Run the specified tests there. Do not edit any other checkout or Git metadata.')
+        return argv + ['--sandbox']
+
+    def open_scope(self, pdir, repo, managed_worktree, run_root=None):
+        raw = (setting('ALLOY_ANTIGRAVITY_HOME') or '').strip()
+        if (managed_worktree or hasattr(self, 'execution_permissions')
+                or not raw or raw.lower() == 'run'):
+            return None
+        # A custom HOME may select a distinct account: preserve it and serialize
+        # its settings instead of silently redirecting it to a different home.
+        import fcntl
+        home = os.path.abspath(os.path.expanduser(raw))
+        try:
+            os.makedirs(home, exist_ok=True)
+            fd = os.open(os.path.join(home, '.alloy-home.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            lease = os.fdopen(fd, 'a')
+        except OSError as exc:
+            raise AdapterError('Cannot lease pinned Antigravity HOME: ' + str(exc)) from None
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lease.close()
+            raise AdapterBusyError('Pinned Antigravity HOME is in use by another Alloy call; retry after it completes')
+        return lease
+
     def _home(self, ctx: "dict | None") -> "str | None":
         """Build (idempotently) the HOME agy is confined to, and return it.
 
-        Alloy-owned and shared across runs by default (under XDG_STATE_HOME, next
-        to the run dirs): agy unpacks ~13MB of language-server binaries and caches
-        into its HOME on first use, so a fresh one per run would re-pay that in
-        disk and startup latency every time. Sharing is safe -- a print-mode call
-        never resumes prior state unless asked (`--continue`/`--conversation`,
-        which this adapter never passes). Set ALLOY_ANTIGRAVITY_HOME=run for a
-        throwaway one inside the run dir, or to a path of your own."""
+        Default homes are shared only by identical permission settings. Different
+        repository grants never rewrite one settings file. Explicit custom homes
+        retain their path/account and are leased by open_scope. Managed Makers and
+        ALLOY_ANTIGRAVITY_HOME=run use private per-dispatch homes."""
         pdir = (ctx or {}).get("pdir")
-        raw = "run" if (ctx or {}).get("managed_worktree") else (setting("ALLOY_ANTIGRAVITY_HOME") or "").strip()
+        pinned = (setting("ALLOY_ANTIGRAVITY_HOME") or "").strip()
+        custom = pinned if pinned and pinned.lower() != 'run' else None
+        private = ((ctx or {}).get('managed_worktree') or hasattr(self, 'execution_permissions')
+                   or (pdir and not self.stream_input and not custom))
+        raw = 'run' if private else pinned
         if raw and raw.lower() != "run":
             home = os.path.abspath(os.path.expanduser(raw))
         elif raw.lower() == "run":
@@ -1105,16 +1120,21 @@ class AntigravityAdapter(Adapter):
                 return None
             home = os.path.join(pdir, "agy_home")
         else:
-            home = os.path.join(os.path.dirname(default_run_root()), "agy-home")
+            identity = hashlib.sha256(json.dumps(self._settings(ctx), sort_keys=True).encode()).hexdigest()[:24]
+            home = os.path.join(os.path.dirname(default_run_root()), "agy-home", identity)
         cli = os.path.join(home, ".gemini", "antigravity-cli")
         os.makedirs(cli, exist_ok=True)
         _chmod(home, 0o700)
-        real = os.path.join(os.path.expanduser("~"), ".gemini")
-        for rel in self._AUTH_LINKS:
+        auth_home = os.path.abspath(os.path.expanduser(custom or '~'))
+        real = os.path.join(auth_home, ".gemini")
+        # Explicit homes own their credentials and keychain preferences. Private
+        # dispatch homes borrow from that selected account, never the default one.
+        borrow_auth = os.path.realpath(home) != os.path.realpath(auth_home)
+        for rel in self._AUTH_LINKS if borrow_auth else ():
             src, dst = os.path.join(real, rel), os.path.join(home, ".gemini", rel)
             if os.path.exists(src):
                 _relink(src, dst)  # API-key auth still works; is_authed gated this
-        if sys.platform == "darwin":
+        if sys.platform == "darwin" and borrow_auth:
             # 0.1.11 dev builds briefly symlinked ~/Library/Keychains here;
             # remove any such link before the generated-plist config below.
             legacy = os.path.join(home, "Library", "Keychains")
@@ -1123,7 +1143,13 @@ class AntigravityAdapter(Adapter):
                     os.unlink(legacy)
                 except OSError:
                     pass
-            plist = self._keychain_plist()
+            selected_prefs = os.path.join(auth_home, 'Library', 'Preferences', 'com.apple.security.plist')
+            plist = None if custom else self._keychain_plist()
+            if custom and os.path.isfile(selected_prefs):
+                with open(selected_prefs, 'rb') as selected:
+                    plist = selected.read((1 << 20) + 1)
+                if len(plist) > 1 << 20:
+                    raise AdapterError('Selected keychain preferences exceed the 1 MiB copy limit')
             if plist is not None:
                 prefs = os.path.join(home, "Library", "Preferences")
                 try:
@@ -1137,7 +1163,10 @@ class AntigravityAdapter(Adapter):
         return home
 
     def prepare_env(self, ctx: "dict | None" = None) -> dict:
-        home = self._home(ctx)
+        try:
+            home = self._home(ctx)
+        except OSError as exc:
+            raise AdapterError('Cannot prepare Antigravity HOME: ' + str(exc)) from None
         return {"HOME": home} if home else {}
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
@@ -1204,9 +1233,13 @@ class AntigravityAdapter(Adapter):
         if timeout_s:
             args += ["--print-timeout", f"{int(timeout_s)}s"]
         m = self.model()
+        effort = setting("ALLOY_ANTIGRAVITY_EFFORT")
+        effort = None if not effort or effort.lower() in ('inherit', 'default') else effort.lower()
+        problem = providers.agy_model_problem(m or '', effort)
+        if problem:
+            raise AdapterError(problem)
         if m:
             args += ["--model", m]
-        effort = setting("ALLOY_ANTIGRAVITY_EFFORT")   # low|medium|high
         if effort:
             args += ["--effort", effort]
         return args
@@ -1245,8 +1278,17 @@ class AntigravityAdapter(Adapter):
     def read_stdout(self, path: str, cap: int) -> str:
         if not self.stream_input:
             return super().read_stdout(path, cap)
-        # The `result` event arrives after every delta and tool event: keep only it.
-        return read_jsonl_final(path, cap, "event", lambda e: e["event"] == "result")
+        # Preserve the bounded init receipt and late terminal records, not tool output.
+        return streams.select(path, cap, lambda line: jsonl_event(line, 'event'),
+            [(lambda e: e['event'] == 'init', 1, 65536),
+             (lambda e: e['event'] == 'result', _JSONL_FINAL_LINES, None)], read_text)
+
+    def provider_meta(self, stdout):
+        events = [jsonl_event(line, 'event') for line in stdout.split('\n')]
+        init = next((e for e in events if e and e['event'] == 'init'), {})
+        init = init['init'] if isinstance(init.get('init'), dict) else init
+        return {'provider_init': {k: init[k] for k in ('model', 'permission_mode')
+                                  if isinstance(init.get(k), str)}}
 
     def redact_stdout(self, stdout: str) -> "tuple[str, int]":
         return redact_jsonl(stdout) if self.stream_input else redact_secrets(stdout)
@@ -1254,6 +1296,9 @@ class AntigravityAdapter(Adapter):
     def output_error(self, stdout: str, stderr: str) -> "str | None":
         if not self.stream_input:
             return None
+        mode = self.provider_meta(stdout).get('provider_init', {}).get('permission_mode')
+        if self.read_only and mode in ('auto', 'accept-edits', 'acceptEdits', 'bypassPermissions', 'turbo'):
+            return 'Antigravity reported a write-capable permission mode in a read-only role: ' + mode
         # A stream-json session can warn and continue after a turn error, exiting 0.
         if re.search(r"^AGY_ERROR:", stderr, re.M):
             return "agy reported AGY_ERROR"
@@ -1372,14 +1417,11 @@ class OpenCodeAdapter(Adapter):
 # and /usr/bin/sw_vers. Under Alloy, the OS sandbox denies shell execution and file
 # writes outside the task's allowed paths; the model may be offered tools it cannot use.
 # Every role uses file credentials and denies security execution and keychain access.
-ADAPTER_ALIASES = {"cursor-agent": "cursor"}
+ADAPTER_ALIASES = providers.ALIASES
 
 
 def normalize_adapter_name(name: str) -> str:
-    """Map a legacy adapter name to its canonical one. Applied at config/input
-    boundaries only; run artifacts always carry the canonical name."""
-    name = (name or "").strip()
-    return ADAPTER_ALIASES.get(name, name)
+    return providers.normalize(name)
 
 
 def _first_setting(*keys: str) -> "str | None":
@@ -1515,7 +1557,11 @@ _MACH_PROBE_PY = (
     "sys.exit(%d+n)\n") % (CURSOR_MACH_EXIT_ERROR, CURSOR_MACH_EXIT_BASE)
 
 
-class CursorBoundaryError(Exception):
+class AdapterBusyError(AdapterError):
+    """A temporary local resource conflict; no provider call was started."""
+
+
+class CursorBoundaryError(AdapterError):
     """A fail-closed refusal: the boundary, argv, path or fingerprint is not
     provably safe. The message never carries argv values or output."""
 
@@ -1603,22 +1649,18 @@ def _run_bounded(argv: "list[str]", env: dict, cwd: "str | None" = None,
 
 
 # -- Git: one hardened helper for every parent-side Git call ---------------- #
-_GIT_STRIPPED_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                     "GIT_EXTERNAL_DIFF", "GIT_CONFIG_COUNT")
+_GIT_STRIPPED_ENV = git_policy.STRIPPED_ENV
 
 
 def _git_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _GIT_STRIPPED_ENV}
-    env["GIT_CONFIG_NOSYSTEM"] = "1"
-    env["GIT_OPTIONAL_LOCKS"] = "0"
-    return env
+    return git_policy.environment()
 
 
 _GIT_OUTPUT_CAP = 4_000_000
 
 
 def _git_argv(root: str, args: "tuple[str, ...]") -> "list[str]":
-    return ["git", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args]
+    return git_policy.argv(root, *args)
 
 
 def _git(root: str, *args: str, timeout: int = 20, cap: "int | None" = None):
@@ -1928,28 +1970,7 @@ def cursor_split_model(model: str) -> "tuple[str, dict]":
 
 
 def cursor_model_family(model: "str | None") -> "str | None":
-    """Family of a Cursor model ID after removing bracket overrides and a trailing
-    `-fast`; None for `auto`, an empty ID or any unknown prefix (ineligible)."""
-    try:
-        base, _fields = cursor_split_model(model or "")
-    except CursorBoundaryError:
-        return None
-    base = base.strip()
-    if base.endswith("-fast"):
-        base = base[:-len("-fast")]
-    if not base or base == "auto" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", base):
-        return None
-    if base.startswith("claude-"):
-        return "anthropic"
-    if base.startswith("gpt-") or base == "codex" or base.startswith("codex-"):
-        return "openai"
-    if base.startswith("gemini-"):
-        return "google"
-    if base.startswith(("grok-", "cursor-grok-")):
-        return "xai"
-    if base.startswith("composer-"):
-        return "cursor"
-    return None
+    return providers.cursor_family(model)
 
 
 def cursor_validate_model(model: "str | None") -> str:
@@ -3227,6 +3248,11 @@ _CURSOR_LOGGED_OUT_RE = re.compile(r"not logged in|not authenticated|logged out|
 
 
 class CursorAgentAdapter(Adapter):
+    def maker_args(self, argv, ctx):
+        # build_args already emitted the closed Maker grammar. Every later
+        # rewrite still passes through the final OS sandbox gateway.
+        return argv
+
     # Cursor's CLI as a panelist, Checker and (managed) Maker. Canonical public
     # name `cursor`; the executable stays `cursor-agent`. Nothing here is trusted
     # to keep it read-only: --mode ask is defence in depth, and the OS write
@@ -3484,8 +3510,16 @@ class CursorAgentAdapter(Adapter):
 
 
 class GrokAdapter(Adapter):
-    # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` (like claude's
-    # plan mode); headless single-turn reads the prompt from a real file via
+    def maker_args(self, argv, ctx):
+        argv[argv.index('--permission-mode') + 1] = 'acceptEdits'
+        while '--tools' in argv:
+            index = argv.index('--tools')
+            del argv[index:index + 2]
+        return argv + ['--allow', 'Bash', '--allow', 'Edit', '--allow', 'Write',
+                       '--tools', 'Read,Glob,Grep,Edit,Write,Bash']
+
+    # xAI Grok CLI (`grok`). Read-only via `--permission-mode plan` and its
+    # restricted toolset; headless single-turn reads the prompt from a file via
     # `--prompt-file` (it does NOT accept '-'/stdin) and prints the answer to
     # stdout (`--output-format plain`). Verified live. The CLI default model is
     # now `grok-4.7` (xAI's current flagship; 500k context, agent/coding focus),
@@ -3618,13 +3652,15 @@ def claude_quota_recording_enabled() -> bool:
 
 
 class ClaudeAdapter(Adapter):
-    # A FRESH `claude` (Claude Code) instance run headless and read-only
-    # (`--permission-mode plan`; `-p` skips the trust dialog). Including it makes
-    # the panel a complete set of available models and adds the "self-fusion" lift
-    # when the host is also Claude (a model fused with itself still helps). The
-    # host that JUDGES -- Claude, Grok, or another -- is a *separate* instance and
-    # must treat this panelist as one anonymized voice. If the host is Claude, it
-    # must not favor this seat for being Claude (see SKILL.md rule 6).
+    def maker_args(self, argv, ctx):
+        argv[argv.index('--permission-mode') + 1] = 'acceptEdits'
+        while '--tools' in argv:
+            index = argv.index('--tools')
+            del argv[index:index + 2]
+        return argv + ['--allowedTools', 'Bash', '--tools', 'Read,Glob,Grep,Edit,Write,Bash']
+
+    # Read-only calls expose file/search tools only, without plan-workflow,
+    # shell, editor, agent, skill or MCP tools. Maker tools are explicit below.
     name = "claude"
     bin = "claude"
     read_only = True
@@ -3649,17 +3685,21 @@ class ClaudeAdapter(Adapter):
 
     def build_args(self, prompt_path: str, last_message_path: str, mode: str,
                    ctx: "dict | None" = None) -> "list[str]":
-        # `-p` reads the prompt from stdin; `plan` is read-only. Never use
+        # `-p` reads the prompt from stdin. Only read/search tools are exposed. Never use
         # --dangerously-skip-permissions / --permission-mode bypassPermissions.
         # stream-json (which requires --verbose in print mode) instead of `text`, so the
         # run's own rate_limit_event can feed Claude quota (observe_output). The answer is
         # the stream's final `result` event -- the same text `text` mode prints (parse).
-        args = ["-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose"]
+        tools = 'Read,Glob,Grep' + (',WebSearch,WebFetch' if web_enabled() else '')
+        args = ["-p", "--permission-mode", "dontAsk", "--tools", tools,
+                "--output-format", "stream-json", "--verbose"]
+        if self.read_only and web_enabled():
+            args += ['--allowedTools', 'WebSearch,WebFetch']
         # Trim optional tools/skills, but retain every settings source: user
         # settings may contain deny rules, hooks and credential configuration.
-        # ALLOY_CLAUDE_LEAN=0 restores the full tool/skill context.
-        if (setting("ALLOY_CLAUDE_LEAN", "1") or "1").lower() not in ("0", "false", "no", "off"):
-            args += ["--strict-mcp-config", "--disable-slash-commands"]
+        # MCP, skills and agent delegation can expose tools outside this read-only
+        # set. Keep them off in every read-only role, even with legacy lean=0.
+        args += ["--strict-mcp-config", "--disable-slash-commands"]
         # Name the session up front (resumable after a timeout kill; see grok).
         # claude -p has no headless deadline flag to mirror alloy's timeout.
         sid = (ctx or {}).get("session_id")
@@ -3667,11 +3707,42 @@ class ClaudeAdapter(Adapter):
             args += ["--session-id", sid]
         m = self.model()
         if m:
+            if m == 'claude-fable-5-2':
+                version = re.search(r'(\d+)\.(\d+)\.(\d+)', self.cli_version())
+                if not version or tuple(map(int, version.groups())) < (2, 1, 321):
+                    raise AdapterError('Fable 5.2 requires Claude Code 2.1.321 or later')
             args += ["--model", m]
         effort = self.effort()
         if effort:
             args += ["--effort", effort]
         return args
+
+    @staticmethod
+    def _result(stdout):
+        obj = json_object(stdout)
+        if obj is not None and obj.get('type') == 'result':
+            return obj
+        events = claude_stream_events(stdout)
+        results = [e for e in events or [] if e.get('type') == 'result']
+        return results[-1] if results else None
+
+    def output_error(self, stdout, stderr):
+        result = self._result(stdout)
+        if result is None:
+            return 'Claude stream has no result event' if claude_stream_events(stdout) else None
+        if result.get('is_error') or str(result.get('subtype', '')).startswith('error'):
+            reason = result.get('errors') or result.get('result') or result.get('subtype')
+            return 'Claude result failed: ' + strip_ansi(str(reason))[:1500]
+        return None
+
+    def provider_meta(self, stdout):
+        result = self._result(stdout) or {}
+        models = result.get('modelUsage')
+        return {'served_models': sorted(k for k in models if isinstance(k, str))} if isinstance(models, dict) else {}
+
+    def permission_overrides(self, write):
+        return {} if write else dict(command_execution='denied', tool_policy='explicit_read_only_tools',
+                                     subagents=False, mcp=False)
 
     def resume_hint(self, ctx: "dict | None" = None) -> "str | None":
         sid = (ctx or {}).get("session_id")
@@ -3679,7 +3750,8 @@ class ClaudeAdapter(Adapter):
             return None
         # claude keys saved sessions by project dir: resume from the same cwd.
         return (f"cd '{(ctx or {}).get('cwd') or '.'}' && claude -p --resume {sid} "
-                "--permission-mode plan --output-format text < <continue prompt file>")
+                "--permission-mode dontAsk --tools Read,Glob,Grep --strict-mcp-config "
+                "--disable-slash-commands --output-format text < <continue prompt file>")
 
     def usage_args(self, argv: "list[str]") -> "list[str]":
         # ALLOY_CAPTURE_USAGE reads the single JSON result object. With --verbose that
@@ -3722,40 +3794,9 @@ class ClaudeAdapter(Adapter):
         files) and the answer is its LAST line, so a head cap would silently cut it off.
         Read the sidecar line by line in bounded memory and keep only the `result` and
         `rate_limit_event` lines. Anything that is not a stream is read exactly as before."""
-        limit = cap * 4 + 4096      # one JSON-escaped line; longer is skipped, never buffered
-        rates: "collections.deque[str]" = collections.deque(maxlen=_CLAUDE_MAX_RATE_LINES)
-        results: "collections.deque[str]" = collections.deque(maxlen=5)
-        first = True
-        try:
-            with open(path, "rb") as f:
-                while True:
-                    raw = f.readline(limit + 1)
-                    if not raw:
-                        break
-                    oversized = len(raw) > limit and not raw.endswith(b"\n")
-                    while oversized:            # drop the rest of the line without holding it
-                        rest = f.readline(1 << 16)
-                        oversized = bool(rest) and not rest.endswith(b"\n")
-                    if len(raw) > limit and first:
-                        return read_text(path, cap)     # the first line cannot be classified
-                    if len(raw) > limit or not raw.strip():
-                        continue
-                    line = raw.decode("utf-8", errors="replace")
-                    event = _claude_event(line)
-                    if first:
-                        if event is None:
-                            return read_text(path, cap)     # plain text: exactly as before
-                        first = False
-                    kind = event.get("type") if event else None
-                    if kind == "result":
-                        results.append(line if line.endswith("\n") else line + "\n")
-                    elif kind == "rate_limit_event" and len(raw) <= _CLAUDE_MAX_RATE_LINE:
-                        rates.append(line if line.endswith("\n") else line + "\n")
-        except FileNotFoundError:
-            return ""
-        if first:                                   # no event at all (empty or blank): as before
-            return read_text(path, cap)
-        return "".join(rates) + "".join(results)
+        return streams.select(path, cap, _claude_event,
+            [(lambda e: e.get('type') == 'rate_limit_event', _CLAUDE_MAX_RATE_LINES, _CLAUDE_MAX_RATE_LINE),
+             (lambda e: e.get('type') == 'result', _JSONL_FINAL_LINES, None)], read_text)
 
     def redact_stdout(self, stdout: str) -> "tuple[str, int]":
         if claude_stream_events(stdout) is None:
@@ -4097,7 +4138,8 @@ def _safe_size(path: str) -> int:
 # auth in its answer is never matched.
 _AUTH_FAIL_RE = re.compile(
     r"AuthorizationRequired|Unauthorized|\bAuth\(|not (?:logged in|authenticated)"
-    r"|\b401\b|invalid[_ ]?(?:api[_ ]?key|token|credentials)",
+    r"|\b401\b|invalid[_ ]?(?:api[_ ]?key|token|credentials)"
+    r"|authentication expired|token expired|login required|\bUNAUTHENTICATED\b",
     re.I,
 )
 
@@ -4125,8 +4167,8 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     scope, refusal = None, None
     try:
         scope = adapter.open_scope(pdir, repo, managed_worktree, run_root)
-    except CursorBoundaryError as exc:
-        refusal = str(exc)
+    except AdapterError as exc:
+        refusal = exc
     try:
         result = _run_panelist(adapter, prompt_path, pdir, timeout_s, max_chars, mode,
                                repo, managed_worktree, run_root, scope, refusal)
@@ -4137,7 +4179,7 @@ def run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     if scope is not None:
         try:
             scope.close()
-        except CursorBoundaryError as exc:
+        except AdapterError as exc:
             # The process group is already dead when _run_panelist returns.
             # Cleanup uncertainty is itself a failed dispatch, and the retained
             # live-runtime entry gives atexit one final best-effort attempt.
@@ -4185,7 +4227,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
                 argv = [binp] + adapter.usage_args(argv[1:])
             # The spawn gateway sees the FINAL argv, after every rewrite above.
             argv = adapter.wrap_argv(argv, ctx)
-        except CursorBoundaryError as exc:
+        except AdapterError as exc:
             refusal, argv = str(exc), [binp]
 
     # quiet down ANSI / interactive behaviour in the child
@@ -4203,7 +4245,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     if not refusal:
         try:
             env.update(adapter.prepare_env(ctx))
-        except CursorBoundaryError as exc:
+        except AdapterError as exc:
             refusal = str(exc)
     # Router credentials and both Cursor API overrides never reach any child,
     # whether they came from the environment or the config file.
@@ -4225,6 +4267,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         "cwd": cwd,
         "repo_access": repo_access,   # none | real (live repo) | copy (disposable)
         "status": "error",
+        "failure_kind": None,
         "exit_code": None,
         "timed_out": False,
         "stalled": False,
@@ -4248,12 +4291,14 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     if not refusal:
         try:
             adapter.before_spawn(ctx)
-        except CursorBoundaryError as exc:
+        except AdapterError as exc:
             refusal = str(exc)
     if refusal:
         # Nothing was spawned: the boundary, argv, path or fingerprint was not
         # provably safe. Fail closed, visibly.
-        status["error"] = "refused: " + refusal
+        busy = isinstance(refusal, AdapterBusyError)
+        status["error"] = ("busy: " if busy else "refused: ") + str(refusal)
+        status["failure_kind"] = "busy" if busy else "refused"
         log(f"{adapter.name}: REFUSED ({refusal})")
         return _write_status(status_path, status)
 
@@ -4377,6 +4422,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         status["exit_code"] = proc.returncode
     except FileNotFoundError:
         status["status"] = "not_installed"
+        status["failure_kind"] = "not_installed"
         status["error"] = f"binary not found: {argv[0]}"
         status["duration_ms"] = int((time.monotonic() - start) * 1000)
         log(f"{adapter.name}: NOT INSTALLED")
@@ -4397,7 +4443,6 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         last_text = ""
         status["output_bytes"] = drains[0].total + drains[1].total
         status["usage"] = adapter.usage(stdout_text)
-        status.update(adapter.provider_meta(stdout_text))
     else:
         status["output_bytes"] = _safe_size(out_path) + _safe_size(err_path)
         if capture:
@@ -4415,6 +4460,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
     red_out, c_out = adapter.redact_stdout(stdout_text)
     red_err, c_err = redact_secrets(stderr_text)
     red_last, c_last = redact_secrets(last_text)
+    status.update(adapter.provider_meta(red_out))
     write_atomic(out_path, red_out)
     write_atomic(err_path, red_err)
     if os.path.exists(last_path):
@@ -4446,8 +4492,7 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         # Lane 3 consumes this per-path handoff before gates/commit and compares
         # it with the managed task's allow_paths.
         status["changed_paths"] = ctx["cursor_changed_paths"]
-    provider_error = None if status["timed_out"] or status["stalled"] or status["exit_code"] != 0 \
-        else adapter.output_error(stdout_text, stderr_text)
+    provider_error = None if status["timed_out"] or status["stalled"] else adapter.output_error(stdout_text, stderr_text)
 
     if tripwire:
         status["status"] = "error"
@@ -4456,34 +4501,37 @@ def _run_panelist(adapter: Adapter, prompt_path: str, pdir: str,
         status["status"] = "timeout"
     elif status["stalled"]:
         status["status"] = "stalled"
-    elif status["exit_code"] != 0:
-        status["status"] = "error"
+    elif status["exit_code"] != 0 or provider_error or not result.strip():
         tail = "\n".join(strip_ansi(red_err).strip().splitlines()[-10:])[-2000:]
-        if adapter.name == "cursor":
-            status["error"] = "Cursor exited %s%s" % (status["exit_code"], ": " + tail if tail else " (no stderr)")
-    elif provider_error:
-        # The provider itself reported failure (or produced no parseable answer):
-        # exit status zero and a non-empty `result` cannot turn that into success.
-        status["status"] = "error"
-        status["error"] = provider_error
-    elif result.strip() == "":
-        # An empty answer is NOT always "nothing to say": a CLI whose token
-        # expired mid-call can exit 0 with empty stdout. Distinguish that
-        # recoverable auth case (-> retryable, self-heals) from a genuine blank,
-        # and never bury either silently -- surface the stderr tail as the
-        # reason. Use the redacted, de-ANSI'd stderr so nothing secret leaks.
-        clean_err = strip_ansi(red_err).strip()
-        m = _AUTH_FAIL_RE.search(clean_err)
-        if m:
-            status["status"] = "auth"
-            status["error"] = m.group(0)
+        reason = ': '.join(str(value) for value in (provider_error, tail) if value)
+        reason = reason or (result[:1000] if status["exit_code"] != 0 else '')
+        reason = redact_secrets(strip_ansi(str(reason)))[0][:2000]
+        # Only empty results with provider diagnostics can authorize an auth retry.
+        # Codex also streams generated prose to stderr, even in JSON mode, so that
+        # channel alone never authorizes a second paid Codex call.
+        auth = _AUTH_FAIL_RE.search(red_err) if not result.strip() and adapter.name != 'codex' else None
+        if auth:
+            if auth.group(0) not in reason:
+                reason = (auth.group(0) + ': ' + reason)[:2000]
+            status["status"], status["failure_kind"], status["error"] = "auth", "auth", reason or auth.group(0)
+        elif status["exit_code"] != 0:
+            status["status"] = "error"
+            label = "Cursor" if adapter.name == "cursor" else adapter.name
+            status["error"] = "%s exited %s%s" % (label, status["exit_code"], ": " + reason if reason else " (no stderr)")
+            status["failure_kind"] = adapter.failure_kind(reason) if reason else "crash"
+        elif provider_error:
+            status["status"], status["error"] = "error", reason
+            status["failure_kind"] = adapter.failure_kind(reason)
         else:
-            status["status"] = "empty"
-            tail = [ln for ln in clean_err.splitlines() if ln.strip()][-3:]
-            if tail:
-                status["error"] = " / ".join(tail)[:500]
+            status["status"], status["error"] = "empty", reason or None
+            status["failure_kind"] = adapter.failure_kind(reason) if reason else "empty"
     else:
         status["status"] = "ok"
+
+    if status["status"] in ("timeout", "stalled"):
+        status["failure_kind"] = status["status"]
+    elif tripwire:
+        status["failure_kind"] = "boundary_violation"
 
     # A killed panelist's CLI session usually survives on disk: hand the host a
     # ready-to-run resume command so the work already done is not thrown away.
@@ -4846,12 +4894,15 @@ def _doctor_rows() -> "list[dict]":
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     rows = _doctor_rows()
+    evidence_warning = routing.evidence.warning(routing.evidence.catalog())
     if args.json:
         print(json.dumps({"alloy_version": ALLOY_VERSION,
-                          "panelists": rows}, indent=2))
+                          "panelists": rows, "evidence_warning": evidence_warning}, indent=2))
         return 0
 
     print(f"Alloy {ALLOY_VERSION}  -  panelist status\n")
+    if evidence_warning:
+        print('  warning: ' + evidence_warning + '\n')
     ready_default = 0
     for r in rows:
         usable = r["status"] == "ready" and r["read_only"]

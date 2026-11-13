@@ -240,6 +240,12 @@ def archive(core, task):
     with patch_path.open('wb') as f:
         f.write(patch)
     patch_path.chmod(0o600)
+    if not valid:
+        # A surviving branch omits uncommitted work from a lost checkout. Keep
+        # the last saved snapshot separately, with the task's freshness warning.
+        saved_patch = e.taskdir(core, task['id']) / 'changes.patch'
+        if saved_patch.is_file():
+            (directory / 'saved-changes.patch').write_bytes(saved_patch.read_bytes())
     bundle = False
     if valid and e.git(wt, 'rev-list', task['base'] + '..HEAD'):
         e.git(wt, 'bundle', 'create', str(directory / 'commits.bundle'), 'HEAD', '^' + task['base'])

@@ -1,4 +1,5 @@
 """Routing invariants: no paid inference, private temporary configuration."""
+from datetime import datetime, timezone
 import argparse
 import contextlib
 import copy
@@ -42,6 +43,10 @@ class RoutingCase(unittest.TestCase):
     """Shared scaffolding: a private routing home, the shipped starter config, and no way to
     reach a real Cursor process (the OS boundary and every metadata call are mocked)."""
     def setUp(self):
+        reviewed = json.loads(r.evidence.PATH.read_text())['reviewed_at']
+        clock = datetime.strptime(reviewed, '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp() + 86400
+        evidence_clock = patch.object(r.evidence, 'time', types.SimpleNamespace(time=lambda: clock))
+        evidence_clock.start(); self.addCleanup(evidence_clock.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = patch.dict(os.environ, {'ALLOY_ROUTING_HOME': self.tmp.name, 'ALLOY_CONFIG': '/dev/null', 'ALLOY_USAGE': 'off'})
@@ -64,7 +69,7 @@ class RoutingCase(unittest.TestCase):
         # Quality-first defaults and invariants have their own test module.
         self.config['policy']['objective'] = 'cost_first'
         for p in self.config['profiles']:
-            if p['id'] in ('claude-sonnet-5-5', 'claude-opus-5-5-xhigh',
+            if p.get('min_cli_version') or p['id'] in ('claude-sonnet-5-5', 'claude-opus-5-5-xhigh',
                             'antigravity-argon-medium', 'antigravity-argon-high', 'muse-wonder-full',
                             'codex-small-gpt-6-luna', 'codex-medium-gpt-6-1-terra',
                             'claude-small-haiku-5-5', 'claude-fable-5-1'):

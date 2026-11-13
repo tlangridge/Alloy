@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "revision": "2026-11-09-maintenance",
-  "reviewed_at": "2026-11-09",
+  "revision": "2026-11-13-provider-contracts",
+  "reviewed_at": "2026-11-13",
   "expires_at": "2026-12-16",
   "models": [
     {
@@ -824,6 +824,198 @@
       "input_modalities": [
         "text",
         "image"
+      ]
+    },
+    {
+      "models": [
+        "claude-fable-5-2"
+      ],
+      "family": "anthropic",
+      "adapters": [
+        "claude"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "architecture",
+        "debugging",
+        "review",
+        "research",
+        "implementation"
+      ],
+      "strengths": "Sustained complex engineering and technical reasoning.",
+      "limitations": "Requires Claude Code 2.1.321+, account access and explicit usage-credit billing opt-in. Provider fallback and helper models must be observed separately. Fast mode has different pricing; no local success-rate claim.",
+      "sources": [
+        "https://www.anthropic.com/claude-fable-and-mythos-5-2",
+        "https://code.claude.com/docs/en/model-config"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-11-13",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "api_pricing": {
+        "input_per_million": 8,
+        "output_per_million": 40,
+        "currency": "USD",
+        "reviewed_at": "2026-11-13",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "notes": "Direct standard API reference; tools, cache writes, US inference, fast mode and subscription credit rules are separate.",
+        "cached_input_per_million": 0.2
+      }
+    },
+    {
+      "models": [
+        "gemini-4-carbon-low",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-high"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "architecture",
+        "debugging",
+        "review",
+        "research"
+      ],
+      "strengths": "Long-horizon software engineering and complex technical investigation.",
+      "limitations": "Plan-gated in AGY; require a fresh account listing. More token-intensive than routine models; Orchestrator evidence is separate. No local task outcomes measured.",
+      "sources": [
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/",
+        "https://antigravity.google/docs/models"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-11-13",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "api_pricing": {
+        "input_per_million": 4,
+        "output_per_million": 20,
+        "currency": "USD",
+        "reviewed_at": "2026-11-13",
+        "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/",
+        "notes": "Post-introductory standard API list rates. Introductory rates are $2 input/$10 output per million through November 30, 2026. No subscription consumption inference."
+      }
+    },
+    {
+      "models": [
+        "gemini-4-hydrogen-low",
+        "gemini-4-hydrogen-medium",
+        "gemini-4-hydrogen-high",
+        "gemini-4-hydrogen-xhigh"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "medium",
+      "preferred_tasks": [
+        "implementation",
+        "testing",
+        "frontend",
+        "documentation"
+      ],
+      "strengths": "Fast everyday coding and agentic execution with four effort levels.",
+      "limitations": "Medium-tier prior; higher effort alone does not certify demanding independent review. Actual CLI tools and account availability remain separate.",
+      "sources": [
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+        "https://antigravity.google/docs/models"
+      ],
+      "applicable_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-11-13",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "api_pricing": {
+        "input_per_million": 1.5,
+        "output_per_million": 7.5,
+        "currency": "USD",
+        "reviewed_at": "2026-11-13",
+        "source": "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+        "notes": "Direct standard API text reference across the documented 1M context. Tools, caching and subscriptions are separate."
+      }
+    },
+    {
+      "models": [
+        "gemini-pro-orchestrator"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "architecture",
+        "research"
+      ],
+      "strengths": "Mixed-model Carbon planning with Hydrogen implementation.",
+      "limitations": "Fixed configuration, no effort override. Disabled pending explicit account choice; no certified managed Maker. Not independent from other Google models and cannot borrow single-model evidence.",
+      "sources": [
+        "https://antigravity.google/docs/models"
+      ],
+      "applicable_efforts": [
+        null
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-11-13",
+      "input_modalities": [
+        "text"
+      ]
+    },
+    {
+      "models": [
+        "gemini-pro-orchestrator-argon"
+      ],
+      "family": "google",
+      "adapters": [
+        "antigravity"
+      ],
+      "fast": false,
+      "suggested_tier": "large",
+      "preferred_tasks": [
+        "architecture",
+        "research"
+      ],
+      "strengths": "Mixed-model Argon planning with Hydrogen implementation.",
+      "limitations": "Fixed configuration, no effort override. Disabled pending explicit account choice; no certified managed Maker. Not independent from other Google models and cannot borrow single-model evidence.",
+      "sources": [
+        "https://antigravity.google/docs/models"
+      ],
+      "applicable_efforts": [
+        null
+      ],
+      "basis": "editorial prior from published evidence; not calibrated success probability",
+      "reviewed_at": "2026-11-13",
+      "input_modalities": [
+        "text"
       ]
     }
   ]

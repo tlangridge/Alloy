@@ -1,6 +1,7 @@
 """Quality policy: ordinal task priors, never invented success probabilities."""
 import copy
 import time
+import alloy_providers as providers
 
 CAPABILITIES = ('repo_read', 'managed_write', 'run_tests', 'web', 'image_input',
                 'image_generation', 'browser', 'session_resume')
@@ -51,7 +52,7 @@ def capabilities(core, profile, available, mode='consult'):
     result = {key: 'unverified' for key in CAPABILITIES}
     if ready and ad is not None:
         result['repo_read'] = 'verified' if ad.read_only else 'unverified'
-        if mode == 'make' and name in core.execution.MANAGED_WRITERS:
+        if mode == 'make' and name in core.execution.MANAGED_WRITERS and profile['model'] not in providers.AGY_WORKFLOWS:
             result.update(managed_write='verified', run_tests='verified')
         if available.get(name, {}).get('image_flag') == '--image':
             assessed = core.routing.evidence.assessment(core.routing.evidence_view(profile), core.routing.evidence.catalog())

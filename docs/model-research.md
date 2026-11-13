@@ -1,4 +1,4 @@
-# Model evidence — November 9, 2026
+# Model evidence — November 13, 2026
 
 Alloy optimizes for work quality and fewer revisions. Model cards provide
 conservative task priors, not probabilities of finishing a local task. Tool
@@ -16,10 +16,13 @@ model pins, billing and quota settings remain preserved by refresh.
 
 Current OpenAI documentation and Codex model metadata support GPT-6 Luna and
 GPT-6.1 Terra alongside Sol and Astra. Anthropic documents Haiku 5.5 in Claude
-Code and Fable 5.1 for demanding work. Gemini 4 Carbon's October 28 announcement
-restricts rollout to selected defenders/partners before general product access;
-no Carbon AGY ID is assumed or shipped. Grok 4.7, Argon and Muse Wonder remain
-relevant existing options rather than being replaced for novelty.
+Code and Fable 5.2 for demanding work. Carbon became generally available on
+November 10 and Hydrogen launched November 12. AGY 1.5.8 account discovery
+confirmed Carbon low/medium/high, Hydrogen low/medium/high/xhigh and both
+Orchestrator IDs. Account listings vary; Argon remains available on the inspected
+account and its existing profiles are retained. New Carbon profiles require a
+fresh authoritative listing. Orchestrator is a fixed mixed-model workflow, not
+an adjustable Carbon effort tier or a certified managed Maker.
 
 Meta's November 6 update describes specialized models for its Muse and Meta AI
 products without supplying new Muse Code IDs in that announcement. Keep the
@@ -45,10 +48,13 @@ panel rounds need a specific evidence gap instead of a fixed ceremony.
 | GPT-6 Luna in Codex | Focused coding, tests and repeatable transformations | Small tier; no promotion to difficult independent reviews. Starter effort is high following Codex guidance, not the API's medium default. |
 | GPT-6.1 Terra in Codex | Scoped coding, concise writing and image understanding | Medium tier; Codex CLI 0.159.0+ is documented. Vision still needs verified CLI attachment support. |
 | Claude Haiku 5.5 | Bounded coding and short tool tasks | Small tier; start medium, consider high for verification. Low can skip checks in long prompts. Prompts above 100K have different API rates. |
-| Claude Fable 5.1 | Demanding reasoning and long-running engineering | Disabled pending explicit account/billing opt-in. Noninteractive Claude Code can charge usage credits without prompting. High starter effort; no local outcome advantage is claimed. |
+| Claude Fable 5.2 (5.1 retained) | Demanding reasoning and long-running engineering | Disabled pending explicit account/billing opt-in. Noninteractive Claude Code can charge usage credits without prompting. High starter effort; no local outcome advantage is claimed. |
 | GPT-6.1 Sol in Codex | Implementation, debugging, software architecture, orchestration | API image tools do not prove image generation in a CLI session. Medium Maker and high review are defaults, not universal optima. |
 | Claude Opus 5.5 | Software design, debugging, UI design, independent review | Published results use several efforts and harnesses. The xhigh profile is an option for difficult work, not an automatic override of pins. |
 | Claude Sonnet 5.5 | Implementation, debugging and routine verification | A distinct model identity with separate evidence; preserve existing Sonnet profiles. |
+| Gemini 4 Carbon in AGY | Long-horizon coding, architecture and investigation | Plan-gated; new profiles require a fresh exact account listing. Low/medium/high only. |
+| Gemini 4 Hydrogen in AGY | Everyday coding and fast execution | Medium-tier prior; xhigh does not establish large-review qualification. |
+| Orchestrator in AGY | Carbon/Argon planning with Hydrogen execution | Fixed effort, disabled by default, no managed Maker contract. No single-model evidence transfer. |
 | Gemini 4 Argon in AGY | Complex coding, reasoning, orchestration and multimodal understanding | The documented efforts are low, medium and high. Output is text; no native image generation. API context limits do not establish AGY limits. |
 | Meta Muse Wonder Full in Muse Code | Software engineering, reasoning, UI design and cross-family review | Full subscription access differs from Wonder API access. Published max-effort scores do not establish xhigh performance. Managed writes remain uncertified. |
 | GPT-6 Astra in Codex | Difficult reasoning, scientific and terminal workflows | An available specialist candidate, not a universal winner. |
@@ -71,7 +77,10 @@ Primary sources:
 - [Claude Code model and effort settings](https://code.claude.com/docs/en/model-config)
 - [Claude API effort guidance](https://platform.claude.com/docs/en/build-with-claude/effort)
 - [Gemini 4 Argon specification](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon)
-- [Carbon announcement and restricted rollout](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-carbon/)
+- [Carbon availability and introductory pricing](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/)
+- [Hydrogen model and pricing](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/)
+- [AGY models and fixed Orchestrator workflow](https://antigravity.google/docs/models)
+- [Fable 5.2 release](https://www.anthropic.com/claude-fable-and-mythos-5-2)
 - [Grok models](https://docs.x.ai/developers/models)
 - [Argon in Antigravity](https://www.antigravity.google/blog/gemini-4-argon-in-google-antigravity)
 - [AGY headless protocol](https://www.antigravity.google/docs/cli/headless/)
@@ -103,6 +112,19 @@ modes, regional processing and other provider charges are additional. See the
 exact model sources above before configuring metered prices. Older catalog
 prices retain their earlier review dates; the catalog revision does not reverify
 them or extend its existing expiry.
+
+## API additions reviewed November 13
+
+Fable 5.2 standard API text rates are $8 input, $40 output and $0.20 cached input
+per million tokens; fast mode is $16/$80. Hydrogen is $1.50/$7.50 across its
+documented 1M context. Carbon introductory rates are $2/$10 through November 30;
+its catalog card conservatively records the subsequent $4/$20 list rates and
+states the introductory exception. These are API references, not CLI bills.
+
+Older row and price review dates remain unchanged. The catalog still expires on
+December 16; this update does not extend unverified evidence. Doctor and routing
+expose stale or near-expiry warnings. Tests use an isolated catalog clock so
+expiry behavior is tested without making the whole suite depend on today's date.
 
 ## Policy interpretation
 

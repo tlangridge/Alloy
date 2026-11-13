@@ -94,3 +94,8 @@ as a separate profile for difficult work; Muse Wonder Full xhigh adds a Meta
 consult/Checker family. Use the required effort for the task, rather than
 universally forcing every worker to maximum. An effort conflict with an AGY
 Gemini suffix fails validation instead of silently changing the model.
+
+AGY Hydrogen supports low, medium, high and xhigh; Carbon and Argon support low,
+medium and high. Suffix-encoded effort and explicit effort must agree. Orchestrator
+uses a fixed mixed-model configuration and rejects effort overrides. New Fable 5.2
+profiles are separate from 5.1, require Claude Code 2.1.321+, and stay opt-in.
